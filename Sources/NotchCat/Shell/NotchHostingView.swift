@@ -10,15 +10,24 @@ final class NotchHostingView<Content: View>: NSHostingView<Content> {
 
     private var trackingArea: NSTrackingArea?
 
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
+    /// The rect (in this view's own coordinate space) that currently counts
+    /// as "hovering the shell". The caller sets this explicitly and updates
+    /// it instantly on each mode change — see `NotchShellController` — rather
+    /// than letting it track the view's bounds or an animating content size,
+    /// which is what previously caused expand/collapse flicker.
+    var hoverRect: CGRect = .zero {
+        didSet {
+            guard hoverRect != oldValue else { return }
+            rebuildTrackingArea()
+        }
+    }
+
+    private func rebuildTrackingArea() {
         if let trackingArea {
             removeTrackingArea(trackingArea)
         }
-        // .inVisibleRect keeps the tracking rect in sync as the view resizes
-        // during the Hidden/Expanded/Preview frame animation.
-        let area = NSTrackingArea(rect: bounds,
-                                   options: [.activeAlways, .mouseEnteredAndExited, .inVisibleRect],
+        let area = NSTrackingArea(rect: hoverRect,
+                                   options: [.activeAlways, .mouseEnteredAndExited],
                                    owner: self,
                                    userInfo: nil)
         addTrackingArea(area)
