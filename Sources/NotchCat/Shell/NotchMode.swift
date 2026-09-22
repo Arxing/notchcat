@@ -8,20 +8,26 @@ enum NotchMode: Equatable {
 }
 
 extension NotchMode {
+    /// How much wider than the physical notch the bar sits, so it reads as a
+    /// deliberate bar hugging the notch rather than exactly tracing its
+    /// cutout (the boring.notch-style look). Every mode shares this same
+    /// width — only the height grows downward — matching boring.notch, where
+    /// opening the shell doesn't change its width at all.
+    private static let widthPadding: CGFloat = 160
+
     /// Placeholder sizing for Phase 0. Once ModuleKit exists (Phase 1+), the
     /// active module drives Expanded/Preview sizing instead of these fixed
     /// fake-content values, which only exist to prove the state machine and
     /// the resize animation work.
     func size(for geometry: NotchGeometry) -> CGSize {
+        let width = geometry.notchSize.width + Self.widthPadding
         switch self {
         case .hidden:
-            return geometry.notchSize
+            return CGSize(width: width, height: geometry.notchSize.height)
         case .expanded:
-            return CGSize(width: max(geometry.notchSize.width * 2.4, 320),
-                          height: 180)
+            return CGSize(width: width, height: 180)
         case .preview:
-            return CGSize(width: geometry.notchSize.width * 1.8,
-                          height: geometry.notchSize.height + 8)
+            return CGSize(width: width, height: geometry.notchSize.height + 8)
         }
     }
 
