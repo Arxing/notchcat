@@ -14,7 +14,16 @@ struct NotchContentView: View {
     var body: some View {
         let mode = state.mode
         let size = mode.size(for: geometry)
-        RoundedRectangle(cornerRadius: mode == .hidden ? 10 : 24, style: .continuous)
+        let radius: CGFloat = mode == .hidden ? 10 : 24
+        // Top corners stay square — the shape is flush against the screen's
+        // top edge (same anchor as the physical notch), so rounding them
+        // would visually detach it from the notch instead of reading as an
+        // extension of it.
+        UnevenRoundedRectangle(topLeadingRadius: 0,
+                                bottomLeadingRadius: radius,
+                                bottomTrailingRadius: radius,
+                                topTrailingRadius: 0,
+                                style: .continuous)
             .fill(Color.black)
             .overlay(alignment: .center) {
                 switch mode {
