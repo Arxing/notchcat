@@ -4,7 +4,7 @@
 
 ## 背景 / 現況
 
-Phase 0 已經完成瀏海骨架：`NSPanel` 疊在瀏海位置、hover 觸發展開收合動畫、內容是寫死的假資料（見 `Sources/NotchCat/Shell/`、`Sources/NotchCat/UI/NotchContentView.swift`）。目前狀態機是三態（Hidden / Expanded / Preview）。
+Phase 0 已經完成瀏海骨架：`NSPanel` 疊在瀏海位置、hover 觸發展開收合動畫、內容是寫死的假資料（見 `Sources/NotchCat/Shell/`、`Sources/NotchCat/UI/NotchContentView.swift`）。目前狀態機是三態：一個完全待命、不含任何模組內容的狀態，加上 `Expanded` / `Preview`。
 
 本次設計要做兩件事：
 1. 把狀態機從三態簡化成兩態。
@@ -12,8 +12,8 @@ Phase 0 已經完成瀏海骨架：`NSPanel` 疊在瀏海位置、hover 觸發�
 
 ## 與 PLANNING.md 的差異
 
-- **狀態機從三態改成兩態**：拿掉 Hidden，只剩 `Preview` / `Expanded`。原本 Hidden 的視覺尺寸（貼合瀏海寬度 + 160pt、貼合瀏海高度，圓角 10pt）直接變成 Preview 沒有 active 模組時的預設外觀；原本 Preview 的獨立尺寸公式（`notchHeight + 8`）不再使用。程式碼、註解、變數命名一律不再出現「Hidden」這個詞。
-- **拿掉 `hiddenAdornment()`**：三態簡化成兩態後，這個介面失去存在理由（Preview 本身就是模組的收起態內容）。
+- **狀態機從三態改成兩態**：拿掉原本那個獨立的待命狀態，只剩 `Preview` / `Expanded`。它原本的視覺尺寸（貼合瀏海寬度 + 160pt、貼合瀏海高度，圓角 10pt）直接變成 Preview 沒有 active 模組時的預設外觀；原本 Preview 的獨立尺寸公式（`notchHeight + 8`）不再使用。程式碼、註解、變數命名一律不再出現舊狀態的名稱。
+- **拿掉原本規劃給待命狀態疊加小圖示/紅點的介面方法**：三態簡化成兩態後，這個介面失去存在理由（Preview 本身就是模組的收起態內容）。
 - **新增 Expanded 的模組切換 AppBar**：這是 PLANNING.md 只提過一句「例如已安裝模組的橫向切換清單」的功能，這次確定要做，並定義了清楚的行為（見下方）。
 - **狀態管理維持 Combine**：不改用 macOS 14+ 的 Observation framework，理由是 Shell 現有程式碼（`NotchShellState`）已經用 `@Published`/`ObservableObject`，專案目前規模小，混用兩套機制增加複雜度大於效能收益。
 
