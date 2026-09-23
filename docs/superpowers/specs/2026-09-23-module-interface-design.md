@@ -4,22 +4,20 @@
 
 ## 背景 / 現況
 
-Phase 0 已經完成瀏海骨架：`NSPanel` 疊在瀏海位置、hover 觸發展開收合動畫、內容是寫死的假資料（見 `Sources/NotchCat/Shell/`、`Sources/NotchCat/UI/NotchContentView.swift`）。目前狀態機是三態：一個完全待命、不含任何模組內容的狀態，加上 `Expanded` / `Preview`。
+Phase 0 已經完成瀏海骨架：`NSPanel` 疊在瀏海位置、hover 觸發展開收合動畫、內容是寫死的假資料（見 `Sources/NotchCat/Shell/`、`Sources/NotchCat/UI/NotchContentView.swift`）。狀態機的設計是兩態：`Preview` / `Expanded`。`Sources/NotchCat/Shell/NotchMode.swift` 目前的程式碼還沒對齊這個設計，需要在本次實作一併調整。
 
 本次設計要做兩件事：
-1. 把狀態機從三態簡化成兩態。
+1. 讓 `NotchMode` 的程式碼對齊兩態設計。
 2. 在 Shell 之上蓋一層 `ModuleKit`，讓模組可以插進 Preview / Expanded 兩個畫面。
 
 ## 與 PLANNING.md 的差異
 
-- **狀態機從三態改成兩態**：拿掉原本那個獨立的待命狀態，只剩 `Preview` / `Expanded`。它原本的視覺尺寸（貼合瀏海寬度 + 160pt、貼合瀏海高度，圓角 10pt）直接變成 Preview 沒有 active 模組時的預設外觀；原本 Preview 的獨立尺寸公式（`notchHeight + 8`）不再使用。程式碼、註解、變數命名一律不再出現舊狀態的名稱。
-- **拿掉原本規劃給待命狀態疊加小圖示/紅點的介面方法**：三態簡化成兩態後，這個介面失去存在理由（Preview 本身就是模組的收起態內容）。
 - **新增 Expanded 的模組切換 AppBar**：這是 PLANNING.md 只提過一句「例如已安裝模組的橫向切換清單」的功能，這次確定要做，並定義了清楚的行為（見下方）。
 - **狀態管理維持 Combine**：不改用 macOS 14+ 的 Observation framework，理由是 Shell 現有程式碼（`NotchShellState`）已經用 `@Published`/`ObservableObject`，專案目前規模小，混用兩套機制增加複雜度大於效能收益。
 
 ## 狀態機
 
-`NotchMode` 從三個 case 簡化成兩個：
+`NotchMode` 只有兩個 case：
 
 ```swift
 enum NotchMode: Equatable {
@@ -31,7 +29,7 @@ enum NotchMode: Equatable {
 - **Preview**：預設狀態（滑鼠不在瀏海上）。顯示 `ModuleManager.activeModule?.previewView()`；沒有 active 模組就顯示 Shell 自己的預設內容。尺寸沿用現有 Phase 0 已經調校過的數字（瀏海寬度 + 160pt、瀏海高度、下圓角 10pt、上直角）。
 - **Expanded**：hover 觸發。畫面 = 一條 AppBar（列出所有已安裝模組的 `tabIcon()`，可點擊切換）+ 下方 `ModuleManager.selectedModule?.expandedView()`；沒有選中模組就顯示 Shell 預設內容。尺寸沿用現有 Expanded 數字（同寬、180pt 高、下圓角 24pt）。
 
-Hover / hit-test 機制（`NotchHostingView.hoverRect`、進入用精準小範圍、展開後放寬成整個固定容器、離開用 150ms debounce 防抖）**不變**，只是把原本掛在三態上的邏輯改成掛在兩態上——這部分是既有 Phase 0 程式碼的直接簡化，不是新設計。
+Hover / hit-test 機制（`NotchHostingView.hoverRect`、進入用精準小範圍、展開後放寬成整個固定容器、離開用 150ms debounce 防抖）**不變**，直接沿用在 `Preview` / `Expanded` 這兩態上——這部分是既有 Phase 0 程式碼，不是新設計。
 
 ## NotchModule 協定
 
@@ -93,7 +91,7 @@ final class ModuleManager: ObservableObject {
 
 ```
 Sources/NotchCat/
-  Shell/            既有，NotchMode 從三態簡化成兩態
+  Shell/            既有，NotchMode 程式碼調整成對齊兩態設計
   UI/               既有，NotchContentView 改讀 ModuleManager；新增 DefaultShellContent、ModuleAppBar
   ModuleKit/        新增：NotchModule.swift（協定）、ModuleManager.swift
   Modules/
