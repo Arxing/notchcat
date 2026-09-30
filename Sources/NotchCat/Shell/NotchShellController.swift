@@ -24,19 +24,22 @@ final class NotchShellController {
     private let panel: NotchPanel
     private let hostingView: NotchHostingView<NotchContentView>
     private let state = NotchShellState()
+    private let moduleManager: ModuleManager
     private var pendingCollapse: DispatchWorkItem?
 
     var mode: NotchMode { state.mode }
 
-    init(geometry: NotchGeometry) {
+    init(geometry: NotchGeometry, moduleManager: ModuleManager) {
         self.geometry = geometry
+        self.moduleManager = moduleManager
 
-        // NotchContentView observes `state` directly via @ObservedObject, so
-        // mode changes flow through SwiftUI's own Combine-driven update path
-        // (which properly picks up its `.animation(value:)` modifier) instead
-        // of us reassigning `hostingView.rootView` imperatively from AppKit —
-        // that path turned out not to animate reliably.
-        let hostingView = NotchHostingView(rootView: NotchContentView(state: state, geometry: geometry))
+        // NotchContentView observes `state`/`moduleManager` directly via
+        // @ObservedObject, so mode and module changes flow through SwiftUI's
+        // own Combine-driven update path (which properly picks up its
+        // `.animation(value:)` modifier) instead of us reassigning
+        // `hostingView.rootView` imperatively from AppKit — that path turned
+        // out not to animate reliably.
+        let hostingView = NotchHostingView(rootView: NotchContentView(state: state, moduleManager: moduleManager, geometry: geometry))
         self.hostingView = hostingView
 
         // Fixed for the panel's whole lifetime — see NotchMode.containerFrame.
@@ -52,6 +55,11 @@ final class NotchShellController {
             guard let self else { return }
             pendingCollapse?.cancel()
             pendingCollapse = nil
+            // Every fresh hover resets the AppBar's selection to whatever's
+            // currently active — see the design spec's "selectedModule"
+            // behavior. A manual pick from a previous expansion never
+            // carries over.
+            moduleManager.selectedModule = moduleManager.activeModule
             transition(to: .expanded)
             // Once open, widen the hit-test rect to the whole fixed
             // container so ordinary cursor jitter can't push the cursor
