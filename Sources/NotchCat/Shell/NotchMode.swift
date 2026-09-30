@@ -1,33 +1,28 @@
 import CoreGraphics
 
-/// The three panel modes described in docs/PLANNING.md.
+/// The two panel modes. See docs/superpowers/specs/2026-09-23-module-interface-design.md.
 enum NotchMode: Equatable {
-    case hidden
-    case expanded
     case preview
+    case expanded
 }
 
 extension NotchMode {
     /// How much wider than the physical notch the bar sits, so it reads as a
     /// deliberate bar hugging the notch rather than exactly tracing its
-    /// cutout (the boring.notch-style look). Every mode shares this same
+    /// cutout (the boring.notch-style look). Both modes share this same
     /// width — only the height grows downward — matching boring.notch, where
     /// opening the shell doesn't change its width at all.
     private static let widthPadding: CGFloat = 160
 
-    /// Placeholder sizing for Phase 0. Once ModuleKit exists (Phase 1+), the
-    /// active module drives Expanded/Preview sizing instead of these fixed
-    /// fake-content values, which only exist to prove the state machine and
-    /// the resize animation work.
+    /// Preview's size (the shell's resting state) and Expanded's size
+    /// (hover-triggered, holds the module-switcher AppBar plus content).
     func size(for geometry: NotchGeometry) -> CGSize {
         let width = geometry.notchSize.width + Self.widthPadding
         switch self {
-        case .hidden:
+        case .preview:
             return CGSize(width: width, height: geometry.notchSize.height)
         case .expanded:
             return CGSize(width: width, height: 180)
-        case .preview:
-            return CGSize(width: width, height: geometry.notchSize.height + 8)
         }
     }
 
@@ -46,12 +41,12 @@ extension NotchMode {
     /// the hover hit-test area is always the same stable, generous size:
     /// a hit-test area that shrinks/grows in sync with the mode-change
     /// animation is only as forgiving as its smallest transient size, and
-    /// Hidden's is a ~32pt-tall sliver — thin enough that ordinary cursor
+    /// Preview's is a ~32pt-tall sliver — thin enough that ordinary cursor
     /// jitter while "holding still" crosses its edge and causes the shell to
     /// flicker open/closed. Only the drawn content animates its size within
     /// this fixed container.
     static func containerSize(for geometry: NotchGeometry) -> CGSize {
-        let modes: [NotchMode] = [.hidden, .expanded, .preview]
+        let modes: [NotchMode] = [.preview, .expanded]
         let sizes = modes.map { $0.size(for: geometry) }
         return CGSize(width: sizes.map(\.width).max() ?? 0,
                        height: sizes.map(\.height).max() ?? 0)
@@ -67,7 +62,7 @@ extension NotchMode {
 
     /// This mode's hover hit-test rect, in the fixed container's own
     /// top-anchored local coordinate space (see `containerFrame`). Used to
-    /// require a precise hover over the visible Hidden pill to *open* the
+    /// require a precise hover over the visible Preview pill to *open* the
     /// shell, while `NotchShellController` widens the active hit-test rect
     /// to the whole container the instant it opens, so staying open is
     /// forgiving. NSHostingView is flipped (origin top-left), matching the

@@ -6,16 +6,11 @@ import Combine
 /// controller's own `let` properties (panel, hostingView) exist — Swift
 /// won't let `self` escape a class init until every stored property is set.
 final class NotchShellState: ObservableObject {
-    @Published var mode: NotchMode = .hidden
+    @Published var mode: NotchMode = .preview
 }
 
-/// Owns the notch panel and drives the Hidden/Expanded/Preview state machine
-/// described in docs/PLANNING.md.
-///
-/// Phase 0 has no modules yet, so `hasActiveModule` is always false and
-/// Preview is unreachable — the transition is wired up already so Phase 1
-/// only has to plug ModuleManager's real "is any module active" signal into
-/// `hasActiveModule`.
+/// Owns the notch panel and drives the Preview/Expanded state machine
+/// described in docs/superpowers/specs/2026-09-23-module-interface-design.md.
 final class NotchShellController {
     /// How long to wait after the cursor leaves before actually collapsing.
     /// Without this, a cursor moving faster than the still-growing Expanded
@@ -32,10 +27,6 @@ final class NotchShellController {
     private var pendingCollapse: DispatchWorkItem?
 
     var mode: NotchMode { state.mode }
-
-    /// Placeholder for "does any module currently want Preview". Phase 1
-    /// replaces this with a real published value from ModuleManager.
-    var hasActiveModule: Bool = false
 
     init(geometry: NotchGeometry) {
         self.geometry = geometry
@@ -54,8 +45,8 @@ final class NotchShellController {
         panel.contentView = hostingView
         self.panel = panel
 
-        // Opening requires a precise hover over the visible Hidden pill.
-        hostingView.hoverRect = NotchMode.hidden.localRect(for: geometry)
+        // Opening requires a precise hover over the visible Preview pill.
+        hostingView.hoverRect = NotchMode.preview.localRect(for: geometry)
 
         hostingView.onMouseEntered = { [weak self] in
             guard let self else { return }
@@ -72,9 +63,8 @@ final class NotchShellController {
             guard let self else { return }
             let collapse = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                let target: NotchMode = hasActiveModule ? .preview : .hidden
-                transition(to: target)
-                hostingView.hoverRect = target.localRect(for: geometry)
+                transition(to: .preview)
+                hostingView.hoverRect = NotchMode.preview.localRect(for: geometry)
             }
             pendingCollapse = collapse
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.collapseDelay, execute: collapse)
