@@ -1,4 +1,5 @@
 import Combine
+import Foundation
 
 /// Holds every installed module and tracks which one (if any) currently owns
 /// the shell's Preview/Expanded content.
