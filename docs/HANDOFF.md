@@ -39,10 +39,10 @@ Sources/NotchCat/
 
 ## 已知風險 / 沒把握的地方（優先驗證清單）
 
-1. **瀏海幾何算法**（`NotchGeometry.swift`）：用 `screen.frame.width - left.width - right.width` 算瀏海寬度、用 `left.height` 當瀏海高度。這是社群常見手法，但沒有在真機上量過，實際瀏海形狀（圓角、精確 padding）跟算出來的矩形可能有落差，需要拿真機數字校正。
+1. ~~**瀏海幾何算法**~~ — 已在真機驗證（2026-10-07）：正常，跟實體瀏海貼合沒有落差。
 2. ~~**Hidden 狀態的 hover 觸發區域**就是瀏海本身大小（很小）~~ — 已在真機驗證並修正（2026-09-22）。原本的作法是面板本身的 frame 隨動畫縮放、同時兼任 hover 判定範圍，真機測出兩個問題：(a) 動畫進行中滑鼠移動速度一旦超過畫面還沒長到的邊界就會誤判離開，造成展開/收合狂閃；(b) Hidden 狀態只有 ~32pt 高，滑鼠「靜止不動」時的自然晃動就足以跨出邊界，造成靜止時仍會閃爍。修法：面板固定成所有模式中最大的尺寸（`NotchMode.containerFrame`），永遠不再隨動畫 resize；hover 判定範圍改由 `NotchHostingView.hoverRect` 手動控制——進入 Hidden 小膠囊才觸發展開（維持精準），一展開就立刻放大成整個固定範圍（避免抖動誤判離開）。視覺動畫則改用 SwiftUI 的 `@ObservedObject`/`.animation(value:)` 驅動（見 `NotchShellState`），不再由 AppKit 端手動 resize 視窗或覆寫 `rootView`——後者會讓 `withAnimation` 失效。細節見 `Sources/NotchCat/Shell/NotchShellController.swift` 和 `NotchMode.swift` 的註解。
-3. `NSMenuItem` 的 target 有手動設成 `self`（`main.swift`），照理沒問題，但沒跑過。
-4. 沒有處理「機種沒有瀏海」以外的 fallback（目前直接 `NSApp.terminate`），也沒有處理外接螢幕/多螢幕情境的邊界情況（目前假設瀏海永遠在內建螢幕，邏輯上抓第一個有 `auxiliaryTopLeftArea` 的 screen，多螢幕下沒特別測試過）。
+3. ~~`NSMenuItem` 的 target 有手動設成 `self`~~ — 已在真機驗證（2026-10-07）：Quit 選單項目正常觸發。
+4. **「機種沒有瀏海」以外的 fallback、外接螢幕/多螢幕情境**——目前無瀏海直接 `NSApp.terminate`，多螢幕下抓第一個有 `auxiliaryTopLeftArea` 的 screen，沒有特別處理過邊界情況。**決定暫緩**：等實際遇到需求再處理，不列為 Phase 0 驗收項目。
 
 ## 接手後的建議順序
 
