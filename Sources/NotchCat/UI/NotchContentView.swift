@@ -1,14 +1,20 @@
 import SwiftUI
 
-/// Fake content for Phase 0: just enough to see each mode's shape and prove
-/// the animation reads correctly. Real content arrives with modules in
-/// Phase 1+ (see docs/PLANNING.md) via ModuleManager's active module.
+/// Renders the shell's current mode. Hidden/Expanded/Preview shapes and
+/// sizing are the shell's own concern (see `NotchMode`); the *content* drawn
+/// inside Expanded/Preview comes from whichever module `ModuleManager` says
+/// is active, or — in Expanded only — the first installed module as a
+/// fallback, so there's something to look at before any module goes active
+/// (see docs/PLANNING.md §4.2). Preview never falls back: it only ever shows
+/// the active module, because Preview's entire reason to exist is ambient
+/// "a module wants your attention" content.
 struct NotchContentView: View {
     /// Observed directly (rather than taking `mode` as a plain value) so
     /// mode changes flow through SwiftUI's own update pipeline, which is
     /// what makes `.animation(value:)` below actually animate — see
     /// NotchShellController.
     @ObservedObject var state: NotchShellState
+    @ObservedObject var moduleManager: ModuleManager
     let geometry: NotchGeometry
 
     var body: some View {
@@ -30,13 +36,9 @@ struct NotchContentView: View {
                 case .hidden:
                     EmptyView()
                 case .expanded:
-                    Text("NotchCat — Phase 0 (no module installed)")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.7))
+                    expandedContent
                 case .preview:
-                    Text("preview")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.5))
+                    previewContent
                 }
             }
             .frame(width: size.width, height: size.height)
@@ -46,5 +48,25 @@ struct NotchContentView: View {
             // shared anchor point.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .animation(.easeInOut(duration: 0.28), value: mode)
+    }
+
+    @ViewBuilder
+    private var expandedContent: some View {
+        if let module = moduleManager.activeModule ?? moduleManager.installedModules.first {
+            module.expandedView()
+        } else {
+            Text("NotchCat — no module installed")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.7))
+        }
+    }
+
+    @ViewBuilder
+    private var previewContent: some View {
+        if let module = moduleManager.activeModule {
+            module.previewView()
+        } else {
+            EmptyView()
+        }
     }
 }

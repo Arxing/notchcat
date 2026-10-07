@@ -15,10 +15,10 @@ extension NotchMode {
     /// opening the shell doesn't change its width at all.
     private static let widthPadding: CGFloat = 160
 
-    /// Placeholder sizing for Phase 0. Once ModuleKit exists (Phase 1+), the
-    /// active module drives Expanded/Preview sizing instead of these fixed
-    /// fake-content values, which only exist to prove the state machine and
-    /// the resize animation work.
+    /// Fixed sizing, owned by the shell rather than any module — modules
+    /// only ever get to fill whatever space a mode already has (see
+    /// `NotchContentView`). A later phase may let an active module request
+    /// its own Expanded/Preview size instead; nothing needs that yet.
     func size(for geometry: NotchGeometry) -> CGSize {
         let width = geometry.notchSize.width + Self.widthPadding
         switch self {

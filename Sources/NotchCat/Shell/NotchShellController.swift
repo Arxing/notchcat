@@ -11,11 +11,6 @@ final class NotchShellState: ObservableObject {
 
 /// Owns the notch panel and drives the Hidden/Expanded/Preview state machine
 /// described in docs/PLANNING.md.
-///
-/// Phase 0 has no modules yet, so `hasActiveModule` is always false and
-/// Preview is unreachable — the transition is wired up already so Phase 1
-/// only has to plug ModuleManager's real "is any module active" signal into
-/// `hasActiveModule`.
 final class NotchShellController {
     /// How long to wait after the cursor leaves before actually collapsing.
     /// Without this, a cursor moving faster than the still-growing Expanded
@@ -26,26 +21,28 @@ final class NotchShellController {
     private static let collapseDelay: TimeInterval = 0.15
 
     private let geometry: NotchGeometry
+    private let moduleManager: ModuleManager
     private let panel: NotchPanel
     private let hostingView: NotchHostingView<NotchContentView>
     private let state = NotchShellState()
     private var pendingCollapse: DispatchWorkItem?
+    private var activeModuleCancellable: AnyCancellable?
 
     var mode: NotchMode { state.mode }
 
-    /// Placeholder for "does any module currently want Preview". Phase 1
-    /// replaces this with a real published value from ModuleManager.
-    var hasActiveModule: Bool = false
-
-    init(geometry: NotchGeometry) {
+    init(geometry: NotchGeometry, moduleManager: ModuleManager) {
         self.geometry = geometry
+        self.moduleManager = moduleManager
 
-        // NotchContentView observes `state` directly via @ObservedObject, so
-        // mode changes flow through SwiftUI's own Combine-driven update path
-        // (which properly picks up its `.animation(value:)` modifier) instead
-        // of us reassigning `hostingView.rootView` imperatively from AppKit —
-        // that path turned out not to animate reliably.
-        let hostingView = NotchHostingView(rootView: NotchContentView(state: state, geometry: geometry))
+        // NotchContentView observes `state`/`moduleManager` directly via
+        // @ObservedObject, so mode and module changes flow through SwiftUI's
+        // own Combine-driven update path (which properly picks up its
+        // `.animation(value:)` modifier) instead of us reassigning
+        // `hostingView.rootView` imperatively from AppKit — that path turned
+        // out not to animate reliably.
+        let hostingView = NotchHostingView(
+            rootView: NotchContentView(state: state, moduleManager: moduleManager, geometry: geometry)
+        )
         self.hostingView = hostingView
 
         // Fixed for the panel's whole lifetime — see NotchMode.containerFrame.
@@ -72,7 +69,7 @@ final class NotchShellController {
             guard let self else { return }
             let collapse = DispatchWorkItem { [weak self] in
                 guard let self else { return }
-                let target: NotchMode = hasActiveModule ? .preview : .hidden
+                let target = restingMode()
                 transition(to: target)
                 hostingView.hoverRect = target.localRect(for: geometry)
             }
@@ -80,7 +77,27 @@ final class NotchShellController {
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.collapseDelay, execute: collapse)
         }
 
+        // Hidden ⇄ Preview is driven entirely by whether a module is active,
+        // never by hover — hover only ever leads to/from Expanded (above).
+        // If a module becomes (in)active while the shell is at rest, follow
+        // it immediately; if the shell is mid-hover (Expanded), leave it
+        // alone and let the next hover-exit's `restingMode()` pick up the
+        // new state instead of yanking content out from under the cursor.
+        activeModuleCancellable = moduleManager.$activeModule
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, state.mode != .expanded else { return }
+                let target = restingMode()
+                guard target != state.mode else { return }
+                transition(to: target)
+                hostingView.hoverRect = target.localRect(for: geometry)
+            }
+
         panel.orderFrontRegardless()
+    }
+
+    private func restingMode() -> NotchMode {
+        moduleManager.activeModule != nil ? .preview : .hidden
     }
 
     func transition(to newMode: NotchMode) {

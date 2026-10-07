@@ -16,7 +16,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        shellController = NotchShellController(geometry: geometry)
+        let moduleManager = ModuleManager()
+        moduleManager.install(ClockModule())
+
+        shellController = NotchShellController(geometry: geometry, moduleManager: moduleManager)
         setupStatusItem()
     }
 
