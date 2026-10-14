@@ -49,7 +49,16 @@ Sources/NotchCat/
 1. `swift run`（或 Xcode 開起來跑），先看能不能編譯過，抓 Swift/API 用法上的錯誤。
 2. 跑起來後對照真實瀏海，校正 `NotchGeometry` 的計算。
 3. 手動測試 hover 進出的展開/收合動畫，調整觸發區域大小、動畫時長/曲線的手感。
-4. Phase 0 驗收過關後，照 `docs/PLANNING.md` 的 Phase 1 開始：`NotchModule` protocol + `ModuleManager`，先用一個「時鐘模組」驗證安裝機制（見 PLANNING.md 第 4、8 節）。
+4. ~~Phase 0 驗收過關後，照 `docs/PLANNING.md` 的 Phase 1 開始：`NotchModule` protocol + `ModuleManager`，先用一個「時鐘模組」驗證安裝機制（見 PLANNING.md 第 4、8 節）。~~ — 已完成並於真機驗收（2026-10-14）：hover 展開正常，Expanded 會顯示時鐘。過程中抓到一個編譯錯誤（`ModuleManager` 少 import `Foundation`），已修正。
+
+## 下一步：Phase 2（Music 模組）的前置風險
+
+PLANNING.md 第 5 節把整個 Music 模組押在 `MediaRemote` 私有框架上，但這個假設在新版 macOS 上**尚未驗證、而且很可能已經不成立**：
+
+- Apple 在 **macOS 15.4** 收緊了 MediaRemote 的 now-playing 存取，沒有私有 entitlement 的第三方 App 會「呼叫成功但拿到空資料」。開發機目前是 macOS 15.7。
+- 已確認框架本身還在、`MRMediaRemoteGetNowPlayingInfo` 等符號也還載得到——但符號載得到不代表會回資料，被擋的徵狀正是回空值而非找不到符號。
+
+**動工前請先用一支丟棄式小程式實測**（呼叫 `MRMediaRemoteGetNowPlayingInfo`，放一首歌看回傳內容）。結果會決定 Phase 2 是照原案走，還是改接各音樂 App 的 AppleScript/ScriptingBridge 介面（涵蓋的 App 少很多，但不受私有 API 收緊影響）。
 
 ## 待決事項（PLANNING.md 裡列過，還沒有答案）
 
