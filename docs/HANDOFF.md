@@ -51,14 +51,18 @@ Sources/NotchCat/
 3. 手動測試 hover 進出的展開/收合動畫，調整觸發區域大小、動畫時長/曲線的手感。
 4. ~~Phase 0 驗收過關後，照 `docs/PLANNING.md` 的 Phase 1 開始：`NotchModule` protocol + `ModuleManager`，先用一個「時鐘模組」驗證安裝機制（見 PLANNING.md 第 4、8 節）。~~ — 已完成並於真機驗收（2026-10-14）：hover 展開正常，Expanded 會顯示時鐘。過程中抓到一個編譯錯誤（`ModuleManager` 少 import `Foundation`），已修正。
 
-## 下一步：Phase 2（Music 模組）的前置風險
+## 下一步：Phase 2（Music 模組）—— MediaRemote 可行性已實測
 
-PLANNING.md 第 5 節把整個 Music 模組押在 `MediaRemote` 私有框架上，但這個假設在新版 macOS 上**尚未驗證、而且很可能已經不成立**：
+原本擔心 Apple 在 **macOS 15.4** 收緊 now-playing 存取後，未取得 entitlement 的 App 會「呼叫成功但拿到空資料」。**已於 2026-10-14 在 macOS 15.7 實測，這個疑慮沒有成真**，PLANNING.md 第 5 節的 MediaRemote 路線可以照原案走。
 
-- Apple 在 **macOS 15.4** 收緊了 MediaRemote 的 now-playing 存取，沒有私有 entitlement 的第三方 App 會「呼叫成功但拿到空資料」。開發機目前是 macOS 15.7。
-- 已確認框架本身還在、`MRMediaRemoteGetNowPlayingInfo` 等符號也還載得到——但符號載得到不代表會回資料，被擋的徵狀正是回空值而非找不到符號。
+實測結果（丟棄式探針，呼叫 `MRMediaRemoteGetNowPlayingInfo`）：
 
-**動工前請先用一支丟棄式小程式實測**（呼叫 `MRMediaRemoteGetNowPlayingInfo`，放一首歌看回傳內容）。結果會決定 Phase 2 是照原案走，還是改接各音樂 App 的 AppleScript/ScriptingBridge 介面（涵蓋的 App 少很多，但不受私有 API 收緊影響）。
+- **拿得到真實資料**，一包 13 個鍵，包含 `Title`／`Artist`／`Album`／`Duration`／`ElapsedTime`／`PlaybackRate`／`Timestamp`，足夠做 Preview 與 Expanded 的主要內容。
+- `MRMediaRemoteGetNowPlayingApplicationIsPlaying` 也正常回報播放狀態，可直接拿來餵 `isActivePublisher`。
+- **封面圖要特別處理：`kMRMediaRemoteNowPlayingInfoArtworkData` 不是每次都會附上。** 連續查詢三次，前兩次只有 `ArtworkDataWidth`/`Height`/`MIMEType`/`ArtworkIdentifier` 這些 metadata，第三次才出現實際位元組。實作時不能假設每次輪詢都拿得到圖，要**用 `ArtworkIdentifier` 當 key 自行快取**，拿到一次就留著，沒拿到就沿用舊的。
+- **涵蓋範圍比預期好**：實測當下在播的是一個 Chrome PWA（網頁版音樂服務），MediaRemote 照樣抓得到。這是 AppleScript/ScriptingBridge 路線做不到的——那條路只能涵蓋有 scripting 介面的原生 App（大致只有 Apple Music、Spotify）。**這點是選 MediaRemote 而非 AppleScript 的決定性理由。**
+
+仍未驗證、留到設計階段再處理的部分：歌詞來源（PLANNING.md 第 9 節的待決事項，MediaRemote 本身不提供歌詞）。
 
 ## 待決事項（PLANNING.md 裡列過，還沒有答案）
 
