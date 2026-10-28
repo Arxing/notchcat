@@ -25,7 +25,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let moduleManager = ModuleManager()
-        moduleManager.register(PlaceholderModule())
 
         shellController = NotchShellController(geometry: geometry, moduleManager: moduleManager)
         setupStatusItem()
