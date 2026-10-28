@@ -9,9 +9,11 @@
 **範圍內：**
 
 - 讀取目前播放的曲名與播放狀態。**v1 的來源是視窗標題，只支援 YouTube Music。**
-- 依播放狀態自動驅動 Hidden ⇄ Preview 的切換。
+- 依播放狀態決定 Music 是否接管 Preview：播放中顯示歌詞或曲名，沒在播放時 Preview 回到 Shell 預設的空黑條。
 - 取得逐行同步歌詞，在播放位置可推估時依其捲動。
 - Expanded 下的播放控制（上一首／播放暫停／下一首）。
+
+**已於 2026-10-28 對齊兩態 Shell。** Shell 只有 Preview 與 Expanded 兩個模式，Expanded 上方有模組切換 AppBar，因此本 spec 中依舊版狀態機寫的段落（第 1、2、5.5、7、9 節）已改寫。
 
 **範圍已於 2026-10-21 縮減。** 原案要讀系統層級的 now-playing（含演出者、專輯、總長度、播放進度、封面圖），但實測證明該管道對第三方 App 封閉（第 3 節第 1 點）。改用視窗標題後，**總長度、播放進度與封面圖都拿不到**，因此進度條與封面一併移出範圍（第 7 節）。
 
@@ -21,11 +23,12 @@
 
 ## 2. 既有基礎
 
-Phase 1 已完成並通過真機驗收，本模組直接架在上面，不改動 Shell：
+兩態 Shell 與模組系統已完成並通過真機驗收，本模組直接架在上面，不改動 Shell：
 
-- 實作 `NotchModule` protocol（`ModuleKit/NotchModule.swift`）。
-- `isActivePublisher` 回報「是否正在播放」，`ModuleManager` 會據此自動把 Shell 在 Hidden 與 Preview 之間切換。這條線已經打通並驗證過，本模組只需要正確餵值。
-- 三個畫面入口：`hiddenAdornment()`、`previewView()`、`expandedView()`。
+- 實作 `NotchModule` protocol（`ModuleKit/NotchModule.swift`），向 `ModuleManager` 以 `register(_:)` 註冊。
+- `isActivePublisher` 回報「是否正在播放」，`ModuleManager` 據此算出 `activeModule`：Music active 時接管 Preview；不 active 時 Preview 顯示 Shell 預設的空黑條。這條線已經打通並驗證過，本模組只需要正確餵值。
+- 三個畫面入口：`tabIcon()`（Expanded 的 AppBar 上的圖示）、`previewView()`、`expandedView()`。
+- Expanded 每次展開，AppBar 的選取會重設成當下的 `activeModule`；Music 沒在播放時沒有 active 模組，使用者可以自己點 AppBar 上的 Music 圖示進入它的 Expanded。
 
 ## 3. 設計所依據的實測結果
 
@@ -160,7 +163,7 @@ MediaRemote 的通知機制與其讀取一併被擋，視窗標題也不會主�
 
 ### 5.5 isActive 的定義
 
-`isActivePublisher` 在「有曲目且喇叭符號存在」時為 true。暫停時為 false，使面板退回 Hidden，而不是停在 Preview 佔著版面。此行為若實際使用覺得突兀，屬於手感調整，留待實機驗收後再議。
+`isActivePublisher` 在「有曲目且喇叭符號存在」時為 true。暫停時為 false，Music 不再接管 Preview，瀏海回到 Shell 預設的空黑條，而不是停著顯示曲名佔著版面。此行為若實際使用覺得突兀，屬於手感調整，留待實機驗收後再議。
 
 ## 6. 歌詞層
 
@@ -225,15 +228,16 @@ protocol LyricsProvider {
 - **反向快取：** 查無結果者同樣記錄，附存活時間（建議 24 小時），避免同一首沒歌詞的曲目每次切回來都重打一輪所有來源。
 - **封面快取：** v1 不適用。視窗標題不提供封面，Expanded 一律顯示佔位圖（見第 7 節）。此項保留供未來有封面的來源使用。
 
-## 7. 三種模式的畫面
+## 7. 兩種模式的畫面
 
 > **已於 2026-10-21 依新的資料層縮減。** 原案的進度條與封面圖都移除了，因為視窗標題給不出總長度，也給不出圖。
 
 | 模式 | 內容 |
 |---|---|
-| **Hidden** | 不顯示文字。可選的極小播放指示（`hiddenAdornment()`），v1 不做。 |
-| **Preview** | 當前歌詞行（跑馬燈）。推估不可用或無同步歌詞時，改顯示曲名跑馬燈。 |
-| **Expanded** | 曲名、來源名稱、上一首／播放暫停／下一首，以及（若有）歌詞。 |
+| **Preview，Music 不 active** | Shell 預設的空黑條（Music 完全不畫東西）。 |
+| **Preview，Music active** | 當前歌詞行（跑馬燈）。推估不可用或無同步歌詞時，改顯示曲名跑馬燈。 |
+| **Expanded，有曲目** | 曲名、來源名稱、上一首／播放暫停／下一首，以及（若有）歌詞。 |
+| **Expanded，沒有曲目** | 使用者從 AppBar 手動點進來才會看到：一行「目前沒有播放」的文字，控制列隱藏。 |
 
 **明確不做的項目與原因：**
 
@@ -247,7 +251,7 @@ protocol LyricsProvider {
 2. 同步歌詞但推估不可用 → Expanded 顯示靜態全文，Preview 顯示曲名。
 3. 僅純文字歌詞 → Expanded 顯示可捲動的靜態全文，Preview 顯示曲名。
 4. 無歌詞 → 兩個畫面都只顯示曲目資訊。
-5. 無任何來源有資料 → 模組不 active，面板維持 Hidden。
+5. 無任何來源有資料 → 模組不 active，Preview 回到空黑條。
 
 ## 8. 播放控制
 
@@ -269,7 +273,7 @@ Expanded 的上一首／播放暫停／下一首預計透過 `MRMediaRemoteSendC
 
 - **歌詞來源逾時：** 每個來源設獨立逾時（建議 5 秒），逾時視同未命中，繼續問下一個，不得阻塞畫面。
 - **網路不可用：** 歌詞靜默退化為無歌詞，不顯示錯誤訊息。曲目顯示不受影響。
-- **視窗標題格式改變：** 解析器回 nil，模組視為沒有曲目而退回 Hidden。**不得顯示解析了一半的字串。** 這是最可能發生的故障，因為格式由第三方決定。
+- **視窗標題格式改變：** 解析器回 nil，模組視為沒有曲目，不 active，Preview 回到空黑條。**不得顯示解析了一半的字串。** 這是最可能發生的故障，因為格式由第三方決定。
 - **播放控制符號解析失敗：** 控制列隱藏或禁用，曲目顯示照常運作。**控制與顯示必須互相獨立，任一邊壞掉不得拖垮另一邊。**
 - **歌詞與實際曲目不符：** 比對驗證失敗時寧可不顯示，也不顯示錯的歌詞。
 
