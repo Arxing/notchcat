@@ -51,6 +51,36 @@ Sources/NotchCat/
 3. 手動測試 hover 進出的展開/收合動畫，調整觸發區域大小、動畫時長/曲線的手感。
 4. Phase 0 驗收過關後，照 `docs/PLANNING.md` 的 Phase 1 開始：`NotchModule` protocol + `ModuleManager`，先用一個「時鐘模組」驗證安裝機制（見 PLANNING.md 第 4、8 節）。
 
+## 下一步：Phase 2（Music 模組）—— MediaRemote 可行性已實測
+
+> **更正（2026-10-14 當日稍晚）：本節原先寫著「疑慮沒有成真、MediaRemote 可以照原案走」，那個結論是錯的，已於同日推翻。詳見下方「實測更正」。**
+
+### 實測更正：MediaRemote 的 now-playing 讀取對第三方 App 不可用
+
+原本擔心 Apple 在 **macOS 15.4** 收緊 now-playing 存取後，未取得 entitlement 的 App 會「呼叫成功但拿到空資料」。**這個疑慮確實成真了。**
+
+**先前誤判的原因：** 當天所有可行性探針都是用 `swift <檔名>.swift` 執行的，而那會跑在 Apple 簽章的直譯器底下並繼承它的存取權限。探針從來沒有在「App 實際出貨的形態」下測過。
+
+**更正後的實測（macOS 15.7，同一台機器、同一段程式碼、同一時刻）：**
+
+| 宿主行程 | 拿到的 now-playing 鍵數 |
+|---|---|
+| Apple 簽章的 `swift` 直譯器 | 13 |
+| ad-hoc 簽章的裸執行檔 | 0 |
+| ad-hoc 簽章、含 bundle id 的 .app | 0 |
+| 以 Apple Development 憑證簽章的 .app | 0 |
+| 以 Apple Distribution 憑證簽章的 .app | 0 |
+
+**結論：這道關卡擋的是簽章授權，不是打包方式，而且任何第三方簽章身分都打不開。** 正式的開發者憑證與發布憑證一樣拿到空字典。因此 PLANNING.md 第 5 節以 MediaRemote 為資料來源的 Music 模組，在 macOS 15.4 以後的系統上**對出貨的 App 無效**。
+
+`MRMediaRemoteSendCommand`（播放控制）則**不受此限制，實測可用**——上一首／暫停／下一首送得出去也會生效。換句話說「控制得了，但讀不到在播什麼」。
+
+**附帶仍然成立的發現**（在直譯器下觀察到，對任何未來的資料來源設計仍有參考價值）：封面圖的實際位元組不是每次查詢都會附上，三次中只出現一次，所以任何實作都需要以識別碼為鍵自行快取。
+
+**尚待決定：** Phase 2 要改走哪條路。AppleScript／ScriptingBridge 只涵蓋有 scripting 介面的原生 App（大致只有 Apple Music、Spotify），**涵蓋不到瀏覽器播放**，而瀏覽器正是本專案使用者的實際使用方式。
+
+**後續決定：** Phase 2 的資料來源已改為讀取視窗標題（`CGWindowList`），播放控制仍走 `MRMediaRemoteSendCommand`。細節見 `docs/superpowers/specs/2026-10-14-music-module-design.md`。
+
 ## 待決事項（PLANNING.md 裡列過，還沒有答案）
 
 - 最低支援的 macOS 版本（目前程式碼寫死 14，PLANNING.md 討論過 13 vs 14 的取捨）。
