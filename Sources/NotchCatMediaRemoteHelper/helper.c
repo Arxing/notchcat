@@ -19,6 +19,12 @@
 // "artwork bytes attached" changed since the previous line. The process exits when stdin reaches EOF, so it dies with the
 // parent that holds the pipe.
 //
+// Exit codes: 0 stdin reached EOF; 2 setup failed (framework or symbol
+// missing, watcher thread); 3 out of memory; 4 MediaRemote stopped replying
+// (kMaxConsecutiveTimeouts requests in a row timed out; any reply resets the
+// count), so the supervisor restarts the helper instead of leaving the app on
+// a stale snapshot.
+//
 // Signing: SwiftPM's linker output is already ad-hoc signed on arm64
 // (`codesign -dv` reports `Signature=adhoc`, `flags=0x20002(adhoc,linker-signed)`),
 // which is all perl needs. No post-build codesign step is required.
@@ -53,6 +59,8 @@ typedef void (*GetNowPlayingInfoFn)(dispatch_queue_t queue, NowPlayingInfoHandle
 static const char *kFrameworkPath = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote";
 static const int64_t kReplyTimeoutSeconds = 3;
 static const unsigned int kPollIntervalSeconds = 1;
+// Consecutive requests without any reply before the process gives up (exit 4).
+static const int kMaxConsecutiveTimeouts = 10;
 /// Artwork larger than this is not attached (artworkId still is), so the line
 /// stays under the Swift reader's 4 MiB line cap: 3,000,000 bytes encode to
 /// 4,000,000 base64 characters, leaving ~190 KB for the other fields.
@@ -361,6 +369,7 @@ void notchcat_helper_main(void *interp, void *cv) {
     // wait timed out still diffs against consistent state.
     dispatch_queue_t replyQueue = dispatch_queue_create("notchcat.helper.reply", DISPATCH_QUEUE_SERIAL);
     dispatch_semaphore_t replied = dispatch_semaphore_create(0);
+    int consecutiveTimeouts = 0;
 
     for (;;) {
         void *pool = objc_autoreleasePoolPush();
@@ -368,7 +377,15 @@ void notchcat_helper_main(void *interp, void *cv) {
             handle_info(info);
             dispatch_semaphore_signal(replied);
         });
-        dispatch_semaphore_wait(replied, dispatch_time(DISPATCH_TIME_NOW, kReplyTimeoutSeconds * NSEC_PER_SEC));
+        long timedOut = dispatch_semaphore_wait(replied, dispatch_time(DISPATCH_TIME_NOW, kReplyTimeoutSeconds * NSEC_PER_SEC));
+        if (timedOut) {
+            if (++consecutiveTimeouts >= kMaxConsecutiveTimeouts) {
+                fprintf(stderr, "notchcat-helper: MediaRemote stopped replying\n");
+                _exit(4);
+            }
+        } else {
+            consecutiveTimeouts = 0;
+        }
         sleep(kPollIntervalSeconds);
         objc_autoreleasePoolPop(pool);
     }
