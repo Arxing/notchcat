@@ -17,6 +17,7 @@ struct LRCLIBProvider: LyricsProvider {
     }
 
     private struct Payload: Decodable {
+        let trackName: String?
         let duration: Double?
         let plainLyrics: String?
         let syncedLyrics: String?
@@ -63,7 +64,8 @@ struct LRCLIBProvider: LyricsProvider {
         return lyrics(from: payload, for: track)
     }
 
-    /// The first record of a search result that passes `decode`'s checks.
+    /// The first record of a search result that passes `decode`'s checks and
+    /// whose title matches the query.
     static func decodeSearch(_ data: Data, for track: TrackIdentity) -> Lyrics? {
         guard let payloads = try? payloads(from: data) else { return nil }
         return selectCandidate(from: payloads, for: track)
@@ -85,8 +87,16 @@ struct LRCLIBProvider: LyricsProvider {
         }
     }
 
+    /// The search is fuzzy and can return another song, a remix or a cover, so
+    /// unlike the exact lookup (where the server matches names itself) every
+    /// candidate must carry a title that loosely matches the query. Better no
+    /// lyrics than wrong lyrics.
     private static func selectCandidate(from payloads: [Payload], for track: TrackIdentity) -> Lyrics? {
+        let wanted = track.normalized.title
         for payload in payloads {
+            guard let name = payload.trackName, !name.isEmpty else { continue }
+            let candidate = TrackIdentity(title: name, artist: "", album: nil, duration: nil).normalized.title
+            guard TrackIdentity.loosely(candidate, matches: wanted) else { continue }
             if let lyrics = lyrics(from: payload, for: track) { return lyrics }
         }
         return nil

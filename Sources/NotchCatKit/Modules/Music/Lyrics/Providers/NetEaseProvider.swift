@@ -33,6 +33,7 @@ struct NetEaseProvider: LyricsProvider {
 
     private struct LyricResponse: Decodable {
         struct Lrc: Decodable { let lyric: String? }
+        let code: Int?
         let lrc: Lrc?
     }
 
@@ -80,6 +81,8 @@ struct NetEaseProvider: LyricsProvider {
             throw LyricsProviderError.badResponse
         }
         if let code = response.code, code != 200 { throw LyricsProviderError.badResponse }
+        // Real zero-result responses still carry `code: 200`.
+        if response.code == nil, response.result == nil { throw LyricsProviderError.badResponse }
 
         let wanted = track.normalized.title
         for song in response.result?.songs ?? [] {
@@ -105,9 +108,31 @@ struct NetEaseProvider: LyricsProvider {
         } catch {
             throw LyricsProviderError.badResponse
         }
+        // A refusal such as `{"code":-460,"msg":"Cheating"}` has no `lrc`, and
+        // must not look like a song without lyrics.
+        if let code = response.code, code != 200 { throw LyricsProviderError.badResponse }
         guard let raw = response.lrc?.lyric,
-              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let parsed = LRCParser.parse(raw)
         else { return nil }
-        return LRCParser.parse(raw)
+        return isPlaceholder(parsed) ? nil : parsed
+    }
+
+    /// Instrumentals and uncatalogued songs carry a one-line notice as their
+    /// "lyric". Timed, it would count as synced lyrics and stop the provider
+    /// walk, so it is treated as no lyrics.
+    private static let placeholders = ["纯音乐，请欣赏", "纯音乐, 请欣赏", "暂无歌词", "没有歌词"]
+
+    private static func isPlaceholder(_ lyrics: Lyrics) -> Bool {
+        let text: String
+        switch lyrics {
+        case .synced(let lines):
+            guard lines.count == 1 else { return false }
+            text = lines[0].text
+        case .plain(let plain):
+            text = plain
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return placeholders.contains { TrackIdentity.loosely($0, matches: trimmed) }
     }
 }

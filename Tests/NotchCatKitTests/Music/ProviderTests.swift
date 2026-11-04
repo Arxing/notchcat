@@ -97,14 +97,60 @@ final class ProviderTests: XCTestCase {
 
     func testLRCLIBSearchPicksFirstValidCandidate() throws {
         let json = data("""
-        [{"duration":400,"syncedLyrics":"[00:01.00]wrong length"},
-         {"duration":200,"syncedLyrics":"","plainLyrics":"  "},
-         {"duration":201,"syncedLyrics":"[00:01.00]second"},
-         {"duration":200,"syncedLyrics":"[00:01.00]third"}]
+        [{"trackName":"T","duration":400,"syncedLyrics":"[00:01.00]wrong length"},
+         {"trackName":"T","duration":200,"syncedLyrics":"","plainLyrics":"  "},
+         {"trackName":"T","duration":201,"syncedLyrics":"[00:01.00]second"},
+         {"trackName":"T","duration":200,"syncedLyrics":"[00:01.00]third"}]
         """)
         XCTAssertEqual(
             LRCLIBProvider.decodeSearch(json, for: track),
             .synced([LyricLine(time: 1, text: "second")])
+        )
+    }
+
+    func testLRCLIBSearchRejectsCandidateWithWrongTitle() {
+        let json = data(#"[{"trackName":"Another Song","duration":200,"syncedLyrics":"[00:01.00]wrong"}]"#)
+        XCTAssertNil(LRCLIBProvider.decodeSearch(json, for: track))
+    }
+
+    func testLRCLIBSearchRejectsWrongTitleWhenTrackHasNoDuration() {
+        let json = data(#"[{"trackName":"Another Song","duration":200,"syncedLyrics":"[00:01.00]wrong"}]"#)
+        let unknownLength = TrackIdentity(title: "T", artist: "A", album: nil, duration: nil)
+        XCTAssertNil(LRCLIBProvider.decodeSearch(json, for: unknownLength))
+    }
+
+    func testLRCLIBSearchRejectsCandidateWithoutTrackName() {
+        let json = data("""
+        [{"duration":200,"syncedLyrics":"[00:01.00]no name"},
+         {"trackName":"","duration":200,"syncedLyrics":"[00:01.00]empty name"}]
+        """)
+        XCTAssertNil(LRCLIBProvider.decodeSearch(json, for: track))
+    }
+
+    func testLRCLIBSearchAcceptsSimplifiedVariantOfTraditionalTitle() throws {
+        let query = TrackIdentity(title: "後來", artist: "劉若英", album: nil, duration: nil)
+        let json = data(#"[{"trackName":"后来","duration":250,"syncedLyrics":"[00:01.00]line"}]"#)
+        XCTAssertEqual(
+            try XCTUnwrap(LRCLIBProvider.decodeSearch(json, for: query)),
+            .synced([LyricLine(time: 1, text: "line")])
+        )
+    }
+
+    func testLRCLIBSearchAcceptsCandidateTitleWithFeaturingSuffix() {
+        let json = data(#"[{"trackName":"T (feat. X)","duration":200,"syncedLyrics":"[00:01.00]line"}]"#)
+        XCTAssertNotNil(LRCLIBProvider.decodeSearch(json, for: track))
+    }
+
+    func testLRCLIBSearchSkipsEarlierWrongTitleAndPicksFirstMatchingTitle() throws {
+        let json = data("""
+        [{"trackName":"T (Remix Of Something Else)","duration":200,"syncedLyrics":"[00:01.00]remix"},
+         {"trackName":"Other","duration":200,"syncedLyrics":"[00:01.00]other"},
+         {"trackName":"t","duration":200,"syncedLyrics":"[00:01.00]right"},
+         {"trackName":"T","duration":200,"syncedLyrics":"[00:01.00]later"}]
+        """)
+        XCTAssertEqual(
+            LRCLIBProvider.decodeSearch(json, for: track),
+            .synced([LyricLine(time: 1, text: "right")])
         )
     }
 
@@ -166,7 +212,7 @@ final class ProviderTests: XCTestCase {
     func testLRCLIBExact404FallsThroughToSearch() async throws {
         StubURLProtocol.install { request in
             if request.url?.path == "/api/get" { return (404, data(#"{"code":404}"#)) }
-            return (200, data(#"[{"duration":200,"syncedLyrics":"[00:02.00]found by search"}]"#))
+            return (200, data(#"[{"trackName":"T","duration":200,"syncedLyrics":"[00:02.00]found by search"}]"#))
         }
         let provider = LRCLIBProvider(session: StubURLProtocol.makeSession())
 
@@ -184,7 +230,7 @@ final class ProviderTests: XCTestCase {
             if request.url?.path == "/api/get" {
                 return (200, data(#"{"duration":400,"syncedLyrics":"[00:01.00]wrong song"}"#))
             }
-            return (200, data(#"[{"duration":199,"syncedLyrics":"[00:02.00]right song"}]"#))
+            return (200, data(#"[{"trackName":"T","duration":199,"syncedLyrics":"[00:02.00]right song"}]"#))
         }
         let provider = LRCLIBProvider(session: StubURLProtocol.makeSession())
 
@@ -343,6 +389,57 @@ final class ProviderTests: XCTestCase {
     func testNetEaseSelectionRejectsGarbledAndRefusedResponses() {
         XCTAssertThrowsError(try NetEaseProvider.selectSongID(from: data("<html/>"), for: track))
         XCTAssertThrowsError(try NetEaseProvider.selectSongID(from: data(#"{"code":-460,"msg":"Cheating"}"#), for: track))
+    }
+
+    func testNetEaseSelectionRejectsResponseWithNeitherCodeNorResult() {
+        XCTAssertThrowsError(try NetEaseProvider.selectSongID(from: data("{}"), for: track))
+        XCTAssertThrowsError(try NetEaseProvider.selectSongID(from: data(#"{"msg":"hi"}"#), for: track))
+    }
+
+    func testNetEaseInstrumentalPlaceholderYieldsNil() {
+        for placeholder in ["纯音乐，请欣赏", "纯音乐, 请欣赏", "暂无歌词", "没有歌词", "純音樂，請欣賞", "  暫無歌詞 "] {
+            let json = data(#"{"lrc":{"lyric":"[00:00.00]\#(placeholder)"}}"#)
+            XCTAssertNil(NetEaseProvider.decodeLyric(json), placeholder)
+        }
+        XCTAssertNil(NetEaseProvider.decodeLyric(data(#"{"lrc":{"lyric":"纯音乐，请欣赏"}}"#)))
+    }
+
+    func testNetEaseRealSingleLineLyricIsNotDropped() throws {
+        let json = data(#"{"lrc":{"lyric":"[00:05.00]Just one real line"}}"#)
+        XCTAssertEqual(
+            try XCTUnwrap(NetEaseProvider.decodeLyric(json)),
+            .synced([LyricLine(time: 5, text: "Just one real line")])
+        )
+    }
+
+    func testNetEasePlaceholderOnLaterLineOfLongerLyricIsKept() throws {
+        let json = data(#"{"lrc":{"lyric":"[00:01.00]real\n[00:02.00]暂无歌词"}}"#)
+        XCTAssertEqual(try XCTUnwrap(NetEaseProvider.decodeLyric(json)), .synced([
+            LyricLine(time: 1, text: "real"), LyricLine(time: 2, text: "暂无歌词"),
+        ]))
+    }
+
+    func testNetEaseRefusedLyricResponseThrowsThroughFetch() async {
+        StubURLProtocol.install { request in
+            request.url?.path == "/api/search/get/web"
+                ? (200, self.searchJSON(#"{"id":1,"name":"T","duration":200000}"#))
+                : (200, data(#"{"code":-460,"msg":"Cheating"}"#))
+        }
+        let provider = NetEaseProvider(session: StubURLProtocol.makeSession())
+
+        do {
+            _ = try await provider.fetchLyrics(for: track)
+            XCTFail("a refused lyric request must surface as a failure, not as \"not found\"")
+        } catch let error as LyricsProviderError {
+            XCTAssertEqual(error, .badResponse)
+        } catch {
+            XCTFail("unexpected error \(error)")
+        }
+    }
+
+    func testNetEaseLyricResponseWithCode200IsAccepted() throws {
+        let json = data(#"{"code":200,"lrc":{"lyric":"[00:02.00]hello"}}"#)
+        XCTAssertNotNil(NetEaseProvider.decodeLyric(json))
     }
 
     // MARK: NetEase requests and error semantics
