@@ -38,26 +38,30 @@ scripts/run.sh                          # swift build && 執行 .build/debug/Not
 - 播放**控制**（`MRMediaRemoteSendCommand`）不受讀取封閉影響，實測可用。
 - helper 行程的記憶體會成長，但上限受 MediaRemote 內部約 400 秒的逾時所限制，實測在約 416 個來源處進入平穩，不是無限成長。
 - `ElapsedTime` 只是 `Timestamp` 那一刻的快照，目前位置要用 `elapsed + (now − timestamp) × rate` 算；封面位元組不是每次都附，要以識別碼為鍵自行快取。
-- 視窗標題不需要任何權限即可讀（YouTube Music PWA 為 `YouTube Music - 曲名 | YouTube Music 🔊` 形式），但沒有進度、長度與封面。
+- 視窗標題在開發機上讀得到（YouTube Music PWA 為 `YouTube Music - 曲名 | YouTube Music 🔊` 形式），但沒有進度、長度與封面。macOS 10.15 起其他 App 的視窗標題通常要有「螢幕錄製」權限才讀得到，開發機的量測環境（例如終端機）可能已經有該權限，所以「不需要權限」這點未經確認；沒有權限時備援讀不到標題，什麼都不顯示。備援沒有演出者，因此只顯示曲名，不查歌詞。
 
 ## 尚未驗證（請使用者在實機上逐項確認）
 
 1. YouTube Music、YouTube、Spotify 各播一首：Preview 出現封面、音柱與歌詞條；Expanded 顯示曲名、演出者、進度條、封面。**Spotify 完全未驗證**（開發機沒安裝）。
 2. 暫停時 helper 輸出的形狀（Preview 是否正確回到空黑條）。
 3. 拖動進度時 helper 是否會輸出新的一行（畫面是否跟上）。
-4. 視窗標題備援的格式：YouTube Music PWA 以外的情境，以及備援是否真的不需要「螢幕錄製」權限。
+4. 視窗標題備援的格式：YouTube Music PWA 以外的情境，以及備援是否需要「螢幕錄製」權限（很可能需要，見上方實測發現）。
 5. hover 不閃爍：Preview 加高後重新驗收（這是 Shell 先前最難的問題）；特別留意歌詞條出現或折疊使 Preview 高度改變時，游標靜止不動是否會產生多餘的 `mouseEntered`。
 6. `.scrollIndicators(.hidden)` 在實際 App 裡是否生效。
 7. 歌詞條底色透明度 0.6、高度 24pt 的觀感；展開／折疊動畫與折疊後的 hover 範圍。
 8. 上一首／播放暫停／下一首（尤其 `next`、`previous`）真的控制得動。
 9. 殺掉 perl 行程（`pkill -f NotchCatMediaRemoteHelper`）後自動恢復；暫時改名動態庫後 App 不崩潰並退到視窗標題備援（已知會在 log 印一行 dylib not found，只印一次）。
 10. 無網路時歌詞靜默消失、曲目顯示不受影響。
-11. 啟動時歌曲已播到一半（視窗標題備援情境）：歌詞不得從頭捲動。
+11. 視窗標題備援只顯示曲名（沒有演出者，不查歌詞）。
 12. helper 的 CPU 與記憶體在長時間執行下的表現。
 13. 音柱（Equalizer）動畫的 CPU 成本。
 14. Expanded 的 AppBar 實際高度約 15pt（`MusicExpandedView` 的註解寫約 20pt），版面預算是 149pt 而非 144pt，請目視確認沒有擠壓或裁切。
 15. 歌詞條額外高度的 0.28 秒動畫期間，Preview 的封面是從零尺寸長出來的，請確認觀感可接受。
 16. `.scrollIndicators(.hidden)` 也要在「系統設定 > 外觀 > 顯示捲動條：永遠」下檢查。
+17. 睡眠／喚醒：播放音樂時讓 Mac 睡眠再喚醒，helper 是否恢復、資料是否是新的。
+18. 從選單列 Quit，以及對 App 下 `kill -9`，之後 `pgrep perl` 都不應留下 helper 行程。
+19. App 執行中重新 `swift build`（動態庫被重新連結）後，確認 helper 能恢復。
+20. 視窗標題備援在有／沒有「螢幕錄製」權限下的行為（沒有權限時預期什麼都不顯示）。
 
 驗收後把歌詞條透明度與高度的調整結果寫回 Music spec 與計畫的 Global Constraints。
 

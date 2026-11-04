@@ -75,7 +75,7 @@
 
 4. **播放控制（`MRMediaRemoteSendCommand`）不受讀取封閉的影響，實測可用。** 見第 8 節。
 
-5. **視窗標題可讀，且不需要任何權限。** 以 `CGWindowListCopyWindowInfo` 從編譯後的執行檔即可取得各視窗標題。開發機上 YouTube Music 這個 Chrome PWA 的視窗標題形如：
+5. **視窗標題在開發機上可讀。** 以 `CGWindowListCopyWindowInfo` 從編譯後的執行檔即可取得各視窗標題。這次量測的環境可能已經有「螢幕錄製」權限（macOS 10.15 起其他 App 的視窗標題通常要有該權限），「不需要權限」未經確認；沒有權限時讀不到標題，備援就什麼都不顯示。開發機上 YouTube Music 這個 Chrome PWA 的視窗標題形如：
 
    ```
    擁有者：YouTube Music
@@ -180,7 +180,7 @@ protocol NowPlayingSource {
 - 動態庫在宿主內持續查詢現正播放，**只在內容變化時**（曲目、播放速率、`ElapsedTime`／`Timestamp` 任一改變）往標準輸出寫一行 JSON。`ElapsedTime` 錨點變動也包含使用者拖動進度的情形，因此**拖動進度預期可被偵測到**（仍待實機確認：實作驗證時不得操作使用者的播放，故未實測拖動）。
 - Swift 端逐行讀取，交給 `HelperMessageParser`，轉成 `NowPlayingSnapshot`。
 - 模組 `onStop` 時終止行程。
-- **行程意外結束時：** 以退避間隔重啟（建議 1、2、4…最多 30 秒）。連續失敗超過上限即放棄，`MediaRemoteSource` 回報 nil，`NowPlayingMonitor` 自動退到視窗標題備援。主程序不因此崩潰。
+- **行程意外結束時：** 以退避間隔重啟（建議 1、2、4…最多 30 秒）。連續失敗超過上限即放棄，`MediaRemoteSource` 回報 nil，`NowPlayingMonitor` 自動退到視窗標題備援。主程序不因此崩潰。放棄後每隔一段時間（預設 300 秒）重新嘗試一次；從睡眠喚醒時也會換掉舊的 helper 並重新開始。helper 本身若連續 10 次查詢都沒有回覆，以結束碼 4 離開，交給上述重啟機制處理。
 - **啟動即讀不到任何欄位**（宿主被系統關掉的徵兆）與「真的沒在播」要能區分：前者是行程啟動後立刻回報鍵數為 0 且連續多次，後者是正常的空狀態。具體判定留待實作時以實測定。
 
 動態庫的建置與載入細節（SwiftPM 的動態庫 target 輸出位置、執行時如何定位、arm64 簽章是否由連結器自動帶上）是**實作時第一個要驗證的項目**，已於 2026-11-04 驗證：`swift build` 產出 `.build/debug/libNotchCatMediaRemoteHelper.dylib`，連結器自動帶上 ad-hoc 簽章（`flags=0x20002(adhoc,linker-signed)`），不需額外 `codesign`；`/usr/bin/perl` 載入後讀到完整資料。perl 的 hardened runtime 拒絕相對路徑，動態庫必須以絕對路徑傳入。執行時以「可執行檔同目錄」定位。
