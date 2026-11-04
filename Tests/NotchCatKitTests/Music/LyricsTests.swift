@@ -106,6 +106,51 @@ final class LyricsTests: XCTestCase {
         XCTAssertEqual(lines, [LyricLine(time: 1, text: "see [00:30.00] later")])
     }
 
+    func testEnhancedWordTagsAreStripped() {
+        XCTAssertEqual(
+            synced("[00:01.00]<00:01.00>Hello <00:01.50>world"),
+            [LyricLine(time: 1, text: "Hello world")]
+        )
+        XCTAssertEqual(
+            synced("[00:01.00]<00:01>a <0:02:50> b  <00:03.125>c").map(\.text),
+            ["a b c"]
+        )
+    }
+
+    func testWordTagsAroundCJKText() {
+        XCTAssertEqual(
+            synced("[00:05.00]<00:05.00>你好<00:05.40>，<00:05.80> 世界 <00:06.20>🎵").map(\.text),
+            ["你好， 世界 🎵"]
+        )
+    }
+
+    func testNonTimeAngleBracketsStayInText() {
+        XCTAssertEqual(synced("[00:01.00]I <3 you").map(\.text), ["I <3 you"])
+        XCTAssertEqual(synced("[00:01.00]<b>bold</b> <00:02.00>text").map(\.text), ["<b>bold</b> text"])
+        XCTAssertEqual(synced("[00:01.00]<00:01.00 unclosed <-00:02.00>x <").map(\.text),
+                       ["<00:01.00 unclosed <-00:02.00>x <"])
+    }
+
+    func testLineOfOnlyWordTagsIsDropped() {
+        XCTAssertEqual(synced("[00:01.00]<00:01.00> <00:02.00>\n[00:03.00]kept"),
+                       [LyricLine(time: 3, text: "kept")])
+        XCTAssertNil(LRCParser.parse("[00:01.00]<00:01.00>"))
+    }
+
+    func testWhitespaceBetweenStackedLeadingTags() {
+        XCTAssertEqual(
+            synced("[00:10.00] [00:20.00]x"),
+            [LyricLine(time: 10, text: "x"), LyricLine(time: 20, text: "x")]
+        )
+    }
+
+    func testManyWordTagsDoNotCrash() {
+        let tags = String(repeating: "<00:01.00>a ", count: 50_000)
+        XCTAssertEqual(synced("[00:01.00]" + tags).first?.text.count, 99_999)
+        let angles = String(repeating: "<", count: 500_000)
+        XCTAssertEqual(synced("[00:01.00]" + angles).first?.text.count, 500_000)
+    }
+
     // MARK: - Hostile input
 
     func testHugeMinutesValueDoesNotCrash() {

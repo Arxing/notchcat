@@ -57,14 +57,14 @@ enum LRCParser {
         for rawLine in trimmed.split(whereSeparator: \.isNewline) {
             var rest = rawLine.drop(while: \.isWhitespace)
             var times: [TimeInterval] = []
-            while let (time, remainder) = leadingTimeTag(in: rest) {
+            while let (time, remainder) = leadingTimeTag(in: rest, open: "[", close: "]") {
                 times.append(time)
-                rest = remainder
+                rest = remainder.drop(while: \.isWhitespace)
             }
             guard !times.isEmpty else { continue }
             sawTimeTag = true
 
-            let text = rest.trimmingCharacters(in: .whitespaces)
+            let text = stripWordTags(from: rest)
             guard !text.isEmpty else { continue }
             for time in times {
                 lines.append(LyricLine(time: time, text: text))
@@ -83,10 +83,48 @@ enum LRCParser {
         return .synced(ordered.map(\.element))
     }
 
-    /// Reads one `[mm:ss]`, `[mm:ss.x…]` or `[mm:ss:x…]` tag at the start of
-    /// `text`. Minutes take 1–3 digits, seconds 1–2, the fraction 1–3; anything
-    /// else (signs, longer numbers, metadata keys) is not a time tag.
-    private static func leadingTimeTag(in text: Substring) -> (TimeInterval, Substring)? {
+    /// Removes enhanced-LRC word timings (`<mm:ss.xx>`) from lyric text, then
+    /// collapses the spaces they leave behind and trims. Angle brackets that do
+    /// not hold a valid time (`<3`, `<b>`) stay in the text. Text without any
+    /// word tag is only trimmed.
+    private static func stripWordTags(from text: Substring) -> String {
+        guard text.contains("<") else { return text.trimmingCharacters(in: .whitespaces) }
+
+        var result = ""
+        var rest = text
+        var removedTag = false
+        while let open = rest.firstIndex(of: "<") {
+            result += rest[..<open]
+            let candidate = rest[open...]
+            if let (_, remainder) = leadingTimeTag(in: candidate, open: "<", close: ">") {
+                removedTag = true
+                rest = remainder
+            } else {
+                result.append("<")
+                rest = candidate.dropFirst()
+            }
+        }
+        result += rest
+
+        guard removedTag else { return result.trimmingCharacters(in: .whitespaces) }
+        var collapsed = ""
+        var previousWasSpace = false
+        for character in result {
+            let isSpace = character == " " || character == "\t"
+            if isSpace && previousWasSpace { continue }
+            collapsed.append(character)
+            previousWasSpace = isSpace
+        }
+        return collapsed.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Reads one `[mm:ss]`, `[mm:ss.x…]` or `[mm:ss:x…]` tag (or the same
+    /// shapes in `<…>`) at the start of `text`. Minutes take 1–3 digits,
+    /// seconds 1–2, the fraction 1–3; anything else (signs, longer numbers,
+    /// metadata keys) is not a time tag.
+    private static func leadingTimeTag(
+        in text: Substring, open: Character, close: Character
+    ) -> (TimeInterval, Substring)? {
         // Tags are pure ASCII, so walking UTF-8 indices never splits a character.
         let bytes = text.utf8
         var index = bytes.startIndex
@@ -108,7 +146,7 @@ enum LRCParser {
             return count > 0 ? (value, count) : nil
         }
 
-        guard consume(UInt8(ascii: "[")),
+        guard consume(open.asciiValue!),
               let minutes = digits(maxCount: 3),
               consume(UInt8(ascii: ":")),
               let seconds = digits(maxCount: 2) else { return nil }
@@ -118,7 +156,7 @@ enum LRCParser {
             guard let parts = digits(maxCount: 3) else { return nil }
             fraction = Double(parts.value) / pow(10, Double(parts.count))
         }
-        guard consume(UInt8(ascii: "]")) else { return nil }
+        guard consume(close.asciiValue!) else { return nil }
 
         let time = Double(minutes.value) * 60 + Double(seconds.value) + fraction
         return (time, text[index...])
