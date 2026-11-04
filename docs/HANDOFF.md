@@ -5,7 +5,7 @@
 ## 目前狀態
 
 - Branch：`feature/music-module`。Shell（Preview／Expanded 兩個模式）、模組系統與 Music 模組都已實作，Music 模組已在 `AppDelegate` 安裝，`swift build`、`swift test` 通過，啟動煙霧測試正常（App 啟動不崩潰、結束後沒有殘留的 perl 行程）。
-- **等待使用者在有瀏海的 Mac 上做實機驗收**，清單見下方「尚未驗證」。驗收期間請勿動到正在播放的音樂以外的東西；發現的問題一項一個小提交。
+- **等待使用者在有瀏海的 Mac 上做實機驗收**，清單見下方「尚未驗證」。驗收時請在實機上實際播放音樂；發現的問題一項一個小提交。
 - 專案型態：Swift Package，macOS 14+。執行方式見 `README.md`：務必 `swift build` 之後才執行，`scripts/run.sh` 已包好（`swift run` 單獨不會建出 helper 動態庫）。
 
 ## 架構與文件指標
@@ -55,6 +55,9 @@ scripts/run.sh                          # swift build && 執行 .build/debug/Not
 11. 啟動時歌曲已播到一半（視窗標題備援情境）：歌詞不得從頭捲動。
 12. helper 的 CPU 與記憶體在長時間執行下的表現。
 13. 音柱（Equalizer）動畫的 CPU 成本。
+14. Expanded 的 AppBar 實際高度約 15pt（`MusicExpandedView` 的註解寫約 20pt），版面預算是 149pt 而非 144pt，請目視確認沒有擠壓或裁切。
+15. 歌詞條額外高度的 0.28 秒動畫期間，Preview 的封面是從零尺寸長出來的，請確認觀感可接受。
+16. `.scrollIndicators(.hidden)` 也要在「系統設定 > 外觀 > 顯示捲動條：永遠」下檢查。
 
 驗收後把歌詞條透明度與高度的調整結果寫回 Music spec 與計畫的 Global Constraints。
 

@@ -107,22 +107,24 @@ v1 的模組就是**編譯進同一個 App 的 Swift type**，符合 `NotchModul
 
 ## 5. 範例模組：Music（現正播放 + 動態歌詞）
 
+> Music 模組的權威設計文件是 [`docs/superpowers/specs/2026-10-14-music-module-design.md`](superpowers/specs/2026-10-14-music-module-design.md)；以下只是摘要，若有出入以該 spec 為準。
+
 這是規劃中最複雜的模組，先拆解：
 
-- **資料來源**：`MediaRemote` 私有框架（無官方文件，需社群逆向/現成封裝），可取得目前播放 App、歌名/歌手/專輯圖、播放進度、播放狀態。
-- **動態歌詞**：MediaRemote 本身不提供歌詞，需要另外接歌詞來源（例如自行抓取 `.lrc`、或音樂 App 若有提供逐字歌詞介面則優先用）；同步邏輯用播放進度對齊歌詞時間軸。
+- **資料來源**：現正播放透過 Apple 簽章的 `/usr/bin/perl` 當宿主、載入我們自己的 C 動態庫來讀取（MediaRemote 的讀取對第三方簽章的主程序封閉），宿主不可用時退到視窗標題備援（目前只認 YouTube Music）；播放控制用 `MRMediaRemoteSendCommand`。
+- **動態歌詞**：依序向 LRCLIB、網易雲查詢，帶時間軸的結果要通過合理性把關才採用；用播放進度對齊歌詞時間軸，只做到行級。
 - **isActive**：只要偵測到「有音樂在播放」就回報 true。
-- **Preview**：跑馬燈當前歌詞行 + 極小的播放進度指示。
-- **Expanded**：封面圖、完整歌名/歌手、播放進度條、上一首/暫停/下一首控制、（如果有）逐句歌詞捲動。
+- **Preview**：左右兩翼顯示封面與動態音柱，瀏海下方有一條可折疊的歌詞條。
+- **Expanded**：封面圖、歌名/歌手、播放進度條、上一首/暫停/下一首控制、歌詞。
 
-風險提醒：`MediaRemote` 是私有 API，這類工具通常**不上架 Mac App Store**，走「公證（notarization）但外部發布」的路線，並自備更新機制（例如 Sparkle）。
+風險提醒：這個模組使用私有 API，**僅供個人使用**（見 README），不上架 Mac App Store；任何對外發布都必須重新評估這個做法。
 
 ## 6. 技術選型
 
 - **語言/UI**：Swift + SwiftUI（畫面）+ AppKit（`NSPanel`、螢幕/視窗管理需要橋接的部分）。
 - **狀態管理**：Combine（相容 macOS 13+）；若最低系統版本訂在 14+，可以改用 Observation framework 讓程式碼更精簡。
 - **最低系統需求建議**：macOS 14（Sonoma）起，簡化狀態管理與新 API 的使用；瀏海本身只有 14"/16" MacBook Pro (2021+) 有。
-- **發布方式**：直接發布 + 公證，不上 Mac App Store（因為 Music 模組等會用私有 API）；用 Sparkle 做自動更新。
+- **發布方式**：直接發布 + 公證，不上 Mac App Store（因為 Music 模組等會用私有 API）；用 Sparkle 做自動更新。注意：Music 模組的私有 API 做法僅供個人使用（見 README），任何對外發布都必須重新評估。
 
 ## 7. 專案結構（建議）
 
@@ -145,12 +147,12 @@ docs/
 
 1. **Phase 0 — 純骨架**：瀏海幾何偵測、`NSPanel` 建置、Preview ⇄ Expanded 的 hover 展開收合動畫，內容先放假資料，不接任何模組。驗收：能在真機瀏海上看到收合/展開，動畫順暢。
 2. **Phase 1 — 模組介面打底**：實作 `NotchModule` protocol、`ModuleManager`，用一個最簡單的「時鐘模組」（無 active 狀態，只在 Expanded 顯示時鐘）驗證整個安裝機制跑得通。
-3. **Phase 2 — Music 模組**：串接 MediaRemote、做 Preview/Expanded 畫面、動態歌詞來源與同步。這階段獨立拆成子任務執行。
+3. **Phase 2 — Music 模組**：依 [`docs/superpowers/specs/2026-10-14-music-module-design.md`](superpowers/specs/2026-10-14-music-module-design.md) 實作（現正播放來源、Preview/Expanded 畫面、動態歌詞來源與同步）。
 4. **Phase 3 — 擴充與體驗**：更多模組（電量、剪貼簿、日曆…）、模組管理/設定 UI、多模組搶 Preview 的排序體驗調整。
-5. **Phase 4 — 發布**：簽章、公證、自動更新，（可選）評估是否開放社群寫模組。
+5. **Phase 4 — 發布**：簽章、公證、自動更新，（可選）評估是否開放社群寫模組。Music 模組的私有 API 做法僅供個人使用（見 README），對外發布前必須重新評估。
 
 ## 9. 待決事項（需要你決定，暫不動工）
 
-- 最低支援的 macOS 版本（14 vs 13）。
+目前未決事項見 `docs/HANDOFF.md`。
+
 - v1 要不要一開始就做「模組開關」的使用者可見設定 UI，還是先寫死啟用清單。
-- Music 模組的歌詞來源打算怎麼拿（純顯示系統提供的資訊，或額外串接歌詞服務）。
