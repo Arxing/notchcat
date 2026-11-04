@@ -179,6 +179,31 @@ final class MediaRemoteSourceTests: XCTestCase {
         XCTAssertEqual(launcher.launchCount, 1)
     }
 
+    func testLineAfterExitIsIgnoredAndDoesNotResetBackoff() {
+        let source = makeSource(retryDelays: [1, 2])
+        source.start()
+        launcher.exit()
+        launcher.emit(trackLine)
+        scheduler.runPending()
+        launcher.exit()
+
+        XCTAssertTrue(published.isEmpty)
+        XCTAssertEqual(scheduler.delays, [1, 2])
+        XCTAssertEqual(launcher.launchCount, 2)
+    }
+
+    func testStopPublishesNil() {
+        let source = makeSource()
+        source.start()
+        launcher.emit(trackLine)
+        source.stop()
+
+        XCTAssertEqual(published.count, 2)
+        XCTAssertNil(published.last ?? nil)
+        source.start()
+        XCTAssertEqual(published.count, 2, "a restart must not replay the old snapshot")
+    }
+
     // MARK: - PerlHelperLauncher
 
     private func makeTemporaryFile() throws -> URL {

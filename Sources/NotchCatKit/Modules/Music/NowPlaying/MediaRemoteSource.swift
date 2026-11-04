@@ -57,11 +57,14 @@ final class MediaRemoteSource: NowPlayingSource {
         launch()
     }
 
+    /// Terminates the helper and publishes nil, so a later `start()` does not
+    /// replay this session's last snapshot.
     func stop() {
         isRunning = false
         generation += 1
         handle?.terminate()
         handle = nil
+        subject.send(nil)
     }
 
     private func launch() {
@@ -89,6 +92,9 @@ final class MediaRemoteSource: NowPlayingSource {
 
     private func processExited(_ launchGeneration: Int) {
         guard isRunning, launchGeneration == generation else { return }
+        // Output still buffered from the dead process must not be published or
+        // reset the failure count, which would defeat the give-up limit.
+        generation += 1
         handle = nil
         fail()
     }

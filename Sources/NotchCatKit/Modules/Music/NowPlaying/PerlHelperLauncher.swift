@@ -29,6 +29,8 @@ final class PerlHelperLauncher: HelperProcessLaunching {
 
     private let perlPath: String
     private let dylibURL: URL?
+    /// The missing-dylib message is logged once per process, not once per retry.
+    private static var didLogMissingDylib = false
 
     init(perlPath: String = "/usr/bin/perl", dylibURL: URL? = PerlHelperLauncher.defaultDylibURL()) {
         self.perlPath = perlPath
@@ -44,7 +46,14 @@ final class PerlHelperLauncher: HelperProcessLaunching {
 
     func launch(onLine: @escaping (String) -> Void, onExit: @escaping (Int32) -> Void) throws -> HelperProcessHandle {
         guard FileManager.default.isExecutableFile(atPath: perlPath) else { throw LaunchError.perlNotFound }
-        guard let dylibURL, FileManager.default.fileExists(atPath: dylibURL.path) else { throw LaunchError.dylibNotFound }
+        guard let dylibURL, FileManager.default.fileExists(atPath: dylibURL.path) else {
+            if !Self.didLogMissingDylib {
+                Self.didLogMissingDylib = true
+                NSLog("NotchCat: %@ not found (%@); system now-playing is unavailable",
+                      Self.dylibName, dylibURL?.path ?? "nothing next to the executable")
+            }
+            throw LaunchError.dylibNotFound
+        }
 
         let process = Process()
         let input = Pipe()

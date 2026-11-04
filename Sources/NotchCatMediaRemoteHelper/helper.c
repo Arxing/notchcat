@@ -14,9 +14,9 @@
 //
 // Absent values are omitted, never written as null. `timestamp` is Unix epoch
 // seconds. `artworkData` is base64 and only present when MediaRemote attached
-// the bytes to this reply. A line is written only when title, artist, rate,
-// elapsed, timestamp, artworkId or "artwork bytes attached" changed since the
-// previous line. The process exits when stdin reaches EOF, so it dies with the
+// the bytes to this reply and they are at most kMaxArtworkBytes. A line is
+// written only when title, artist, rate, elapsed, timestamp, artworkId or
+// "artwork bytes attached" changed since the previous line. The process exits when stdin reaches EOF, so it dies with the
 // parent that holds the pipe.
 //
 // Signing: SwiftPM's linker output is already ad-hoc signed on arm64
@@ -53,6 +53,17 @@ typedef void (*GetNowPlayingInfoFn)(dispatch_queue_t queue, NowPlayingInfoHandle
 static const char *kFrameworkPath = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote";
 static const int64_t kReplyTimeoutSeconds = 3;
 static const unsigned int kPollIntervalSeconds = 1;
+/// Artwork larger than this is not attached (artworkId still is), so the line
+/// stays under the Swift reader's 4 MiB line cap: 3,000,000 bytes encode to
+/// 4,000,000 base64 characters, leaving ~190 KB for the other fields.
+static const CFIndex kMaxArtworkBytes = 3000000;
+
+// MediaRemote autoreleases objects on the calling thread. perl's main thread has
+// no autorelease pool of its own, so each poll pushes and pops one; without it
+// every poll leaks a few hundred bytes for the life of the process. libobjc is
+// already a load command of the built dylib (see `otool -L`).
+extern void *objc_autoreleasePoolPush(void);
+extern void objc_autoreleasePoolPop(void *pool);
 
 // MARK: - Growable output buffer
 
@@ -247,7 +258,8 @@ static void handle_info(CFDictionaryRef info) {
         state.hasRate = info_number(info, "kMRMediaRemoteNowPlayingInfoPlaybackRate", &state.rate);
         state.artworkId = info_string(info, "kMRMediaRemoteNowPlayingInfoArtworkIdentifier");
         CFTypeRef data = info_value(info, "kMRMediaRemoteNowPlayingInfoArtworkData");
-        if (data && CFGetTypeID(data) == CFDataGetTypeID() && CFDataGetLength((CFDataRef)data) > 0) {
+        if (data && CFGetTypeID(data) == CFDataGetTypeID()
+            && CFDataGetLength((CFDataRef)data) > 0 && CFDataGetLength((CFDataRef)data) <= kMaxArtworkBytes) {
             artworkData = (CFDataRef)data;
             state.hasArtworkData = true;
         }
@@ -351,11 +363,13 @@ void notchcat_helper_main(void *interp, void *cv) {
     dispatch_semaphore_t replied = dispatch_semaphore_create(0);
 
     for (;;) {
+        void *pool = objc_autoreleasePoolPush();
         getNowPlayingInfo(replyQueue, ^(CFDictionaryRef info) {
             handle_info(info);
             dispatch_semaphore_signal(replied);
         });
         dispatch_semaphore_wait(replied, dispatch_time(DISPATCH_TIME_NOW, kReplyTimeoutSeconds * NSEC_PER_SEC));
         sleep(kPollIntervalSeconds);
+        objc_autoreleasePoolPop(pool);
     }
 }
