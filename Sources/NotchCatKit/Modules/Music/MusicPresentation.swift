@@ -31,4 +31,19 @@ enum MusicPresentation {
         }
         return .title(snapshot.title)
     }
+
+    /// Whether the progress bar can be drawn: it needs both a positive total
+    /// length and a position anchor, otherwise the ratio would be a guess.
+    static func hasProgress(snapshot: NowPlayingSnapshot) -> Bool {
+        (snapshot.duration ?? 0) > 0 && snapshot.position != nil
+    }
+
+    /// How far playback is through the track, clamped to `0...1`; nil when
+    /// `hasProgress` is false.
+    static func progressFraction(snapshot: NowPlayingSnapshot, at now: Date) -> Double? {
+        guard hasProgress(snapshot: snapshot),
+              let duration = snapshot.duration,
+              let position = playbackPosition(snapshot: snapshot, at: now) else { return nil }
+        return min(max(position / duration, 0), 1)
+    }
 }

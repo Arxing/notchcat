@@ -30,6 +30,9 @@ final class MusicViewModel: ObservableObject {
 
     deinit { lookup?.cancel() }
 
+    /// Whether transport commands reach anything; the buttons disable when not.
+    var hasControl: Bool { control != nil }
+
     /// No-op when the system control is unavailable.
     func send(_ command: MediaRemoteCommand) {
         control?.send(command)

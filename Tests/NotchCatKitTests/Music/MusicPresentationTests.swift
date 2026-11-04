@@ -88,4 +88,30 @@ final class MusicPresentationTests: XCTestCase {
     func testPlaybackPositionIsNilWithoutAnchor() {
         XCTAssertNil(MusicPresentation.playbackPosition(snapshot: snapshot(position: nil), at: t0))
     }
+
+    func testProgressFractionFollowsPositionOverDuration() {
+        let anchor = PositionAnchor(elapsed: 50, timestamp: t0, rate: 1)
+        let playing = snapshot(position: anchor, duration: 200)
+
+        XCTAssertEqual(try XCTUnwrap(MusicPresentation.progressFraction(snapshot: playing, at: t0)), 0.25, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(MusicPresentation.progressFraction(snapshot: playing,
+                                                                        at: t0.addingTimeInterval(50))),
+                       0.5, accuracy: 1e-9)
+    }
+
+    func testProgressFractionClampsToUnitRange() {
+        let late = PositionAnchor(elapsed: 500, timestamp: t0, rate: 1)
+        // The position is already capped at the duration, so the bar is full.
+        XCTAssertEqual(MusicPresentation.progressFraction(snapshot: snapshot(position: late, duration: 200), at: t0), 1)
+    }
+
+    func testProgressFractionNeedsBothDurationAndPosition() {
+        let anchor = PositionAnchor(elapsed: 50, timestamp: t0, rate: 1)
+        XCTAssertNil(MusicPresentation.progressFraction(snapshot: snapshot(position: nil, duration: 200), at: t0))
+        XCTAssertNil(MusicPresentation.progressFraction(snapshot: snapshot(position: anchor, duration: nil), at: t0))
+        XCTAssertNil(MusicPresentation.progressFraction(snapshot: snapshot(position: anchor, duration: 0), at: t0))
+        XCTAssertFalse(MusicPresentation.hasProgress(snapshot: snapshot(position: nil, duration: 200)))
+        XCTAssertFalse(MusicPresentation.hasProgress(snapshot: snapshot(position: anchor, duration: nil)))
+        XCTAssertTrue(MusicPresentation.hasProgress(snapshot: snapshot(position: anchor, duration: 200)))
+    }
 }

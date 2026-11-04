@@ -98,4 +98,20 @@ final class MusicModuleTests: XCTestCase {
         play(false)
         XCTAssertEqual(values, [false, true, false])
     }
+
+    func testOnRemoveStopsSourcesLikeOnStop() {
+        var started = 0
+        var stopped = 0
+        let wired = MusicModule(
+            monitor: NowPlayingMonitor(sources: [source]), lyrics: NoLyrics(), control: nil,
+            preference: preference, notchWidth: 200,
+            startSources: { started += 1 }, stopSources: { stopped += 1 })
+
+        wired.onStart()
+        wired.onStop()
+        wired.onRemove()
+
+        XCTAssertEqual(started, 1)
+        XCTAssertEqual(stopped, 2)
+    }
 }

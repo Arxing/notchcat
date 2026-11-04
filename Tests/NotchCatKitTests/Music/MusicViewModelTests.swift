@@ -208,4 +208,9 @@ final class MusicViewModelTests: XCTestCase {
 
         XCTAssertTrue(control.sent.isEmpty)
     }
+
+    func testHasControlReflectsAvailability() {
+        XCTAssertFalse(makeViewModel(control: nil).hasControl)
+        XCTAssertTrue(makeViewModel(control: control).hasControl)
+    }
 }

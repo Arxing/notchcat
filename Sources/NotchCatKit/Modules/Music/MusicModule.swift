@@ -35,7 +35,7 @@ final class MusicModule: NotchModule {
 
     /// Wires the real sources in priority order, the real lyrics providers and
     /// the system transport control (absent when unavailable).
-    /// `onStop` must be called on the main thread: the sources are main-queue only.
+    /// `onStart` and `onStop` must both run on the main thread: the sources are main-queue only.
     static func makeDefault(notchWidth: CGFloat) -> MusicModule {
         let mediaRemote = MediaRemoteSource(launcher: PerlHelperLauncher())
         let windowTitle = WindowTitleSource()
@@ -69,12 +69,17 @@ final class MusicModule: NotchModule {
     }
 
     func tabIcon() -> AnyView { AnyView(Image(systemName: "music.note")) }
-    func previewView() -> AnyView { AnyView(EmptyView()) }
-    func expandedView() -> AnyView { AnyView(EmptyView()) }
+    func previewView() -> AnyView {
+        AnyView(MusicPreviewView(viewModel: viewModel, preference: preference, notchWidth: notchWidth))
+    }
+    func expandedView() -> AnyView {
+        AnyView(MusicExpandedView(viewModel: viewModel, preference: preference))
+    }
 
     func onInstall() {}
     func onStart() { startSources() }
     func onStop() { stopSources() }
-    func onRemove() {}
+    /// Same as `onStop`; stopping twice is harmless.
+    func onRemove() { onStop() }
     func settingsView() -> AnyView? { nil }
 }
