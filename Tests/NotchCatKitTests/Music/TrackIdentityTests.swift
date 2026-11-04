@@ -12,6 +12,20 @@ final class TrackIdentityTests: XCTestCase {
         XCTAssertEqual(make(title: "Song [Remastered 2011]").normalized.title, "Song")
     }
 
+    func testStripsFullWidthBracketSuffixes() {
+        XCTAssertEqual(make(title: "歌名（feat. X）").normalized.title, "歌名")
+        XCTAssertEqual(make(title: "歌名【Remastered】").normalized.title, "歌名")
+        XCTAssertEqual(make(title: "歌名（Live）").normalized.title, "歌名")
+    }
+
+    /// The keyword must be a whole word: "Live" must not eat "Liverpool".
+    func testSuffixKeywordsNeedWordBoundary() {
+        XCTAssertEqual(make(title: "Song (Liverpool Mix)").normalized.title, "Song (Liverpool Mix)")
+        XCTAssertEqual(make(title: "Song (Feather)").normalized.title, "Song (Feather)")
+        XCTAssertEqual(make(title: "Song (Explicitly Yours)").normalized.title, "Song (Explicitly Yours)")
+        XCTAssertEqual(make(title: "Song (Ftw)").normalized.title, "Song (Ftw)")
+    }
+
     func testLeavesCleanTitleAlone() {
         XCTAssertEqual(make(title: "後來有很多人去過那裡").normalized.title, "後來有很多人去過那裡")
     }
@@ -52,5 +66,10 @@ final class TrackIdentityTests: XCTestCase {
                        make(title: "T", duration: 260).cacheKey)
         XCTAssertEqual(make(title: "T", duration: 200).cacheKey,
                        make(title: "T", duration: nil).cacheKey)
+    }
+
+    func testCacheKeyCollapsesCaseAndFeatSuffix() {
+        XCTAssertEqual(make(title: "Song (feat. X)", artist: "Artist").cacheKey,
+                       make(title: "song", artist: "ARTIST").cacheKey)
     }
 }

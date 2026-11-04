@@ -13,7 +13,7 @@ struct TrackIdentity: Hashable {
     let duration: TimeInterval?
 
     private static let suffixPattern = try! NSRegularExpression(
-        pattern: #"\s*[\(\[](feat\.?|ft\.?|remaster(ed)?|live|explicit)[^\)\]]*[\)\]]"#,
+        pattern: #"\s*[\(\[（【]\s*(?:(?:feat|ft)\b\.?|remaster(?:ed)?\b|live\b|explicit\b)[^\)\]）】]*[\)\]）】]"#,
         options: .caseInsensitive
     )
 

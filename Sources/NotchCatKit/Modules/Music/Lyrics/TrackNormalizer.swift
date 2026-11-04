@@ -25,10 +25,16 @@ enum TrackNormalizer {
 
     private static let dashSeparator = try! NSRegularExpression(pattern: #"\s+[-–—]\s+"#)
 
-    /// `ft.` / `feat.` / `featuring` plus everything after it, with the opening
-    /// bracket when the segment is parenthesised.
+    /// A bracket group (ASCII or full-width) holding a featured-artist segment
+    /// anywhere inside it. The whole group goes, so no opener is left behind.
+    private static let bracketedFeat = try! NSRegularExpression(
+        pattern: #"\s*[\(\[（【][^\)\]）】]*\b(?:ft\.|feat\.|featuring\s)[^\)\]）】]*[\)\]）】]"#,
+        options: .caseInsensitive
+    )
+
+    /// A bare `ft.` / `feat.` / `featuring` plus everything after it.
     private static let featSegment = try! NSRegularExpression(
-        pattern: #"\s*[\(\[]?\s*\b(?:ft|feat)\.\s.*$|\s*[\(\[]?\s*\bfeaturing\s.*$"#,
+        pattern: #"\s*\b(?:ft\.|feat\.|featuring\s).*$"#,
         options: [.caseInsensitive, .dotMatchesLineSeparators]
     )
 
@@ -42,6 +48,7 @@ enum TrackNormalizer {
 
     private static func cleanTitle(_ title: String, artist: String) -> String {
         var result = splitOffArtist(title, artist: artist) ?? title
+        result = replace(bracketedFeat, in: result)
         result = replace(featSegment, in: result)
         result = replace(videoTag, in: result)
         result = replace(whitespaceRun, in: result, with: " ")

@@ -69,4 +69,25 @@ final class TrackNormalizerTests: XCTestCase {
         let id = TrackNormalizer.identity(from: snapshot(title: "T", artist: "Artist", album: "Album", duration: 123))
         XCTAssertEqual(id, TrackIdentity(title: "T", artist: "Artist", album: "Album", duration: 123))
     }
+
+    func testStripsFeatInsideAnyBracketGroupWithoutDanglingOpener() {
+        XCTAssertEqual(title("歌名（feat. X）", artist: "Y"), "歌名")
+        XCTAssertEqual(title("歌名【ft. X】", artist: "Y"), "歌名")
+        XCTAssertEqual(title("Song (Remix feat. X)", artist: "Y"), "Song")
+        XCTAssertEqual(title("Song [feat. X] [Official Video]", artist: "Y"), "Song")
+    }
+
+    func testEmptyResultFallsBackToOriginalTitle() {
+        XCTAssertEqual(title("X - (MV)", artist: "X"), "X - (MV)")
+    }
+
+    func testCleaningIsIdempotent() {
+        let first = title("蘇裔非 - 抱我!  ft. 莊岱諺", artist: "蘇裔非")
+        XCTAssertEqual(first, "抱我!")
+        XCTAssertEqual(title(first ?? "", artist: "蘇裔非"), "抱我!")
+    }
+
+    func testOnlyFirstDashSplitsOffArtist() {
+        XCTAssertEqual(title("A - B - C", artist: "A"), "B - C")
+    }
 }
