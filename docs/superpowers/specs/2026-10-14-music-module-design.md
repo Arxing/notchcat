@@ -16,7 +16,7 @@
 **範圍內：**
 
 - 讀取系統現正播放的曲名、演出者、專輯、總長度、播放位置、播放狀態與封面（來源提供什麼就用什麼，沒有的欄位一律允許為 nil，畫面不得因此破版）。
-- 依播放狀態決定 Music 是否接管 Preview：播放中顯示歌詞或曲名，沒在播放時 Preview 回到 Shell 預設的空黑條。
+- 依播放狀態決定 Music 是否接管 Preview：播放中左右兩翼顯示封面與音柱，瀏海下方多一條歌詞條（使用者可折疊）；沒在播放時 Preview 回到 Shell 預設的空黑條。
 - 取得逐行同步歌詞，依播放位置捲動。
 - Expanded 下的播放控制（上一首／播放暫停／下一首）。
 
@@ -30,7 +30,7 @@
 
 ## 2. 既有基礎
 
-兩態 Shell 與模組系統已完成並通過真機驗收，本模組直接架在上面，不改動 Shell：
+兩態 Shell 與模組系統已完成並通過真機驗收，本模組架在上面。**唯一需要動 Shell 的地方是第 7.1 節的「Preview 額外高度」**，其餘不改：
 
 - 實作 `NotchModule` protocol（`ModuleKit/NotchModule.swift`），向 `ModuleManager` 以 `register(_:)` 註冊。
 - `isActivePublisher` 回報「是否正在播放」，`ModuleManager` 據此算出 `activeModule`：Music active 時接管 Preview；不 active 時 Preview 顯示 Shell 預設的空黑條。這條線已經打通並驗證過，本模組只需要正確餵值。
@@ -122,10 +122,15 @@ Sources/NotchCatKit/Modules/Music/
     Providers/
       LRCLIBProvider.swift
       NetEaseProvider.swift
+  LyricStripPreference.swift    # 歌詞條折疊狀態（UserDefaults，可注入）
   Views/
-    MusicPreviewView.swift
+    MusicPreviewView.swift      # 兩翼 + 歌詞條
+    LyricStripView.swift        # 歌詞條本體（半透明底、跑馬燈）
+    EqualizerBars.swift         # 右翼的動態音柱
     MusicExpandedView.swift
 ```
+
+Shell 側的對應改動（第 7.1 節）在 `ModuleKit/NotchModule.swift`、`ModuleKit/ModuleManager.swift`、`Shell/NotchMode.swift`、`Shell/NotchShellController.swift`、`UI/NotchContentView.swift`。
 
 **關鍵邊界一：私有 API 只准出現在兩處。** 一是 `MediaRemoteControl.swift`，只用於送出控制指令；二是 `NotchCatMediaRemoteHelper` 這個 C target，用於讀取，而且只會在 Apple 簽章的 perl 行程內執行。**NotchCat 的 Swift 主程序自己不得呼叫讀取類私有 API**，因為實測證明它在主程序內只會回傳空值，留著只會讓人誤以為有資料。
 
@@ -280,11 +285,35 @@ protocol LyricsProvider {
 
 ## 7. 兩種模式的畫面
 
-| 模式 | 內容 |
+### 7.0 為什麼 Preview 不能直接顯示一行歌詞
+
+Preview 的條寬是「瀏海寬 + 160pt」，瀏海本體是螢幕硬體的挖洞，畫在上面的東西看不到。實際可用的只有瀏海左右各約 80pt 的「翼」，高度等於瀏海高度。一行歌詞放不進去，也會被瀏海從中間切開。因此 Preview 採兩翼加下方歌詞條的做法（類似 boring.notch）。
+
+### 7.1 Preview：兩翼加歌詞條
+
+```
+[封面] ░░░ 瀏海 ░░░ [音柱]      ← 兩翼：與瀏海同高，純黑，和瀏海連成一體
+┗━━━━ 目前這句歌詞 ━━━━┛        ← 歌詞條：在瀏海正下方，半透明黑底
+```
+
+- **左翼：** 封面縮圖（方形置中裁切）。沒有封面時用音符佔位圖。
+- **右翼：** 播放中的動態音柱。
+- **歌詞條：** 顯示完整寬度的一行，內容是當前歌詞行；位置未知或沒有同步歌詞時改顯示曲名；文字過長用跑馬燈。底色為黑色加透明度（預設 0.6，寫成單一常數便於實機調整），下緣圓角與 Preview 的圓角一致。
+- **可折疊：** 使用者可以折疊歌詞條，折疊後 Preview 回到只有兩翼。開關放在 Music 的 Expanded 畫面裡（一顆小按鈕），狀態存在 `UserDefaults`，預設為展開。折疊只影響 Preview，不影響 Expanded 內的歌詞。
+
+**Shell 的配合（本模組唯一對 Shell 的改動）：** Preview 的高度要能隨模組需求變動。
+
+- `NotchModule` 新增 `var previewExtraHeightPublisher: AnyPublisher<CGFloat, Never>`，預設實作回傳固定的 0，既有模組不受影響。
+- `ModuleManager` 對外提供「目前 active 模組要求的額外高度」，Shell 據此加高 Preview，上限夾在一個常數（建議 28pt）內。
+- Preview 實際高度 = 瀏海高度 + 額外高度。額外高度變動時要有動畫，且 Preview 的 hover 判定範圍必須跟著更新，歌詞條範圍內也算 hover。
+- 固定大小的容器必須容得下 Preview 加上額外高度的最大值（目前 Expanded 的 180pt 遠大於此，所以容器大小不變）。
+- Music 在「不 active」、「已折疊」兩種情形下回報 0。
+
+### 7.2 Expanded
+
+| 情形 | 內容 |
 |---|---|
-| **Preview，Music 不 active** | Shell 預設的空黑條（Music 完全不畫東西）。 |
-| **Preview，Music active** | 當前歌詞行（跑馬燈）。位置未知或無同步歌詞時，改顯示曲名跑馬燈。 |
-| **Expanded，有曲目** | 封面、曲名、演出者、進度條（有總長度與位置時）、上一首／播放暫停／下一首，以及（若有）歌詞。 |
+| **Expanded，有曲目** | 封面、曲名、演出者、進度條（有總長度與位置時）、上一首／播放暫停／下一首、歌詞條折疊開關，以及（若有）歌詞。 |
 | **Expanded，沒有曲目** | 使用者從 AppBar 手動點進來才會看到：一行「目前沒有播放」的文字，控制列隱藏。 |
 
 > 「目前沒有播放」這行字是我加的，尚未經使用者確認。
@@ -296,13 +325,15 @@ protocol LyricsProvider {
 - **演出者：** nil 時整行省略。
 - **來源 App 名稱：** 現正播放管道的欄位不含 App 名稱，因此不顯示。
 
-**退化階梯**（任一層失敗時往下退，畫面不得開天窗）：
+### 7.3 退化階梯
 
-1. 同步歌詞且位置可得 → 跟著位置捲動。
-2. 同步歌詞但位置未知 → Expanded 顯示靜態全文，Preview 顯示曲名。
-3. 僅純文字歌詞 → Expanded 顯示可捲動的靜態全文，Preview 顯示曲名。
-4. 無歌詞 → 兩個畫面都只顯示曲目資訊。
-5. 無任何來源有資料 → 模組不 active，Preview 回到空黑條。
+任一層失敗時往下退，畫面不得開天窗：
+
+1. 同步歌詞且位置可得 → 歌詞條跟著位置顯示當前行，Expanded 捲動。
+2. 同步歌詞但位置未知 → 歌詞條顯示曲名，Expanded 顯示靜態全文。
+3. 僅純文字歌詞 → 歌詞條顯示曲名，Expanded 顯示可捲動的靜態全文。
+4. 無歌詞 → 歌詞條顯示曲名，Expanded 只顯示曲目資訊。
+5. 無任何來源有資料 → 模組不 active，Preview 回到空黑條（額外高度為 0）。
 
 ## 8. 播放控制
 
@@ -337,7 +368,9 @@ Expanded 的上一首／播放暫停／下一首透過 `MRMediaRemoteSendCommand
 - `LyricsProvider` 以假實作注入，驗證「純文字不算可用、同步結果勝過來源順位」。這是第 6.2 節的核心規則，必須有測試保護。
 - `MediaRemoteSource` 的行程監管（重啟、退避、放棄後切換）：以可注入的行程啟動器做單元測試；實際載入 perl 與動態庫列為實機驗證項目。
 - `WindowTitleSource` 與各網路來源：碰系統 API 或外部服務，列為實機手動驗收項目。
-- 實機驗收清單：YouTube Music、YouTube、Spotify 各播一次；切歌、暫停、拖動進度、關閉播放器、歌詞對不上時的退化、無網路；**perl 行程被手動殺掉後能自動恢復**；以及視窗標題備援的**啟動時歌曲已播到一半（推估應回報不可用，歌詞不得從頭捲）**。
+- Shell 的額外高度：`ModuleManager` 在 active 模組切換、額外高度變動時發布正確的值並夾在上限內；`NotchMode` 在給定額外高度時算出的 Preview 尺寸與 hover 範圍。
+- 歌詞條折疊狀態的讀寫（`UserDefaults` 可注入），以及折疊時額外高度回報 0。
+- 實機驗收清單：歌詞條的展開與折疊動畫、半透明底色的觀感、hover 範圍是否包含歌詞條；YouTube Music、YouTube、Spotify 各播一次；切歌、暫停、拖動進度、關閉播放器、歌詞對不上時的退化、無網路；**perl 行程被手動殺掉後能自動恢復**；以及視窗標題備援的**啟動時歌曲已播到一半（推估應回報不可用，歌詞不得從頭捲）**。
 
 ## 11. 未決事項與風險
 
@@ -348,4 +381,6 @@ Expanded 的上一首／播放暫停／下一首透過 `MRMediaRemoteSendCommand
 - **歌詞著作權。** 社群歌詞資料庫與非官方介面皆處於灰色地帶。自用無虞，但 Phase 4 若要公開發布需重新評估。
 - **歌詞命中率的真實分布。** 現有樣本僅兩首同專輯曲目，實作後應以較廣的歌單重新評估清單順序。
 - **逐字歌詞**目前無解。
+- **Preview 加高要動 Shell 的狀態機與 hover 判定。** Shell 先前花了很多力氣才解掉 hover 閃爍，這次改動必須保持「固定大小容器、只有繪製內容動畫」的原則，並在實機上重新驗收 hover 不閃爍。
+- **歌詞條的透明度與高度是憑印象給的值**（0.6、24pt），需要實機調整。
 - **網易雲非官方介面的穩定性。** 介面可能變動或限制外部請求，`LyricsProvider` 抽象的存在正是為了讓替換成本可控。
