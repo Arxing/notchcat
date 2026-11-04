@@ -115,6 +115,11 @@ actor LyricsRepository: LyricsResolving {
             case .empty:
                 break
             case .hit(let result):
+                if result.isSynced && !result.isPlausible(forDuration: track.duration) {
+                    // The source answered, but with timing we would not trust:
+                    // the same as having nothing, not a failure and not a fallback.
+                    break
+                }
                 if result.isSynced {
                     found = result
                 } else if fallback == nil {

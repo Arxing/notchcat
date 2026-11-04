@@ -245,4 +245,48 @@ final class LyricsTests: XCTestCase {
         XCTAssertTrue(Lyrics.synced([LyricLine(time: 0, text: "a")]).isSynced)
         XCTAssertFalse(Lyrics.plain("a").isSynced)
     }
+
+    // MARK: - Plausibility
+
+    private func syncedLyrics(lastLineAt last: TimeInterval) -> Lyrics {
+        .synced([LyricLine(time: 10, text: "a"), LyricLine(time: last, text: "b")])
+    }
+
+    func testSyncedWithTwoLinesWithinDurationIsPlausible() {
+        XCTAssertTrue(syncedLyrics(lastLineAt: 150).isPlausible(forDuration: 200))
+    }
+
+    func testSingleLineSyncedIsNotPlausible() {
+        let placeholder = Lyrics.synced([LyricLine(time: 0, text: "純音樂，請欣賞")])
+        XCTAssertFalse(placeholder.isPlausible(forDuration: 200))
+        XCTAssertFalse(placeholder.isPlausible(forDuration: nil))
+    }
+
+    func testLastLineBeyondDurationPlusToleranceIsNotPlausible() {
+        XCTAssertFalse(syncedLyrics(lastLineAt: 320).isPlausible(forDuration: 200))
+    }
+
+    func testLastLineExactlyAtDurationPlusToleranceIsPlausible() {
+        XCTAssertEqual(Lyrics.durationTolerance, 5)
+        XCTAssertTrue(syncedLyrics(lastLineAt: 205).isPlausible(forDuration: 200))
+    }
+
+    func testLastLineJustPastToleranceIsNotPlausible() {
+        XCTAssertFalse(syncedLyrics(lastLineAt: 205.1).isPlausible(forDuration: 200))
+    }
+
+    func testUnknownOrZeroDurationOnlyAppliesLineCountRule() {
+        let late = syncedLyrics(lastLineAt: 9_999)
+        XCTAssertTrue(late.isPlausible(forDuration: nil))
+        XCTAssertTrue(late.isPlausible(forDuration: 0))
+        let single = Lyrics.synced([LyricLine(time: 1, text: "only")])
+        XCTAssertFalse(single.isPlausible(forDuration: nil))
+        XCTAssertFalse(single.isPlausible(forDuration: 0))
+    }
+
+    func testPlainIsAlwaysPlausible() {
+        XCTAssertTrue(Lyrics.plain("words").isPlausible(forDuration: 1))
+        XCTAssertTrue(Lyrics.plain("words").isPlausible(forDuration: nil))
+        XCTAssertTrue(Lyrics.plain("").isPlausible(forDuration: 0))
+    }
 }

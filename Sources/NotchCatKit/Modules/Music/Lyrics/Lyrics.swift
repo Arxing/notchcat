@@ -14,6 +14,27 @@ enum Lyrics: Equatable {
         return false
     }
 
+    /// How far past the track's length the last timed line may sit.
+    static let durationTolerance: TimeInterval = 5
+
+    /// Whether these lyrics are trustworthy enough to show line by line.
+    /// Better to show nothing than a line that is wrong.
+    ///
+    /// Plain text always passes, since it is never used for live display.
+    /// Synced lyrics need at least two lines (one line is usually an
+    /// "instrumental" placeholder), and, when the track length is known, a last
+    /// line no later than the length plus `durationTolerance` (later usually
+    /// means a different version of the song). No stricter rule is applied:
+    /// long intros and outros are common and would reject correct lyrics.
+    func isPlausible(forDuration duration: TimeInterval?) -> Bool {
+        guard case .synced(let lines) = self else { return true }
+        guard lines.count >= 2 else { return false }
+        if let duration, duration > 0, let last = lines.last {
+            return last.time <= duration + Self.durationTolerance
+        }
+        return true
+    }
+
     /// Index of the line that should be showing at `position`, or nil when the
     /// lyrics are plain or the track has not reached the first line yet.
     /// When several lines share a timestamp, the last of them is current.

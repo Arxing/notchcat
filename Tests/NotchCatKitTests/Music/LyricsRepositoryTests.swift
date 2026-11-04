@@ -167,7 +167,10 @@ private final class TestClock: @unchecked Sendable {
 
 final class LyricsRepositoryTests: XCTestCase {
     private let track = TrackIdentity(title: "T", artist: "A", album: nil, duration: 200)
-    private let synced = Lyrics.synced([LyricLine(time: 0, text: "line")])
+    private let synced = Lyrics.synced([LyricLine(time: 0, text: "line"), LyricLine(time: 10, text: "next")])
+    /// A single timed line is the usual "instrumental" placeholder, which the
+    /// plausibility gate rejects.
+    private let implausible = Lyrics.synced([LyricLine(time: 0, text: "純音樂，請欣賞")])
 
     /// The rule the whole lyrics design rests on: a synced result outranks
     /// provider priority, so a plain hit from an earlier source must not stop
@@ -506,5 +509,67 @@ final class LyricsRepositoryTests: XCTestCase {
         XCTAssertEqual(result, synced)
         XCTAssertEqual(flaky.callCount, 1)
         XCTAssertEqual(good.callCount, 1)
+    }
+
+    // MARK: - Plausibility gate
+
+    func testImplausibleSyncedResultIsSkippedAndWalkContinues() async {
+        let first = FakeProvider(id: "first", result: implausible)
+        let second = FakeProvider(id: "second", result: synced)
+        let repo = LyricsRepository(providers: [first, second])
+
+        let result = await repo.lyrics(for: track)
+
+        XCTAssertEqual(result, synced)
+        XCTAssertEqual(first.callCount, 1)
+        XCTAssertEqual(second.callCount, 1)
+    }
+
+    func testImplausibleSyncedDoesNotBecomeFallback() async {
+        let only = FakeProvider(id: "only", result: implausible)
+        let repo = LyricsRepository(providers: [only])
+
+        let result = await repo.lyrics(for: track)
+
+        XCTAssertNil(result)
+    }
+
+    func testImplausibleSyncedThenLaterPlainReturnsPlain() async {
+        let first = FakeProvider(id: "first", result: implausible)
+        let second = FakeProvider(id: "second", result: .plain("words"))
+        let repo = LyricsRepository(providers: [first, second])
+
+        let result = await repo.lyrics(for: track)
+
+        XCTAssertEqual(result, .plain("words"))
+    }
+
+    func testImplausibleSyncedCountsAsCleanAnswerForCaching() async {
+        let provider = FakeProvider(id: "p", result: implausible)
+        let clock = TestClock()
+        let repo = makeRepo([provider], clock: clock)
+
+        let first = await repo.lyrics(for: track)
+        XCTAssertNil(first)
+        clock.advance(by: 3_599)
+        _ = await repo.lyrics(for: track)
+        XCTAssertEqual(provider.callCount, 1, "Remembered for negativeTTL (3600), not failureTTL (60)")
+
+        clock.advance(by: 2)
+        _ = await repo.lyrics(for: track)
+        XCTAssertEqual(provider.callCount, 2)
+    }
+
+    func testPlausibilityUsesTrackDuration() async {
+        // Last line at 150 s: fits a 200 s track, but not a 100 s one.
+        let lyrics = Lyrics.synced([LyricLine(time: 5, text: "a"), LyricLine(time: 150, text: "b")])
+
+        let longEnough = await LyricsRepository(providers: [FakeProvider(id: "p", result: lyrics)])
+            .lyrics(for: TrackIdentity(title: "T", artist: "A", album: nil, duration: 200))
+        let tooShort = await LyricsRepository(providers: [FakeProvider(id: "p", result: lyrics)])
+            .lyrics(for: TrackIdentity(title: "T", artist: "A", album: nil, duration: 100))
+
+        XCTAssertEqual(longEnough, lyrics)
+        XCTAssertNil(tooShort)
     }
 }
