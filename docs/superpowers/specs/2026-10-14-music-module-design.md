@@ -177,13 +177,13 @@ protocol NowPlayingSource {
 運作方式：
 
 - 模組 `onStart` 時，以 `Process` 啟動 `/usr/bin/perl`，腳本以 `DynaLoader` 載入 `NotchCatMediaRemoteHelper` 動態庫並呼叫其入口函式。腳本內容是固定的幾行，嵌在 Swift 原始碼裡。
-- 動態庫在宿主內持續查詢現正播放，**只在內容變化時**（曲目、播放速率、`ElapsedTime`／`Timestamp` 任一改變）往標準輸出寫一行 JSON。`ElapsedTime` 錨點變動也包含使用者拖動進度的情形，因此**拖動進度預期可被偵測到**（待實測確認）。
+- 動態庫在宿主內持續查詢現正播放，**只在內容變化時**（曲目、播放速率、`ElapsedTime`／`Timestamp` 任一改變）往標準輸出寫一行 JSON。`ElapsedTime` 錨點變動也包含使用者拖動進度的情形，因此**拖動進度預期可被偵測到**（仍待實機確認：實作驗證時不得操作使用者的播放，故未實測拖動）。
 - Swift 端逐行讀取，交給 `HelperMessageParser`，轉成 `NowPlayingSnapshot`。
 - 模組 `onStop` 時終止行程。
 - **行程意外結束時：** 以退避間隔重啟（建議 1、2、4…最多 30 秒）。連續失敗超過上限即放棄，`MediaRemoteSource` 回報 nil，`NowPlayingMonitor` 自動退到視窗標題備援。主程序不因此崩潰。
 - **啟動即讀不到任何欄位**（宿主被系統關掉的徵兆）與「真的沒在播」要能區分：前者是行程啟動後立刻回報鍵數為 0 且連續多次，後者是正常的空狀態。具體判定留待實作時以實測定。
 
-動態庫的建置與載入細節（SwiftPM 的動態庫 target 輸出位置、執行時如何定位、arm64 簽章是否由連結器自動帶上）是**實作時第一個要驗證的項目**，探針用的是手動 `clang` 編譯加 `codesign`，尚未驗證過 SwiftPM 的輸出同樣可用。
+動態庫的建置與載入細節（SwiftPM 的動態庫 target 輸出位置、執行時如何定位、arm64 簽章是否由連結器自動帶上）是**實作時第一個要驗證的項目**，已於 2026-11-04 驗證：`swift build` 產出 `.build/debug/libNotchCatMediaRemoteHelper.dylib`，連結器自動帶上 ad-hoc 簽章（`flags=0x20002(adhoc,linker-signed)`），不需額外 `codesign`；`/usr/bin/perl` 載入後讀到完整資料。perl 的 hardened runtime 拒絕相對路徑，動態庫必須以絕對路徑傳入。執行時以「可執行檔同目錄」定位。
 
 ### 5.3 播放位置
 
@@ -215,7 +215,7 @@ protocol NowPlayingSource {
 
 `isActivePublisher` 在「有曲目且正在播放」時為 true（現正播放管道：`rate > 0`；視窗標題：喇叭符號存在）。暫停時為 false，Music 不再接管 Preview，瀏海回到 Shell 預設的空黑條，而不是停著顯示曲名佔著版面。此行為若實際使用覺得突兀，屬於手感調整，留待實機驗收後再議。
 
-暫停時管道實際回傳什麼（rate 為 0，還是整份資料消失）尚未實測，實作時要驗證，兩種情形都要處理。
+暫停時管道實際回傳什麼（rate 為 0，還是整份資料消失）：2026-11-04 有一次被動取樣恰逢播放器處於暫停，回傳完整資料且 `PlaybackRate` 為 0（即 `"rate":0` 的曲目行，而非 `{"none":true}`）。實際按下暫停的轉換過程仍待實機確認（驗證時不得操作使用者的播放）。兩種情形都要處理。
 
 ## 6. 歌詞層
 
