@@ -25,6 +25,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let moduleManager = ModuleManager()
+        moduleManager.register(MusicModule.makeDefault(notchWidth: geometry.notchSize.width))
 
         shellController = NotchShellController(geometry: geometry, moduleManager: moduleManager)
         setupStatusItem()
