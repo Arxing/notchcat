@@ -96,8 +96,18 @@ final class ModuleManagerPreviewHeightTests: XCTestCase {
 
     func testInactiveModuleDoesNotContribute() {
         let manager = ModuleManager()
-        manager.register(FakePreviewModule(id: "a", isActive: false, extraHeight: 24))
+        let module = FakePreviewModule(id: "a", isActive: false, extraHeight: 24)
+        manager.register(module)
         settle()
+        XCTAssertEqual(manager.previewExtraHeight, 0)
+
+        // Once active it contributes; deactivating takes it back to 0.
+        module.isActiveSubject.send(true)
+        waitUntil(manager.previewExtraHeight == 24)
+        XCTAssertEqual(manager.previewExtraHeight, 24)
+
+        module.isActiveSubject.send(false)
+        waitUntil(manager.previewExtraHeight == 0)
         XCTAssertEqual(manager.previewExtraHeight, 0)
     }
 
@@ -146,7 +156,9 @@ final class ModuleManagerPreviewHeightTests: XCTestCase {
     // MARK: - NotchMode geometry
 
     private func makeGeometry() throws -> NotchGeometry {
-        let screen = try XCTUnwrap(NSScreen.screens.first, "no screen available")
+        guard let screen = NSScreen.screens.first else {
+            throw XCTSkip("no screen available")
+        }
         return NotchGeometry(screen: screen,
                              notchSize: CGSize(width: 200, height: 32),
                              centerX: screen.frame.midX,
