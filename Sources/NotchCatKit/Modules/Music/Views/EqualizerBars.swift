@@ -2,9 +2,10 @@ import SwiftUI
 
 /// A few bars that bounce while music plays and settle low when it does not.
 ///
-/// Each bar runs one repeating animation that Core Animation drives, so
-/// nothing is recomputed per frame; turning `isAnimating` off replaces it with
-/// a short settle and the bars stop moving.
+/// Each bar runs one SwiftUI `repeatForever` animation, which updates
+/// continuously while the bars are on screen, so it costs some CPU while music
+/// plays and must be profiled on hardware. Turning `isAnimating` off replaces
+/// it with a short settle and the bars stop moving.
 struct EqualizerBars: View {
     let isAnimating: Bool
 

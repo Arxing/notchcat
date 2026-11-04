@@ -11,7 +11,7 @@ struct DefaultShellContent: View {
         case .preview:
             EmptyView()
         case .expanded:
-            Text("NotchCat — Phase 0 (no module installed)")
+            Text("沒有進行中的內容，點上方圖示開啟模組")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.white.opacity(0.7))
         }
