@@ -37,6 +37,14 @@ final class PerlHelperLauncher: HelperProcessLaunching {
         self.dylibURL = dylibURL
     }
 
+    /// `environment` without the variables that make perl or the dynamic loader
+    /// pull in code from outside (`PERL*`, `DYLD_*`, `LD_*`), so nothing the
+    /// app inherited can be loaded into the Apple-signed host.
+    static func sanitizedEnvironment(from environment: [String: String]) -> [String: String] {
+        let blockedPrefixes = ["PERL", "DYLD_", "LD_"]
+        return environment.filter { key, _ in !blockedPrefixes.contains { key.hasPrefix($0) } }
+    }
+
     /// The dylib next to the running executable, or nil when it is not there.
     static func defaultDylibURL() -> URL? {
         guard let directory = Bundle.main.executableURL?.deletingLastPathComponent() else { return nil }
@@ -60,6 +68,7 @@ final class PerlHelperLauncher: HelperProcessLaunching {
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: perlPath)
         process.arguments = ["-e", Self.script, dylibURL.standardizedFileURL.path]
+        process.environment = Self.sanitizedEnvironment(from: ProcessInfo.processInfo.environment)
         process.standardInput = input
         process.standardOutput = output
 

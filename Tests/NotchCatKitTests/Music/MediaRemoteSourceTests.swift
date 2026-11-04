@@ -53,6 +53,7 @@ final class MediaRemoteSourceTests: XCTestCase {
 
     private var launcher: FakeLauncher!
     private var scheduler: FakeScheduler!
+    private var wake: PassthroughSubject<Void, Never>!
     private var published: [NowPlayingSnapshot?] = []
     private var cancellables: Set<AnyCancellable> = []
 
@@ -60,12 +61,18 @@ final class MediaRemoteSourceTests: XCTestCase {
         super.setUp()
         launcher = FakeLauncher()
         scheduler = FakeScheduler()
+        wake = PassthroughSubject<Void, Never>()
         published = []
         cancellables = []
     }
 
-    private func makeSource(retryDelays: [TimeInterval] = [1, 2, 4, 8, 16, 30]) -> MediaRemoteSource {
-        let source = MediaRemoteSource(launcher: launcher, retryDelays: retryDelays, schedule: scheduler.schedule)
+    private func makeSource(retryDelays: [TimeInterval] = [1, 2, 4, 8, 16, 30],
+                            giveUpRetryInterval: TimeInterval = 300) -> MediaRemoteSource {
+        let source = MediaRemoteSource(launcher: launcher,
+                                       retryDelays: retryDelays,
+                                       giveUpRetryInterval: giveUpRetryInterval,
+                                       schedule: scheduler.schedule,
+                                       wakeNotifications: wake.eraseToAnyPublisher())
         source.snapshots.dropFirst().sink { [unowned self] in self.published.append($0) }.store(in: &cancellables)
         return source
     }
@@ -137,9 +144,8 @@ final class MediaRemoteSourceTests: XCTestCase {
         launcher.exit()
         scheduler.runPending()
         launcher.exit()
-        scheduler.runPending()
 
-        XCTAssertEqual(scheduler.delays, [1, 2])
+        XCTAssertEqual(scheduler.delays, [1, 2, 300], "the last delay is the give-up retry")
         XCTAssertEqual(launcher.launchCount, 3)
         XCTAssertEqual(published.count, 2)
         XCTAssertNil(published.last ?? nil)
@@ -149,9 +155,9 @@ final class MediaRemoteSourceTests: XCTestCase {
         launcher.shouldThrow = true
         let source = makeSource(retryDelays: [1, 2, 4])
         source.start()
-        for _ in 0..<5 { scheduler.runPending() }
+        for _ in 0..<3 { scheduler.runPending() }
 
-        XCTAssertEqual(scheduler.delays, [1, 2, 4])
+        XCTAssertEqual(scheduler.delays, [1, 2, 4, 300])
         XCTAssertEqual(launcher.launchCount, 4)
         XCTAssertEqual(published.count, 1)
         XCTAssertNil(published.first ?? nil)
@@ -204,6 +210,108 @@ final class MediaRemoteSourceTests: XCTestCase {
         XCTAssertEqual(published.count, 2, "a restart must not replay the old snapshot")
     }
 
+    // MARK: - Give-up retry and wake
+
+    /// Drives a source with `retryDelays: [1, 2]` into the given-up state.
+    private func makeGivenUpSource() -> MediaRemoteSource {
+        let source = makeSource(retryDelays: [1, 2])
+        source.start()
+        launcher.exit()
+        scheduler.runPending()
+        launcher.exit()
+        scheduler.runPending()
+        launcher.exit()
+        return source
+    }
+
+    func testGiveUpSchedulesRetryWithInjectedInterval() {
+        let source = makeSource(retryDelays: [1], giveUpRetryInterval: 42)
+        source.start()
+        launcher.exit()
+        scheduler.runPending()
+        launcher.exit()
+
+        XCTAssertEqual(scheduler.delays, [1, 42])
+        XCTAssertEqual(launcher.launchCount, 2)
+    }
+
+    func testGiveUpRetryRelaunchesWithCountersReset() {
+        let source = makeGivenUpSource()
+        XCTAssertEqual(launcher.launchCount, 3)
+
+        scheduler.runPending()
+        XCTAssertEqual(launcher.launchCount, 4)
+
+        launcher.exit()
+        XCTAssertEqual(scheduler.delays, [1, 2, 300, 1], "the delay sequence restarts at its first entry")
+        withExtendedLifetime(source) {}
+    }
+
+    func testStopCancelsPendingGiveUpRetry() {
+        let source = makeGivenUpSource()
+        source.stop()
+        scheduler.runPending()
+
+        XCTAssertEqual(launcher.launchCount, 3)
+    }
+
+    func testStaleGiveUpRetryDoesNothing() {
+        let source = makeGivenUpSource()
+        source.start()
+        XCTAssertEqual(launcher.launchCount, 4)
+        scheduler.runPending()
+
+        XCTAssertEqual(launcher.launchCount, 4, "the retry belongs to an earlier generation")
+    }
+
+    func testWakeRestartsRunningHelperWithCountersReset() {
+        let source = makeSource(retryDelays: [1, 2])
+        source.start()
+        launcher.exit()
+        scheduler.runPending()
+        XCTAssertEqual(launcher.launchCount, 2)
+
+        wake.send()
+
+        XCTAssertEqual(launcher.launchCount, 3)
+        XCTAssertEqual(launcher.handles[1].terminateCount, 1)
+        XCTAssertEqual(launcher.handles[2].terminateCount, 0)
+        launcher.exit()
+        XCTAssertEqual(scheduler.delays, [1, 1], "the failure count was reset by the wake")
+        withExtendedLifetime(source) {}
+    }
+
+    func testWakeAfterGiveUpRelaunches() {
+        let source = makeGivenUpSource()
+        XCTAssertEqual(launcher.launchCount, 3)
+
+        wake.send()
+        XCTAssertEqual(launcher.launchCount, 4)
+
+        launcher.exit()
+        XCTAssertEqual(scheduler.delays, [1, 2, 300, 1])
+        scheduler.runPending()
+        XCTAssertEqual(launcher.launchCount, 5, "only the live retry runs; the give-up retry is stale")
+        withExtendedLifetime(source) {}
+    }
+
+    func testWakeAfterStopDoesNothing() {
+        let source = makeSource()
+        source.start()
+        source.stop()
+        wake.send()
+
+        XCTAssertEqual(launcher.launchCount, 1)
+    }
+
+    func testWakeBeforeStartDoesNothing() {
+        let source = makeSource()
+        wake.send()
+
+        XCTAssertEqual(launcher.launchCount, 0)
+        withExtendedLifetime(source) {}
+    }
+
     // MARK: - PerlHelperLauncher
 
     private func makeTemporaryFile() throws -> URL {
@@ -229,6 +337,20 @@ final class MediaRemoteSourceTests: XCTestCase {
         XCTAssertThrowsError(try unset.launch(onLine: { _ in }, onExit: { _ in })) { error in
             XCTAssertEqual(error as? PerlHelperLauncher.LaunchError, .dylibNotFound)
         }
+    }
+
+    func testSanitizedEnvironmentDropsLoaderAndPerlVariables() {
+        let result = PerlHelperLauncher.sanitizedEnvironment(from: [
+            "PERL5OPT": "-Mfoo",
+            "PERL5LIB": "/tmp/lib",
+            "PERLLIB": "/tmp/lib",
+            "DYLD_INSERT_LIBRARIES": "/tmp/evil.dylib",
+            "LD_PRELOAD": "/tmp/evil.so",
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/Users/someone",
+        ])
+
+        XCTAssertEqual(result, ["PATH": "/usr/bin:/bin", "HOME": "/Users/someone"])
     }
 
     // MARK: - CappedHelperLineBuffer
