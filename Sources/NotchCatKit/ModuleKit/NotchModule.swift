@@ -16,6 +16,12 @@ protocol NotchModule: AnyObject, Identifiable where ID == String {
     /// without the user having to hover (e.g. music currently playing).
     var isActivePublisher: AnyPublisher<Bool, Never> { get }
 
+    /// How much taller than the notch this module wants Preview to be while
+    /// it is the active module (e.g. a strip drawn below the notch). The
+    /// shell clamps the value to `0...NotchMode.maxPreviewExtraHeight`.
+    /// Defaults to a constant 0.
+    var previewExtraHeightPublisher: AnyPublisher<CGFloat, Never> { get }
+
     /// Icon shown in the Expanded AppBar's module switcher.
     func tabIcon() -> AnyView
 
@@ -43,4 +49,10 @@ protocol NotchModule: AnyObject, Identifiable where ID == String {
     /// This module's own settings screen, if it has one. v1 has nowhere to
     /// show it yet.
     func settingsView() -> AnyView?
+}
+
+extension NotchModule {
+    var previewExtraHeightPublisher: AnyPublisher<CGFloat, Never> {
+        Just(0).eraseToAnyPublisher()
+    }
 }

@@ -7,6 +7,9 @@ import Combine
 /// won't let `self` escape a class init until every stored property is set.
 final class NotchShellState: ObservableObject {
     @Published var mode: NotchMode = .preview
+    /// Extra Preview height requested by the active module (already clamped
+    /// by `ModuleManager`). Only affects Preview.
+    @Published var previewExtraHeight: CGFloat = 0
 }
 
 /// Owns the notch panel and drives the Preview/Expanded state machine
@@ -26,6 +29,7 @@ final class NotchShellController {
     private let state = NotchShellState()
     private let moduleManager: ModuleManager
     private var pendingCollapse: DispatchWorkItem?
+    private var previewExtraHeightCancellable: AnyCancellable?
 
     var mode: NotchMode { state.mode }
 
@@ -49,7 +53,7 @@ final class NotchShellController {
         self.panel = panel
 
         // Opening requires a precise hover over the visible Preview pill.
-        hostingView.hoverRect = NotchMode.preview.localRect(for: geometry)
+        hostingView.hoverRect = previewHoverRect()
 
         hostingView.onMouseEntered = { [weak self] in
             guard let self else { return }
@@ -72,13 +76,31 @@ final class NotchShellController {
             let collapse = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 transition(to: .preview)
-                hostingView.hoverRect = NotchMode.preview.localRect(for: geometry)
+                hostingView.hoverRect = previewHoverRect()
             }
             pendingCollapse = collapse
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.collapseDelay, execute: collapse)
         }
 
+        // Mirror the active module's requested extra Preview height into
+        // the view state, and — while collapsed — grow/shrink the hover
+        // rect with it right away so the extra strip counts as hover.
+        // Expanded keeps the whole container as its hover rect.
+        previewExtraHeightCancellable = moduleManager.$previewExtraHeight
+            .sink { [weak self] height in
+                guard let self else { return }
+                state.previewExtraHeight = height
+                if state.mode == .preview {
+                    hostingView.hoverRect = previewHoverRect()
+                }
+            }
+
         panel.orderFrontRegardless()
+    }
+
+    /// Preview's hover rect at the current extra height.
+    private func previewHoverRect() -> CGRect {
+        NotchMode.preview.localRect(for: geometry, previewExtraHeight: state.previewExtraHeight)
     }
 
     func transition(to newMode: NotchMode) {
