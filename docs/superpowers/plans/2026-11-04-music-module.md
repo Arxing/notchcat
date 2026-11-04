@@ -441,7 +441,31 @@ spec 6.2 的核心規則：依序一個一個查，**帶時間軸的才可停止
 
 ---
 
-## Task 14：安裝模組、更新文件、實機驗收
+## Task 14：歌詞可信度把關
+
+使用者決定：動態歌詞寧可不顯示也不要顯示不準的（只需要「現在是哪一行」，不需要逐字）。LRCLIB／網易雲的結果除了歌名與長度比對，再多一道對歌詞本身的合理性檢查。
+
+**Files:**
+- Modify: `Sources/NotchCatKit/Modules/Music/Lyrics/Lyrics.swift`
+- Modify: `Sources/NotchCatKit/Modules/Music/Lyrics/LyricsRepository.swift`
+- Test: `Tests/NotchCatKitTests/Music/LyricsTests.swift`
+- Test: `Tests/NotchCatKitTests/Music/LyricsRepositoryTests.swift`
+
+**Interfaces:**
+- Consumes: Task 9 `Lyrics`／`LyricLine`、Task 10 `LyricsRepository`、`TrackIdentity.duration`（選用）。
+- Produces:
+  - `Lyrics.durationTolerance: TimeInterval`（static，5 秒，具名常數）。
+  - `func isPlausible(forDuration duration: TimeInterval?) -> Bool`：`.plain` 一律為 true（它不用於動態顯示）；`.synced` 須同時滿足 ① 行數 ≥ 2；② 當 `duration` 非 nil 且 > 0 時，最後一行的時間 ≤ `duration + durationTolerance`。
+
+- [ ] **Step 1: 寫失敗的測試。** `LyricsTests`：`testSyncedWithTwoLinesWithinDurationIsPlausible`；`testSingleLineSyncedIsNotPlausible`（例如只有一行的佔位）；`testLastLineBeyondDurationPlusToleranceIsNotPlausible`；邊界 `testLastLineExactlyAtDurationPlusToleranceIsPlausible`（duration 200、最後一行 205 → true）與 `testLastLineJustPastToleranceIsNotPlausible`（205.1 → false）；`testUnknownOrZeroDurationOnlyAppliesLineCountRule`（nil 與 0）；`testPlainIsAlwaysPlausible`。`LyricsRepositoryTests`：`testImplausibleSyncedResultIsSkippedAndWalkContinues`（第一個來源回不可信的 synced、第二個回可信的 synced → 回第二個）；`testImplausibleSyncedDoesNotBecomeFallback`（只有不可信 synced 的來源 → 不被當成保底）；`testImplausibleSyncedThenLaterPlainReturnsPlain`；`testImplausibleSyncedCountsAsCleanAnswerForCaching`（沒有任何來源失敗時按 `negativeTTL` 快取為查無，而不是 `failureTTL`）；`testPlausibilityUsesTrackDuration`（同一份歌詞，曲長夠長時可信、曲長太短時不可信）。
+- [ ] **Step 2: 確認失敗。**
+- [ ] **Step 3: 實作** `Lyrics.isPlausible(forDuration:)`；`LyricsRepository` 走訪時，來源回傳 `.synced` 但 `!isPlausible(forDuration: track.duration)` 就當作「該來源乾淨地回答了、但沒有可用結果」（等同 `.empty`，不算 `failed`，不存入保底），繼續問下一個來源。
+- [ ] **Step 4: 確認通過**：`swift build && swift test`，零警告。
+- [ ] **Step 5: 提交**：`git commit -m "Reject implausible synced lyrics before they are shown"`
+
+---
+
+## Task 15：安裝模組、更新文件、實機驗收
 
 **Files:**
 - Modify: `Sources/NotchCatKit/AppDelegate.swift`
@@ -466,6 +490,6 @@ spec 6.2 的核心規則：依序一個一個查，**帶時間軸的才可停止
 
 ## 自審紀錄
 
-- **Spec 覆蓋：** 目標與範圍（1）→ Task 3、5、12、13；既有基礎與 Shell 契約（2、7.1）→ Task 1；實測發現（3）→ Task 4、5 的格式與可行性驗證；架構與邊界（4）→ Task 2、5；播放來源（5.1–5.5）→ Task 3、4、5、6、7、12；歌詞（6.1–6.4）→ Task 8、9、10、11；畫面（7.1–7.3）→ Task 12、13；播放控制（8）→ Task 2、13；錯誤處理（9）→ Task 5、10、12；測試策略（10）→ 各任務；風險（11）→ Task 5 Step 1／2、Task 14 Step 3。
+- **Spec 覆蓋：** 目標與範圍（1）→ Task 3、5、12、13；既有基礎與 Shell 契約（2、7.1）→ Task 1；實測發現（3）→ Task 4、5 的格式與可行性驗證；架構與邊界（4）→ Task 2、5；播放來源（5.1–5.5）→ Task 3、4、5、6、7、12；歌詞（6.1–6.4）→ Task 8、9、10、11；畫面（7.1–7.3）→ Task 12、13；播放控制（8）→ Task 2、13；錯誤處理（9）→ Task 5、10、12；測試策略（10）→ 各任務；風險（11）→ Task 5 Step 1／2、Task 15 Step 3；歌詞可信度把關（使用者追加）→ Task 14。
 - **型別一致：** `NowPlayingSnapshot`／`PositionAnchor`／`ArtworkRef`（Task 3）被 Task 4、5、6、7、8、12 沿用；`TrackIdentity.duration` 全程為選用；`LyricsResolving`（Task 10）被 Task 12 使用；`MediaRemoteControlling`（Task 2）被 Task 12 使用；`previewExtraHeightPublisher`（Task 1）被 Task 12 實作。
-- **已知尚未釘死的決策（留給實作時以實測定）：** 暫停時 helper 輸出的形狀、拖動進度是否產生新行、SwiftPM 動態庫的簽章（皆在 Task 5 Step 1／2 驗證並回寫 spec）；歌詞條的透明度與高度（Task 14 Step 4）。
+- **已知尚未釘死的決策（留給實作時以實測定）：** 暫停時 helper 輸出的形狀、拖動進度是否產生新行、SwiftPM 動態庫的簽章（皆在 Task 5 Step 1／2 驗證並回寫 spec）；歌詞條的透明度與高度（Task 15 Step 4）。
