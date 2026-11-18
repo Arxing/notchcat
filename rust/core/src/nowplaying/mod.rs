@@ -4,9 +4,11 @@
 //! 具體來源（MediaRemote helper、視窗標題輪詢）與控制指令的實作在平台 crate，core 只定義介面。
 
 pub mod monitor;
+pub mod published;
 pub mod window_title;
 
 pub use monitor::NowPlayingMonitor;
+pub use published::PublishedSnapshot;
 pub use window_title::{parse_window_title, ParsedTrack, WindowInfo};
 
 use crate::runtime::Subscription;

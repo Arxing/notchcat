@@ -3,78 +3,27 @@
 //! 來源依優先序列出。最新值非 `None` 的第一個來源勝出，即使它是暫停狀態；
 //! 尚未發布過的來源視為 `None`。勝出者的封面由 [`ArtworkCache`] 補齊。
 //!
-//! 並行：來源可能在任意執行緒上發布。狀態（各來源最新值、目前結果、封面快取、訂閱者清單）由單一 mutex 保護，
-//! 在鎖內算出結果並排入待送佇列，**鎖外**才執行訂閱者回呼。佇列由「同一時間只有一條執行緒」依序送出，
-//! 所以訂閱者看到的順序與狀態變化的順序一致，且回呼內可以再讀 `current()`、訂閱，
-//! 甚至讓來源再發布（該次更新只會排進佇列，由正在送的執行緒接著送），都不會死結。
-//!
-//! 訂閱時的「重播目前值」也是這條序列化串流裡的一個事件：訂閱者登記時記下當下的序號，
-//! 只會收到序號更大的廣播，加上一筆排在佇列尾端、內容為登記當下 `current` 的重播。
-//! 因此第一次呼叫一定是重播，之後嚴格是更新的狀態：不會重複，也不會在新值之後收到舊值。
-//!
-//! 訂閱者 panic 時，這一輪的進行中那個值對排在它之後的訂閱者就遺失了（之後的更新照常送達）。
+//! 並行：來源可能在任意執行緒上發布。狀態（各來源最新值、封面快取）由單一 mutex 保護，
+//! 在鎖內算出結果並排入發布格（[`PublishedSnapshot`]，也供各來源共用）的待送佇列，**鎖外**才由它
+//! 依序執行訂閱者回呼。順序保證、重播語意與回呼內可重入的細節見 `published` 模組。
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-use super::{NowPlayingSource, SharedSnapshotCallback, SnapshotCallback};
+use super::{NowPlayingSource, PublishedSnapshot, SnapshotCallback};
 use crate::artwork_cache::ArtworkCache;
 use crate::runtime::{lock, Subscription};
 use crate::types::TrackSnapshot;
 
-struct Sub {
-    id: u64,
-    /// 登記當下已發出的最後一個廣播序號；只接收序號更大的廣播。
-    since_seq: u64,
-    cancelled: AtomicBool,
-    cb: SharedSnapshotCallback,
-}
-
-enum Event {
-    /// 狀態變動，送給 `since_seq < seq` 的所有訂閱者。
-    Broadcast {
-        seq: u64,
-        value: Option<TrackSnapshot>,
-    },
-    /// 只送給剛訂閱的那一位：登記當下的 `current`。
-    Replay {
-        target: Arc<Sub>,
-        value: Option<TrackSnapshot>,
-    },
-}
-
 struct State {
     /// 各來源的最新值，索引與 `new` 收到的 `sources` 相同。
     latest: Vec<Option<TrackSnapshot>>,
-    current: Option<TrackSnapshot>,
     artwork: ArtworkCache,
-    /// 已排定、尚未送出的事件（依產生順序）。
-    pending: VecDeque<Event>,
-    /// 最後一個廣播的序號。
-    seq: u64,
-    next_sub_id: u64,
-    subscribers: Vec<Arc<Sub>>,
-    /// 是否已有一條執行緒正在送事件。
-    draining: bool,
 }
 
 struct Inner {
     state: Mutex<State>,
-}
-
-/// 送事件的流程若因訂閱者 panic 而中途離開，要把 `draining` 放掉，否則之後再也沒有人會送。
-struct DrainGuard<'a> {
-    inner: &'a Inner,
-    armed: bool,
-}
-
-impl Drop for DrainGuard<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            lock(&self.inner.state).draining = false;
-        }
-    }
+    /// 目前結果與訂閱者。在 `state` 的鎖內排入（鎖順序 state → published），放鎖後才 flush。
+    published: PublishedSnapshot,
 }
 
 impl Inner {
@@ -90,72 +39,9 @@ impl Inner {
                 }
                 None => None,
             };
-            if winner != st.current {
-                st.current = winner.clone();
-                st.seq += 1;
-                let seq = st.seq;
-                st.pending
-                    .push_back(Event::Broadcast { seq, value: winner });
-            }
+            self.published.queue_set(winner);
         }
-        self.drain();
-    }
-
-    /// 若沒有別的執行緒正在送，就由呼叫端接手把佇列送完；回呼一律在鎖外執行。
-    fn drain(&self) {
-        {
-            let mut st = lock(&self.state);
-            if st.draining || st.pending.is_empty() {
-                return;
-            }
-            st.draining = true;
-        }
-        let mut guard = DrainGuard {
-            inner: self,
-            armed: true,
-        };
-        loop {
-            let (targets, value) = {
-                let mut st = lock(&self.state);
-                match st.pending.pop_front() {
-                    Some(Event::Broadcast { seq, value }) => {
-                        let targets: Vec<Arc<Sub>> = st
-                            .subscribers
-                            .iter()
-                            .filter(|s| s.since_seq < seq)
-                            .cloned()
-                            .collect();
-                        (targets, value)
-                    }
-                    Some(Event::Replay { target, value }) => (vec![target], value),
-                    None => {
-                        st.draining = false;
-                        guard.armed = false;
-                        return;
-                    }
-                }
-            };
-            for target in targets {
-                if !target.cancelled.load(Ordering::Acquire) {
-                    (target.cb)(&value);
-                }
-            }
-        }
-    }
-
-    fn unsubscribe(&self, id: u64) {
-        let removed = {
-            let mut st = lock(&self.state);
-            st.subscribers
-                .iter()
-                .position(|s| s.id == id)
-                .map(|pos| st.subscribers.remove(pos))
-        };
-        if let Some(sub) = removed {
-            sub.cancelled.store(true, Ordering::Release);
-            // 回呼的 drop 可能再碰這個監視器，所以在鎖外釋放。
-            drop(sub);
-        }
+        self.published.flush();
     }
 }
 
@@ -171,14 +57,9 @@ impl NowPlayingMonitor {
         let inner = Arc::new(Inner {
             state: Mutex::new(State {
                 latest: vec![None; sources.len()],
-                current: None,
                 artwork,
-                pending: VecDeque::new(),
-                seq: 0,
-                next_sub_id: 0,
-                subscribers: Vec::new(),
-                draining: false,
             }),
+            published: PublishedSnapshot::new(),
         });
         // 回呼只持有弱參照：來源比監視器活得久時不會把它撐住，也不會形成循環。
         let subscriptions = sources
@@ -200,7 +81,7 @@ impl NowPlayingMonitor {
     }
 
     pub fn current(&self) -> Option<TrackSnapshot> {
-        lock(&self.inner.state).current.clone()
+        self.inner.published.current()
     }
 
     /// 訂閱 `current` 的變動（同 Combine 的 `@Published`）：第一次呼叫一定是登記當下 `current` 的重播，
@@ -208,32 +89,7 @@ impl NowPlayingMonitor {
     /// 沒有別的執行緒正在送通知時，重播在 `subscribe` 返回前同步完成；否則（含在回呼內訂閱）
     /// 由正在送的執行緒在這個回呼之後接著送。drop 回傳的把手即取消。
     pub fn subscribe(&self, f: SnapshotCallback) -> Subscription {
-        let (sub, id) = {
-            let mut st = lock(&self.inner.state);
-            let id = st.next_sub_id;
-            st.next_sub_id += 1;
-            let sub = Arc::new(Sub {
-                id,
-                since_seq: st.seq,
-                cancelled: AtomicBool::new(false),
-                cb: Arc::from(f),
-            });
-            st.subscribers.push(sub.clone());
-            let value = st.current.clone();
-            st.pending.push_back(Event::Replay {
-                target: sub.clone(),
-                value,
-            });
-            (sub, id)
-        };
-        drop(sub);
-        self.inner.drain();
-        let weak = Arc::downgrade(&self.inner);
-        Subscription::new(move || {
-            if let Some(inner) = weak.upgrade() {
-                inner.unsubscribe(id);
-            }
-        })
+        self.inner.published.subscribe(f)
     }
 
     /// `current?.is_playing ?? false`，不含連續重複（Swift `isPlayingPublisher`）。
@@ -257,6 +113,7 @@ impl NowPlayingMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nowplaying::SharedSnapshotCallback;
     use crate::runtime::{lock, Notifier};
     use crate::types::ArtworkRef;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -17,18 +17,18 @@
 //! （啟動、終止、排程計時器、釋放把手），放鎖後才執行。呼叫 launcher、終止或釋放把手、
 //! 呼叫 `Spawner::spawn`、執行訂閱者回呼時都不持鎖，所以同步的 launcher 在 `launch()` 內就送出事件也不會死結。
 //!
-//! 發布採與 `musicat_core::nowplaying::monitor` 相同的序列化佇列：發布在鎖內依狀態變化順序排入，
-//! 由同一時間只有一條執行緒的送出者在鎖外依序送給訂閱者；訂閱時的重播也是佇列中的一個事件，
-//! 所以訂閱者不會在新值之後收到舊值（例如讀取執行緒的曲目與 `stop()` 的 `None` 交錯時）。
+//! 發布用 `musicat_core::nowplaying::PublishedSnapshot`（與 `NowPlayingMonitor`、`WindowTitleSource` 共用）：
+//! 發布在鎖內依狀態變化順序排入它的佇列，放鎖後才由同一時間只有一條執行緒的送出者在鎖外依序送給訂閱者；
+//! 訂閱時的重播也是佇列中的一個事件，所以訂閱者不會在新值之後收到舊值
+//! （例如讀取執行緒的曲目與 `stop()` 的 `None` 交錯時）。
 //!
 //! 純邏輯、沒有 OS API，所以在所有目標上都編譯並跑測試。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
-use musicat_core::nowplaying::{NowPlayingSource, SnapshotCallback};
+use musicat_core::nowplaying::{NowPlayingSource, PublishedSnapshot, SnapshotCallback};
 use musicat_core::runtime::{Clock, Spawner, Subscription, TaskHandle};
 use musicat_core::types::TrackSnapshot;
 
@@ -133,28 +133,6 @@ enum Effect {
     Cancel(TaskHandle),
 }
 
-/// 訂閱回呼（[`SnapshotCallback`] 的共享版）。
-type SharedCallback = Arc<dyn Fn(&Option<TrackSnapshot>) + Send + Sync>;
-
-struct Sub {
-    id: u64,
-    /// 登記當下已發出的最後一個廣播序號；只接收序號更大的廣播。
-    since_seq: u64,
-    cancelled: AtomicBool,
-    cb: SharedCallback,
-}
-
-enum Publication {
-    Broadcast {
-        seq: u64,
-        value: Option<TrackSnapshot>,
-    },
-    Replay {
-        target: Arc<Sub>,
-        value: Option<TrackSnapshot>,
-    },
-}
-
 struct State {
     is_running: bool,
     /// 從延遲用完到下一次啟動或 `stop()` 之間為真。
@@ -169,22 +147,14 @@ struct State {
     timer_task: Option<TaskHandle>,
     next_timer_id: u64,
 
-    // ---- 發布
-    current: Option<TrackSnapshot>,
-    seq: u64,
-    pending: VecDeque<Publication>,
-    next_sub_id: u64,
-    subscribers: Vec<Arc<Sub>>,
-    draining: bool,
+    /// 目前值與訂閱者（與 `Inner::published` 是同一個格）；在鎖內排入、放鎖後 flush，
+    /// 所以發布順序與狀態變化的順序一致。
+    published: PublishedSnapshot,
 }
 
 impl State {
-    fn publish(&mut self, value: Option<TrackSnapshot>) {
-        self.current = value.clone();
-        self.seq += 1;
-        let seq = self.seq;
-        self.pending
-            .push_back(Publication::Broadcast { seq, value });
+    fn publish(&self, value: Option<TrackSnapshot>) {
+        self.published.queue_publish(value);
     }
 
     fn cancel_timer(&mut self, effects: &mut Vec<Effect>) {
@@ -237,20 +207,7 @@ struct Inner {
     spawner: Arc<dyn Spawner>,
     cfg: SupervisorConfig,
     state: Mutex<State>,
-}
-
-/// 送出流程若因訂閱者 panic 而中途離開，要把 `draining` 放掉，否則之後再也沒有人會送。
-struct DrainGuard<'a> {
-    inner: &'a Inner,
-    armed: bool,
-}
-
-impl Drop for DrainGuard<'_> {
-    fn drop(&mut self) {
-        if self.armed {
-            lock(&self.inner.state).draining = false;
-        }
-    }
+    published: PublishedSnapshot,
 }
 
 impl Inner {
@@ -265,7 +222,7 @@ impl Inner {
             f(&mut st, &self.cfg, &mut effects);
         }
         self.run(effects);
-        self.drain();
+        self.published.flush();
     }
 
     fn run(self: &Arc<Self>, effects: Vec<Effect>) {
@@ -430,64 +387,6 @@ impl Inner {
             st.begin_launch(effects);
         });
     }
-
-    // ---- 發布
-
-    /// 若沒有別的執行緒正在送，就由呼叫端接手把佇列送完；回呼一律在鎖外執行。
-    fn drain(&self) {
-        {
-            let mut st = lock(&self.state);
-            if st.draining || st.pending.is_empty() {
-                return;
-            }
-            st.draining = true;
-        }
-        let mut guard = DrainGuard {
-            inner: self,
-            armed: true,
-        };
-        loop {
-            let (targets, value) = {
-                let mut st = lock(&self.state);
-                match st.pending.pop_front() {
-                    Some(Publication::Broadcast { seq, value }) => {
-                        let targets: Vec<Arc<Sub>> = st
-                            .subscribers
-                            .iter()
-                            .filter(|s| s.since_seq < seq)
-                            .cloned()
-                            .collect();
-                        (targets, value)
-                    }
-                    Some(Publication::Replay { target, value }) => (vec![target], value),
-                    None => {
-                        st.draining = false;
-                        guard.armed = false;
-                        return;
-                    }
-                }
-            };
-            for target in targets {
-                if !target.cancelled.load(Ordering::Acquire) {
-                    (target.cb)(&value);
-                }
-            }
-        }
-    }
-
-    fn unsubscribe(&self, id: u64) {
-        let removed = {
-            let mut st = lock(&self.state);
-            st.subscribers
-                .iter()
-                .position(|s| s.id == id)
-                .map(|pos| st.subscribers.remove(pos))
-        };
-        if let Some(sub) = removed {
-            sub.cancelled.store(true, Ordering::Release);
-            drop(sub);
-        }
-    }
 }
 
 /// 系統現正播放的來源：由 helper 行程讀取（見 `perl_launcher`），以 [`parse_line`] 解碼。
@@ -503,12 +402,14 @@ impl HelperSupervisor {
         spawner: Arc<dyn Spawner>,
         cfg: SupervisorConfig,
     ) -> Arc<Self> {
+        let published = PublishedSnapshot::new();
         Arc::new(Self {
             inner: Arc::new(Inner {
                 launcher,
                 clock,
                 spawner,
                 cfg,
+                published: published.clone(),
                 state: Mutex::new(State {
                     is_running: false,
                     has_given_up: false,
@@ -518,12 +419,7 @@ impl HelperSupervisor {
                     timer_id: None,
                     timer_task: None,
                     next_timer_id: 0,
-                    current: None,
-                    seq: 0,
-                    pending: VecDeque::new(),
-                    next_sub_id: 0,
-                    subscribers: Vec::new(),
-                    draining: false,
+                    published,
                 }),
             }),
         })
@@ -552,29 +448,7 @@ impl NowPlayingSource for HelperSupervisor {
 
     /// 第一次呼叫一定是登記當下目前值的重播，之後依發布順序呼叫（不在新值之後收到舊值）。
     fn subscribe(&self, f: SnapshotCallback) -> Subscription {
-        let id = {
-            let mut st = lock(&self.inner.state);
-            let id = st.next_sub_id;
-            st.next_sub_id += 1;
-            let sub = Arc::new(Sub {
-                id,
-                since_seq: st.seq,
-                cancelled: AtomicBool::new(false),
-                cb: Arc::from(f),
-            });
-            st.subscribers.push(sub.clone());
-            let value = st.current.clone();
-            st.pending
-                .push_back(Publication::Replay { target: sub, value });
-            id
-        };
-        self.inner.drain();
-        let weak = Arc::downgrade(&self.inner);
-        Subscription::new(move || {
-            if let Some(inner) = weak.upgrade() {
-                inner.unsubscribe(id);
-            }
-        })
+        self.inner.published.subscribe(f)
     }
 }
 
