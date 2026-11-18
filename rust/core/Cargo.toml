@@ -6,7 +6,10 @@ license.workspace = true
 publish = false
 
 [features]
-# 公開 `testing` 模組（FakeClock、FakeHttp、LocalSpawner）給其他 crate 的測試使用。Task 2 加入該模組。
+# 公開 `testing` 模組（FakeClock、FakeHttp、LocalSpawner）給其他 crate 的測試使用。
+# 本 crate 自己的單元測試（cfg(test)）不需要開這個 feature 也能用到該模組。
 testing = []
 
 [dependencies]
+# 只用組合子（select、Shared、Abortable、FuturesUnordered），不帶任何執行器或 runtime（ADR-0001）。
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
