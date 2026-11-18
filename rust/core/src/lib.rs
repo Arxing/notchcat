@@ -10,6 +10,7 @@ pub mod modules;
 pub mod music;
 pub mod nowplaying;
 pub mod runtime;
+pub mod shell_logic;
 pub mod timing;
 pub mod types;
 
