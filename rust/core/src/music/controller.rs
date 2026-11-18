@@ -5,8 +5,10 @@
 //! 也不清掉歌詞。曲目改變時：丟掉舊查詢的 [`TaskHandle`]（drop 即取消）、清空歌詞，
 //! 有 identity 才用 [`Spawner`] 起新查詢。查詢完成時只在控制器「目前的 key」仍等於該查詢的 key 時才寫入
 //! （過期結果守門）：即使舊查詢沒有被取消（例如執行器沒有原生取消），晚到的結果也不會蓋掉新歌。
+//! 守門同時比對世代計數（[`Core::generation`]）：A→B→A 時，第一個 A 的查詢與第二個 A 的 key 相同，
+//! 只比 key 擋不住它；世代每次換曲都加一，所以被取代的查詢一定過期。
 //!
-//! 並行：狀態（快照、歌詞、目前 key、查詢把手）由單一 mutex 保護；通知訂閱者一律在**鎖外**，
+//! 並行：狀態（快照、歌詞、目前 key、世代、查詢把手）由單一 mutex 保護；通知訂閱者一律在**鎖外**，
 //! 所以回呼內可以再讀 `state()` 或訂閱。`spawn` 與舊把手的 drop 也都在鎖外
 //! （有的執行器會在 `spawn` 內就地執行，或在 drop 把手時同步執行取消邏輯）。
 //! 監視器訂閱的回呼與查詢工作都只持有控制器的 `Weak`：控制器 drop 時沒有 Arc 循環，
@@ -15,8 +17,11 @@
 //! 監視器的 `subscribe` 會重播目前值，但重播可能在 `subscribe` 返回之後才抵達（別的執行緒正在送通知時），
 //! 所以初始值的處理是冪等的：同一個快照再套用一次不產生任何變化。
 //!
-//! 通知的先後：監視器的回呼本身已被序列化；查詢完成的通知則來自執行器的執行緒。
-//! 外殼讓兩者都在主執行緒上，所以訂閱者看到的順序與狀態變化一致。
+//! 通知的先後：通知在鎖外送出，所以**不保證**訂閱者依狀態變化的順序收到。監視器的回呼本身已被序列化，
+//! 查詢完成的通知則來自執行器的執行緒；兩者交錯時（或回呼內又觸發較新的變化而重入時），
+//! 較新的狀態可能先於較舊的抵達。訂閱者必須把通知當成「有變化」的訊號，並重讀 [`MusicController::state`]
+//! （它永遠是最新的），不可信任傳入的值。外殼讓兩者都在主執行緒上時，這個交錯在實務上不會發生，
+//! 但這是外殼的性質，不是本型別的保證。
 
 use std::sync::{Arc, Mutex, Weak};
 
@@ -41,6 +46,9 @@ struct Core {
     current_key: Option<String>,
     /// 進行中的查詢；drop 即取消。
     lookup: Option<TaskHandle>,
+    /// 查詢世代：每次（重新）開始或作廢查詢（曲目的 key 改變）就加一。每個查詢記下自己開始時的世代，
+    /// 完成時與 key 一起比對，所以 A→B→A 時第一個、被取代的 A 查詢即使沒被取消也寫不進第二個 A 的狀態。
+    generation: u64,
 }
 
 pub struct MusicController {
@@ -91,6 +99,11 @@ impl MusicController {
 
     /// 訂閱狀態變動（快照或歌詞真的改變才通知）。不會在訂閱當下重播目前值；要的話先讀 [`Self::state`]。
     /// 回呼在鎖外執行；drop 回傳的把手即取消。
+    ///
+    /// **傳給回呼的值只是「這次變動當下」的狀態，不保證是最新的，也不保證通知依狀態的先後順序抵達**：
+    /// 若另一條執行緒（例如執行器完成查詢）在這次通知送出前又改了狀態，較新的通知可能先到、
+    /// 這個較舊的後到。訂閱者應把通知當成「有變化」的訊號，回呼內一律重讀 [`Self::state`]
+    /// （永遠是最新的），不要信任傳入的參數。
     pub fn subscribe(&self, f: Box<dyn Fn(&MusicState) + Send + Sync>) -> Subscription {
         self.notifier.subscribe(f)
     }
@@ -111,7 +124,7 @@ impl MusicController {
         let identity = new.as_ref().and_then(identity_from);
         let key = identity.as_ref().map(|i| i.cache_key());
 
-        let (changed, state, old_lookup, key_changed) = {
+        let (changed, state, old_lookup, key_changed, generation) = {
             let mut core = lock(&self.core);
             let key_changed = core.current_key != key;
             let before = core.state.clone();
@@ -119,6 +132,7 @@ impl MusicController {
             let mut old_lookup = None;
             if key_changed {
                 core.current_key = key.clone();
+                core.generation += 1;
                 old_lookup = core.lookup.take();
                 core.state.lyrics = None;
             }
@@ -127,6 +141,7 @@ impl MusicController {
                 core.state.clone(),
                 old_lookup,
                 key_changed,
+                core.generation,
             )
         };
         // 舊查詢在鎖外取消。
@@ -134,7 +149,7 @@ impl MusicController {
 
         if key_changed {
             if let (Some(identity), Some(key)) = (identity, key) {
-                self.start_lookup(identity, key);
+                self.start_lookup(identity, key, generation);
             }
         }
         if changed {
@@ -146,6 +161,7 @@ impl MusicController {
         self: &Arc<Self>,
         identity: crate::lyrics::identity::TrackIdentity,
         key: String,
+        generation: u64,
     ) {
         let resolver = self.resolver.clone();
         let weak: Weak<Self> = Arc::downgrade(self);
@@ -153,12 +169,12 @@ impl MusicController {
         let handle = self.spawner.spawn(Box::pin(async move {
             let result = resolver.lyrics(identity).await;
             if let Some(controller) = weak.upgrade() {
-                controller.finish_lookup(&task_key, result);
+                controller.finish_lookup(&task_key, generation, result);
             }
         }));
         let stale = {
             let mut core = lock(&self.core);
-            if core.current_key.as_deref() == Some(key.as_str()) {
+            if core.generation == generation && core.current_key.as_deref() == Some(key.as_str()) {
                 core.lookup = Some(handle);
                 None
             } else {
@@ -169,11 +185,14 @@ impl MusicController {
         drop(stale);
     }
 
-    /// 查詢完成：曲目可能在請求期間改變，key 不同就丟棄。
-    fn finish_lookup(&self, key: &str, result: Option<Lyrics>) {
+    /// 查詢完成：曲目可能在請求期間改變；key 或世代不同（含 A→B→A 的舊 A）就丟棄。
+    fn finish_lookup(&self, key: &str, generation: u64, result: Option<Lyrics>) {
         let state = {
             let mut core = lock(&self.core);
-            if core.current_key.as_deref() != Some(key) || core.state.lyrics == result {
+            if core.generation != generation
+                || core.current_key.as_deref() != Some(key)
+                || core.state.lyrics == result
+            {
                 return;
             }
             core.state.lyrics = result;
@@ -400,6 +419,17 @@ mod tests {
         }
     }
 
+    /// 不取消被丟掉的把手：模擬「把手被 detach」或執行器沒有原生取消的情境，
+    /// 此時過期查詢仍會跑到完成，只能靠完成時的守門擋下。
+    struct DetachingSpawner(LocalSpawner);
+
+    impl Spawner for DetachingSpawner {
+        fn spawn(&self, f: BoxFuture<'static, ()>) -> TaskHandle {
+            self.0.spawn(f).detach();
+            TaskHandle::new(|| {})
+        }
+    }
+
     #[test]
     fn fetches_lyrics_on_track_change() {
         let fx = Fixture::new();
@@ -463,13 +493,6 @@ mod tests {
     /// 單靠完成時的 key 比對也必須擋住。
     #[test]
     fn stale_result_is_rejected_by_key_even_when_the_old_lookup_is_not_cancelled() {
-        struct DetachingSpawner(LocalSpawner);
-        impl Spawner for DetachingSpawner {
-            fn spawn(&self, f: BoxFuture<'static, ()>) -> TaskHandle {
-                self.0.spawn(f).detach();
-                TaskHandle::new(|| {})
-            }
-        }
         let fx = Fixture::new();
         let controller = MusicController::new(
             fx.monitor.clone(),
@@ -487,6 +510,44 @@ mod tests {
         fx.emit(song("Song C"));
         assert_eq!(fx.resolver.requested().len(), 3);
         assert_eq!(controller.state().lyrics, None);
+    }
+
+    /// A→B→A：第一個（被取代的）A 查詢沒被取消、先於第二個 A 回來時，只比 key 會把它當成目前曲目的結果。
+    /// 世代計數讓它被擋下；第二個 A 的答案才是有效的。
+    #[test]
+    fn superseded_lookup_for_the_same_track_is_rejected_by_generation() {
+        let fx = Fixture::new();
+        let controller = MusicController::new(
+            fx.monitor.clone(),
+            fx.resolver.clone(),
+            None,
+            Arc::new(DetachingSpawner(fx.spawner.clone())),
+        );
+        fx.emit(song("Song A"));
+        fx.emit(song("Song B"));
+        fx.emit(song("Song A"));
+        assert_eq!(
+            fx.resolver.requested_titles(),
+            ["Song A", "Song B", "Song A"]
+        );
+        assert_eq!(
+            fx.resolver.dropped.load(Ordering::SeqCst),
+            0,
+            "沒有任何查詢被取消"
+        );
+
+        fx.respond(0, plain("first A (superseded)"));
+        assert_eq!(
+            controller.state().lyrics,
+            None,
+            "the superseded lookup shares the key but not the generation"
+        );
+
+        fx.respond(1, plain("lyrics of B"));
+        assert_eq!(controller.state().lyrics, None, "B is no longer the track");
+
+        fx.respond(2, plain("second A"));
+        assert_eq!(controller.state().lyrics, plain("second A"));
     }
 
     #[test]
@@ -645,6 +706,54 @@ mod tests {
         assert_eq!(lock(&seen)[2].lyrics, None);
         fx.respond(1, None);
         assert_eq!(lock(&seen).len(), 3);
+    }
+
+    /// 通知在鎖外送出，所以重入（回呼內又觸發較新的變化）時，較新的通知可能先於較舊的抵達。
+    /// 因此訂閱者收到的值不保證單調；`state()` 才是權威，永遠是最新的。
+    /// 此測試固定這個行為（若之後改成保證順序，更新此測試與 `subscribe` 的文件）。
+    #[test]
+    fn subscribers_may_see_an_older_value_after_a_newer_one_but_state_is_always_latest() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        let spawner = fx.spawner.clone();
+        let resolver = fx.resolver.clone();
+        let reentered = Arc::new(AtomicUsize::new(0));
+
+        // 第一位訂閱者在收到「A 剛出現、歌詞尚未到」的通知時，當場讓歌詞查詢完成，
+        // 於是「A + 歌詞」的新通知在原本那一輪通知還沒送完時就先送出。
+        let r = reentered.clone();
+        let _first = controller.subscribe(Box::new(move |state| {
+            if state.lyrics.is_none() && r.fetch_add(1, Ordering::SeqCst) == 0 {
+                spawner.run_until_stalled(); // 讓查詢真正發出
+                resolver.respond(0, plain("words"));
+                spawner.run_until_stalled();
+            }
+        }));
+        /// （傳入回呼的歌詞，回呼當下 `state()` 的歌詞）
+        type Seen = Vec<(Option<Lyrics>, Option<Lyrics>)>;
+        let seen: Arc<Mutex<Seen>> = Arc::default();
+        let (s, c) = (seen.clone(), Arc::downgrade(&controller));
+        let _second = controller.subscribe(Box::new(move |state| {
+            let latest = c.upgrade().unwrap().state().lyrics;
+            lock(&s).push((state.lyrics.clone(), latest));
+        }));
+
+        fx.source.send(song("Song A"));
+        fx.spawner.run_until_stalled();
+
+        let seen = lock(&seen).clone();
+        assert_eq!(
+            seen.iter()
+                .map(|(passed, _)| passed.clone())
+                .collect::<Vec<_>>(),
+            [plain("words"), None],
+            "newer value first, then the older one"
+        );
+        assert!(
+            seen.iter().all(|(_, latest)| *latest == plain("words")),
+            "state() already holds the newest value in every callback"
+        );
+        assert_eq!(controller.state().lyrics, plain("words"));
     }
 
     #[test]
