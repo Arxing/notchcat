@@ -22,6 +22,11 @@ libloading = "0.8"
 # 而且 panel.rs 以外不得出現 objc2 繞路。
 core-graphics = "0.25"
 core-foundation = "0.10"
+# 面板視窗繞路（panel.rs）與 NSScreen 列舉（screens.rs）。objc2 家族皆為 MIT；只在 macOS 才相依，
+# 關掉預設的「全部框架」feature，只開用到的類別。版本與 GPUI spike（spikes/gpui-notch）相同。
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString", "NSArray", "NSEnumerator", "NSDictionary", "NSValue"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen", "NSWindow", "NSResponder", "NSView", "NSEvent", "NSApplication", "NSRunningApplication", "NSGraphics", "NSColor"] }
 
 [dev-dependencies]
 # 測試替身（FakeClock、LocalSpawner）。

@@ -1,11 +1,12 @@
 //! musicat-platform-macos：macOS 專屬實作。
 //!
-//! 在非 macOS 平台上這是一個空 crate（只有兩個與平台無關的字串常數）。
+//! 在非 macOS 平台上只編譯與平台無關的部分（字串常數、helper 線上格式、座標換算等純函式）。
 //! `build.rs` 只在目標為 macOS 時才編譯 `helper/helper.c`。
 
 pub mod helper_wire;
 pub mod mediaremote_control;
 pub mod perl_launcher;
+pub mod screens;
 pub mod supervisor;
 pub mod window_title_source;
 
