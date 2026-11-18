@@ -238,6 +238,8 @@ dependencies = [
  "ferrous-opencc",
  "futures-util",
  "regex",
+ "serde",
+ "serde_json",
  "unicode-normalization",
 ]
 

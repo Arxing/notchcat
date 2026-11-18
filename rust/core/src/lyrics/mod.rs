@@ -3,7 +3,10 @@
 //! 時間一律是秒（`f64`）。
 
 pub mod identity;
+pub mod lrclib;
+pub mod netease;
 pub mod normalizer;
+pub mod provider;
 
 pub use identity::TrackIdentity;
 pub use normalizer::identity_from;
