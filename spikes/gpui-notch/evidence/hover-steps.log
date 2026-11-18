@@ -1,0 +1,14 @@
+[1794539724.590] STEP 1 start outside
+[1794539725.199] STEP 2 into container but below pill (expect NO expand)
+[1794539726.377] STEP 3 up into pill (expect 1 enter + expand)
+[1794539726.853] STEP 4 hold still 1.5s with +-1pt jitter (expect nothing)
+[1794539728.536] STEP 5 move down inside expanded container (expect nothing)
+[1794539729.418] STEP 6 leave container (expect 1 exit, collapse 150ms later)
+[1794539730.417] STEP 7 enter pill then immediately dive to y=170 during the 0.28s animation (expect no exit)
+[1794539731.323] STEP 8 out-and-back within 100ms (expect exit+enter, NO collapse)
+[1794539731.917] STEP 9 leave (expect exit + collapse)
+[1794539732.692] STEP 10 rapid in/out of pill x6, 120ms each side
+[1794539734.727] STEP 11 jitter across pill bottom edge while collapsed, 1.5s
+[1794539736.583] STEP 12 leave
+[1794539737.187] STEP 13 rest still under the pill (collapsed, transparent area) 1s (expect nothing)
+[1794539738.196] STEP done, cursor restored to (889.2109375, 761.8359375), elapsed 13.6s

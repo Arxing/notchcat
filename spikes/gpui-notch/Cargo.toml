@@ -1,0 +1,19 @@
+[package]
+name = "gpui-notch"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Standalone: keep this spike out of any parent workspace.
+[workspace]
+
+[dependencies]
+# runtime_shaders: compile Metal shaders at runtime; the offline `metal` tool (Metal Toolchain) is not installed here.
+gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+raw-window-handle = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSGeometry", "NSString", "NSArray"] }
+objc2-app-kit = { version = "0.3", features = ["NSScreen", "NSWindow", "NSPanel", "NSResponder", "NSView", "NSEvent", "NSApplication", "NSRunningApplication", "NSGraphics", "NSColor"] }
+
+[profile.release]
+debug = false

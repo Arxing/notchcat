@@ -1,0 +1,25 @@
+OURS number=42306 layer=25 bounds={
+    Height = 180;
+    Width = 345;
+    X = 583;
+    Y = 0;
+} alpha=1 onscreen=1 name=
+MENUBAR layer=24 bounds={
+    Height = 24;
+    Width = 1920;
+    X = "-1920";
+    Y = "-909";
+} owner=Window Server
+MENUBAR layer=24 bounds={
+    Height = 24;
+    Width = 1920;
+    X = 0;
+    Y = "-1080";
+} owner=Window Server
+MENUBAR layer=24 bounds={
+    Height = 37;
+    Width = 1512;
+    X = 0;
+    Y = 0;
+} owner=Window Server
+kCGMainMenuWindowLevel=24 kCGStatusWindowLevel=25
