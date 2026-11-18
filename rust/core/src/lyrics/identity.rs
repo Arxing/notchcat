@@ -14,6 +14,9 @@
 //! - `ferrous-opencc` 0.4.0（Apache-2.0）：OpenCC 的純 Rust 實作，字典內建（不讀外部檔案），
 //!   有詞組層級的 `T2s`。**採用。** 代價是依賴樹較大（`fst`、`rkyv`、`phf` 等，約 40 個 crate）、
 //!   編譯較久；本機實測 release 範例二進位約 0.9 MB，首次 `OpenCC::from_config` 約 0.7 ms。
+//!   依賴備註：`ferrous-opencc` 匯出未使用的 `extern "C"` FFI 符號（`opencc_create`／`opencc_destroy`／
+//!   `opencc_convert`／`opencc_free_string`），並對建置時產生的字典資料使用 `unsafe`；我們只走安全的 Rust
+//!   API（`OpenCC::from_config`／`convert`），風險判斷為低。
 //!
 //! 折疊方向：兩邊都轉成**簡體**（`T2s`）。繁→簡是多對一，不需要簡→繁那種依上下文猜
 //! `后/後`、`发/發/髮` 的方向；兩邊同轉所以對照結果對稱。簡體輸入原樣通過。
@@ -102,9 +105,18 @@ static SUFFIX_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     .expect("suffix pattern is valid")
 });
 
-/// 繁→簡轉換器，只建一次。建立失敗（不應發生，字典內建）時退化為不轉換。
-static T2S: LazyLock<Option<OpenCC>> =
-    LazyLock::new(|| OpenCC::from_config(BuiltinConfig::T2s).ok());
+/// 繁→簡轉換器，只建一次。字典內建於套件，建立不應失敗；若失敗，debug 建置以 `debug_assert!` 直接報錯
+/// （測試與開發時立刻發現），release 建置退化為不轉換（只失去簡繁折疊，其餘比對照常）。
+/// core 沒有日誌套件，所以 release 的退化是無聲的。
+static T2S: LazyLock<Option<OpenCC>> = LazyLock::new(|| {
+    let converter = OpenCC::from_config(BuiltinConfig::T2s);
+    debug_assert!(
+        converter.is_ok(),
+        "ferrous-opencc 的內建 T2s 設定應該一定建得起來：{:?}",
+        converter.as_ref().err()
+    );
+    converter.ok()
+});
 
 /// 拉丁系組合符號區塊（見模組說明：不含日文濁點）。
 fn is_latin_combining_mark(c: char) -> bool {

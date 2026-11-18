@@ -43,6 +43,11 @@ core 不得依賴任何 async runtime（tokio、async-std、smol…），也不�
 - `FakeHttp`：依完整 URL 排程回應、錯誤或永不回應（`Hang`），記錄每一次請求。
 - `LocalSpawner`：決定性的單執行緒執行器，`spawn` 只排入，`run_until_stalled()` 把所有工作跑到停滯。語意同 `futures::executor::LocalPool::run_until_stalled`，但 `LocalPool` 是 `!Send`／`!Sync`，無法實作 `Spawner: Send + Sync`，所以改以 `futures_util::stream::FuturesUnordered` 加一個喚醒旗標自行驅動，也因此不需要 `futures-executor`。
 
+## 已知限制
+
+- **提供者 future 在被輪詢時 panic**：`futures_util::future::Shared` 會把該次執行標成中毒，所有加入同一次執行的等待者也都會 panic（而不只是發生 panic 的那一個），而且在最後一個等待者離開、表項移除之前，新來的同 key 呼叫也會加入這次已中毒的執行。快取不受影響：快取的 mutex 輔助函式（`runtime::lock`）容忍中毒，而快取寫入位於 future 結尾、panic 時根本沒執行到，所以不會留下半截結果。提供者實作（`lrclib`、`netease`）不應 panic；這是接受的風險。
+- **`LocalSpawner` 的把手被 drop 後，取消要到下一次 `run_until_stalled` 才生效**：drop 把手只是標記取消，被取消的工作是在下一次執行器輪詢時才真正被 drop。這只影響測試替身；測試在 drop 把手之後必須再呼叫一次 `run_until_stalled()`，才能觀察到取消的效果（例如 `FakeClock::pending_sleeps()` 歸零）。
+
 ## 被否決的替案
 
 **以事件加計時驅動的狀態機**（core 只提供 `on_event` / `on_tick(now)`，所有等待都由外殼的計時器推進）。
