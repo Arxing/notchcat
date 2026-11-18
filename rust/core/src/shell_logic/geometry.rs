@@ -130,6 +130,78 @@ pub fn local_rect(mode: ShellMode, g: &NotchGeometry, preview_extra: f64) -> Rec
     }
 }
 
+/// 外殼動畫長度（秒）：模式切換時畫出的大小與下方圓角都以此長度、[`ease_in_out`] 曲線過渡（spec 5.3）。
+pub const ANIMATION_SECONDS: f64 = 0.28;
+
+/// ease-in-out 曲線：CSS／Core Animation 的 `ease-in-out`（三次 Bézier，控制點 (0.42, 0)、(0.58, 1)），
+/// 與 Swift 版 `.easeInOut(duration: 0.28)` 同一條曲線。對 (0.5, 0.5) 點對稱、單調遞增，
+/// 斜率上限約 1.72（中點）。
+///
+/// `t` 先夾到 `0..=1`；NaN 視為 0。端點精確：`ease_in_out(0) == 0`、`ease_in_out(1) == 1`。
+pub fn ease_in_out(t: f64) -> f64 {
+    const X1: f64 = 0.42;
+    const X2: f64 = 0.58;
+    if t.is_nan() || t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    // Bézier 參數 s → (x, y)；x(s) 單調，以二分法解 x(s) = t（64 次到 f64 精度，沒有發散的風險）。
+    let bezier = |s: f64, p1: f64, p2: f64| {
+        let r = 1.0 - s;
+        3.0 * r * r * s * p1 + 3.0 * r * s * s * p2 + s * s * s
+    };
+    let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+    let mut s = t;
+    for _ in 0..64 {
+        s = 0.5 * (lo + hi);
+        let x = bezier(s, X1, X2);
+        if x == t {
+            break;
+        }
+        if x < t {
+            lo = s;
+        } else {
+            hi = s;
+        }
+    }
+    bezier(s, 0.0, 1.0)
+}
+
+/// 兩個大小之間的線性插值：`t = 0` 為 `from`、`t = 1` 為 `to`（不夾 `t`，由呼叫端先套曲線）。
+pub fn lerp_size(from: Size, to: Size, t: f64) -> Size {
+    Size {
+        w: from.w + (to.w - from.w) * t,
+        h: from.h + (to.h - from.h) * t,
+    }
+}
+
+/// 畫出的高度為 `drawn_h` 時下方圓角的半徑：依高度在 Preview → Expanded 之間的位置
+/// （`(drawn_h - preview_h) / (expanded_h - preview_h)`，夾到 `0..=1`），把半徑從
+/// [`PREVIEW_CORNER_RADIUS`] 線性插值到 [`EXPANDED_CORNER_RADIUS`]。
+///
+/// 高度本身已是 ease-in-out 插值的結果，所以半徑跟著同一條曲線、同一段時間變化，
+/// 動畫中途改目標時也從目前畫出的樣子連續接上。`preview_h` 與 `expanded_h` 是**目前**兩個模式的高度
+/// （Preview 含模組額外高度）。兩者相等（無從插值）或 `drawn_h` 為 NaN 時回傳 `mode`（目標模式）的半徑。
+pub fn corner_radius_for_height(
+    drawn_h: f64,
+    preview_h: f64,
+    expanded_h: f64,
+    mode: ShellMode,
+) -> f64 {
+    let span = expanded_h - preview_h;
+    let progress = (drawn_h - preview_h) / span;
+    if !progress.is_finite() {
+        return match mode {
+            ShellMode::Preview => PREVIEW_CORNER_RADIUS,
+            ShellMode::Expanded => EXPANDED_CORNER_RADIUS,
+        };
+    }
+    let p = progress.clamp(0.0, 1.0);
+    PREVIEW_CORNER_RADIUS + (EXPANDED_CORNER_RADIUS - PREVIEW_CORNER_RADIUS) * p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +428,101 @@ mod tests {
         }));
         let nan_rect = Rect { x: f64::NAN, ..r };
         assert!(!nan_rect.contains(Point { x: 5.0, y: 5.0 }));
+    }
+
+    #[test]
+    fn animation_lasts_280ms() {
+        assert_eq!(ANIMATION_SECONDS, 0.28);
+    }
+
+    #[test]
+    fn ease_in_out_endpoints_and_midpoint() {
+        assert_eq!(ease_in_out(0.0), 0.0);
+        assert_eq!(ease_in_out(1.0), 1.0);
+        assert!((ease_in_out(0.5) - 0.5).abs() < 1e-12);
+        // 慢進慢出：前段比線性慢，後段比線性快。
+        assert!(ease_in_out(0.25) < 0.25);
+        assert!(ease_in_out(0.75) > 0.75);
+    }
+
+    #[test]
+    fn ease_in_out_is_symmetric_and_monotonic() {
+        let mut prev = ease_in_out(0.0);
+        for i in 1..=1000 {
+            let t = i as f64 / 1000.0;
+            let v = ease_in_out(t);
+            assert!(v >= prev, "not monotonic at t={t}");
+            assert!(
+                (ease_in_out(1.0 - t) - (1.0 - v)).abs() < 1e-12,
+                "asymmetric at t={t}"
+            );
+            assert!((0.0..=1.0).contains(&v));
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn ease_in_out_clamps_out_of_range_t() {
+        assert_eq!(ease_in_out(-0.5), 0.0);
+        assert_eq!(ease_in_out(-1e300), 0.0);
+        assert_eq!(ease_in_out(f64::NEG_INFINITY), 0.0);
+        assert_eq!(ease_in_out(1.5), 1.0);
+        assert_eq!(ease_in_out(f64::INFINITY), 1.0);
+        assert_eq!(ease_in_out(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn lerp_size_interpolates_both_axes() {
+        let a = Size { w: 100.0, h: 32.0 };
+        let b = Size { w: 300.0, h: 180.0 };
+        assert_eq!(lerp_size(a, b, 0.0), a);
+        assert_eq!(lerp_size(a, b, 1.0), b);
+        assert_eq!(lerp_size(a, b, 0.5), Size { w: 200.0, h: 106.0 });
+        assert_eq!(lerp_size(a, b, 0.25), Size { w: 150.0, h: 69.0 });
+        // 反方向也成立。
+        assert_eq!(lerp_size(b, a, 0.5), Size { w: 200.0, h: 106.0 });
+    }
+
+    #[test]
+    fn corner_radius_follows_the_height_between_preview_and_expanded() {
+        let r = |h| corner_radius_for_height(h, 32.0, 180.0, ShellMode::Expanded);
+        assert_eq!(r(32.0), PREVIEW_CORNER_RADIUS);
+        assert_eq!(r(180.0), EXPANDED_CORNER_RADIUS);
+        assert!((r(106.0) - 17.0).abs() < 1e-12);
+        // 超出範圍夾到兩端（例如 Preview 額外高度改變時的暫態）。
+        assert_eq!(r(10.0), PREVIEW_CORNER_RADIUS);
+        assert_eq!(r(500.0), EXPANDED_CORNER_RADIUS);
+        // Preview 有額外高度：高度停在 56 也是 Preview 的半徑。
+        assert_eq!(
+            corner_radius_for_height(56.0, 56.0, 180.0, ShellMode::Preview),
+            PREVIEW_CORNER_RADIUS
+        );
+    }
+
+    #[test]
+    fn corner_radius_handles_degenerate_heights() {
+        // 兩個模式一樣高：無從插值，直接用目標模式的半徑。
+        assert_eq!(
+            corner_radius_for_height(180.0, 180.0, 180.0, ShellMode::Preview),
+            PREVIEW_CORNER_RADIUS
+        );
+        assert_eq!(
+            corner_radius_for_height(180.0, 180.0, 180.0, ShellMode::Expanded),
+            EXPANDED_CORNER_RADIUS
+        );
+        // 很高的瀏海：Preview 比 Expanded 高，插值方向反過來仍正確。
+        assert_eq!(
+            corner_radius_for_height(428.0, 428.0, 180.0, ShellMode::Preview),
+            PREVIEW_CORNER_RADIUS
+        );
+        assert_eq!(
+            corner_radius_for_height(180.0, 428.0, 180.0, ShellMode::Expanded),
+            EXPANDED_CORNER_RADIUS
+        );
+        // NaN 高度：用目標模式的半徑，不 panic。
+        assert_eq!(
+            corner_radius_for_height(f64::NAN, 32.0, 180.0, ShellMode::Expanded),
+            EXPANDED_CORNER_RADIUS
+        );
     }
 }
