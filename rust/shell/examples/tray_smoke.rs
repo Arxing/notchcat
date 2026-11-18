@@ -5,8 +5,11 @@
 //!
 //! - 0 s：建立面板（黑色 Preview 長條）與選單列圖示（文字 `♪`），印出 `describe_panel` 與 `MenuBar::describe`。
 //! - 1 s：再印一次兩者（確認層級 25、`canBecomeKey=false`、圖示可見）。
-//! - 2 s：以程式觸發「LRCLIB」開關（`NSMenu performActionForItemAtIndex:`，走 AppKit 的 target/action），
-//!   事件經通道交給 GPUI 前景工作，更新狀態後 `set_model` 重建選單。
+//! - 2 s：以程式觸發「LRCLIB」開關（`NSMenu performActionForItemAtIndex:`，走 AppKit 的 target/action）。
+//!   **回呼裡直接 `set_model`**（同一個 `MenuBar`、在 AppKit 派送這個選單動作的當下）換成「沒有螢幕項目」的
+//!   位移模型，證明在回呼裡換選單不會崩潰；事件也經通道交給 GPUI 前景工作，更新狀態後再 `set_model` 一次。
+//! - 2.6 s：過期選單：對保留中的舊選單（位移模型那一份）觸發它的「LRCLIB」位置；這個位置在目前的模型裡是別的項目，
+//!   事件必須仍是 `Toggled("lyrics.lrclib", …)`（每份選單以自己的模型快照解析）。
 //! - 3 s：以程式觸發「自動」螢幕選項。
 //! - 4 s：`MenuBar::open_menu()`（排到 run loop 下一輪才對圖示按鈕 `performClick:`，與使用者點擊同一路徑），
 //!   0.5 s 後印出 `menuOpen`（NSMenuDelegate），1.5 s 後由 GPUI 計時器 `close_menu()`；印出這 1.5 s 內面板
@@ -45,10 +48,16 @@ mod smoke {
     };
     use musicat_platform_macos::panel::{self, NativeWindow};
     use musicat_platform_macos::screens::list_screens;
-    use musicat_platform_macos::tray::MenuBar;
+    use musicat_platform_macos::tray::{is_main_thread, MenuBar};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
     const POLL: Duration = Duration::from_millis(16);
+
+    thread_local! {
+        /// 讓（必須是 `Send + Sync` 的）選單回呼在主執行緒上拿到同一個 `MenuBar`，以便在回呼裡呼叫 `set_model`。
+        static IN_CALLBACK_BAR: RefCell<Option<Rc<RefCell<Option<MenuBar>>>>> = const { RefCell::new(None) };
+        static IN_CALLBACK_DONE: Cell<bool> = const { Cell::new(false) };
+    }
 
     const MODE_NOTCH: &str = "mode.notch";
     const LYRICS_LRCLIB: &str = "lyrics.lrclib";
@@ -214,7 +223,7 @@ mod smoke {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(8)
-            .max(6);
+            .max(7);
         let app = Application::new();
         panel::patch_gpui_panel_class();
 
@@ -253,6 +262,19 @@ mod smoke {
                 )
             });
             let quit_index = index_of(&model, |i| matches!(i, MenuItem::Quit));
+            // 位移模型：沒有任何螢幕項目，所以「LRCLIB」以後的項目都往前移。
+            let shifted = build_model(
+                &Settings {
+                    lrclib: false,
+                    ..settings.clone()
+                },
+                &[],
+            );
+            let shifted_lrclib_index = index_of(
+                &shifted,
+                |i| matches!(i, MenuItem::Toggle { id, .. } if *id == LYRICS_LRCLIB),
+            );
+            let current_at_shifted_index = format!("{:?}", model.items[shifted_lrclib_index]);
             // 圖示：預設用文字 ♪；`MUSICAT_TRAY_ICON=<png 路徑>` 可測 PNG（template）路徑。
             let icon = std::env::var_os("MUSICAT_TRAY_ICON").and_then(|p| std::fs::read(p).ok());
             let Some(bar) = MenuBar::new(icon.as_deref()) else {
@@ -263,11 +285,26 @@ mod smoke {
             let (tx, rx) = mpsc::channel::<MenuEvent>();
             bar.on_event(Box::new(move |event| {
                 println!("[callback on main thread={}] {event:?}", is_main_thread());
+                if matches!(event, MenuEvent::Toggled(LYRICS_LRCLIB, _)) && !IN_CALLBACK_DONE.get() {
+                    IN_CALLBACK_DONE.set(true);
+                    IN_CALLBACK_BAR.with_borrow(|cell| {
+                        let Some(cell) = cell else { return };
+                        // 呼叫 perform_item 的那一端只持有不可變借用，這裡也只借不可變的。
+                        if let Some(b) = cell.borrow().as_ref() {
+                            b.set_model(shifted.clone());
+                            println!(
+                                "[callback] set_model(shifted) inside the callback; tray: {}",
+                                b.describe()
+                            );
+                        }
+                    });
+                }
                 let _ = tx.send(event);
             }));
             bar.set_model(model);
             println!("{} tray: {}", stamp(t0), bar.describe());
             let bar = Rc::new(RefCell::new(Some(bar)));
+            IN_CALLBACK_BAR.set(Some(bar.clone()));
             let polls = Rc::new(Cell::new(0u64));
 
             let options = WindowOptions {
@@ -353,9 +390,20 @@ mod smoke {
                 timer(1000).await;
                 println!("{} perform_item({lrclib_index}) [LRCLIB]", stamp(t0));
                 let ok = bar.borrow().as_ref().map(|b| b.perform_item(lrclib_index));
-                println!("{} perform_item returned {ok:?}", stamp(t0));
+                println!("{} perform_item returned {ok:?} (survived set_model inside the callback)", stamp(t0));
 
-                timer(1000).await;
+                timer(600).await;
+                println!(
+                    "{} perform_retired_item({shifted_lrclib_index}) [stale menu: LRCLIB there; current model has {current_at_shifted_index} at that index]",
+                    stamp(t0)
+                );
+                let ok = bar
+                    .borrow()
+                    .as_ref()
+                    .map(|b| b.perform_retired_item(shifted_lrclib_index));
+                println!("{} perform_retired_item returned {ok:?}", stamp(t0));
+
+                timer(400).await;
                 println!("{} perform_item({auto_index}) [自動]", stamp(t0));
                 let ok = bar.borrow().as_ref().map(|b| b.perform_item(auto_index));
                 println!("{} perform_item returned {ok:?}", stamp(t0));
@@ -390,7 +438,7 @@ mod smoke {
                     );
                 }
 
-                timer(secs * 1000 - 5200 - 1000).await;
+                timer((secs * 1000).saturating_sub(5200 + 1000)).await;
                 let _ = window.update(cx, |s, _, _| {
                     if let Some(h) = s.handle {
                         println!(
@@ -412,10 +460,5 @@ mod smoke {
             .detach();
         });
         println!("{} Application::run returned", stamp(t0));
-    }
-
-    fn is_main_thread() -> bool {
-        // pthread_main_np 的替代：Rust 的主執行緒名稱是 "main"。
-        std::thread::current().name() == Some("main")
     }
 }

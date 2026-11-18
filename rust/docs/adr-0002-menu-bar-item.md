@@ -81,14 +81,29 @@ spec 第 3 節規定設定入口是選單列（macOS）／系統匣（Windows）
   螢幕選項為一組單選：模型裡勾了不只一個時只畫第一個。空標題的退路：自動 → 「自動」、螢幕 → id、開關 → id。結束為「結束 MusiCat」（⌘Q）。
 - `MenuBar::new(icon_png: Option<&[u8]>) -> Option<MenuBar>`：不在主執行緒回 `None`。PNG 設成 18 點高的 template 圖示
   （系統依淺色／深色選單列著色）；`None` 或解碼失敗時顯示文字「♪」。正式的 template 圖示是之後的打磨工作。
-- `set_model` 每次建一份新的 `NSMenu` 換上去（勾選用 `NSControlStateValueOn/Off`），而不是就地改舊選單：
-  回呼裡（AppKit 正在派送該選單的動作時）呼叫 `set_model` 也安全。
-- `on_event(Box<dyn Fn(MenuEvent) + Send + Sync>)`：回呼**在主執行緒上同步呼叫**。回呼應只把事件送進通道
+- `set_model` 每次建一份新的 `NSMenu` 換上去（勾選用 `NSControlStateValueOn/Off`），而不是就地改舊選單。
+- **每份選單一個模型快照**（review 修正）：每次 `set_model` 都建一個新的 target（`MusiCatMenuTarget`），它的 ivar 帶著
+  建出這份選單的 `MenuModel`；`menuItemClicked:` 以**自己的快照**解析 tag。使用者開著舊選單時模型被換掉（例如接上
+  一台螢幕，後面的項目全部位移），點舊選單仍回報舊選單上那個項目的事件，不會對到新模型同位置的別的項目。
+  回歸測試：`tray::tests::a_click_on_an_old_snapshot_resolves_against_that_snapshot`；煙霧範例以
+  `perform_retired_item` 實測（舊選單索引 4 是 LRCLIB、新模型索引 4 是螢幕「DELL SE2416H」，事件仍是
+  `Toggled("lyrics.lrclib", true)`）。
+- **被換下的選單延後釋放**（review 修正）：NSMenuItem 對 target 是弱參考，而 AppKit 在動作回呼返回後仍會使用該選單與項目，
+  所以 (NSMenu, target) 以「世代」保管（純邏輯 `MenuGenerations`，有單元測試）：剛換下的那一代一律保留到下一次
+  `set_model`；更早的世代只在「沒有選單開著、也不在選單動作派送中」時才釋放；drop `MenuBar` 時全部交給
+  autorelease pool，在目前的事件派送結束後才釋放（drop 可能發生在回呼裡）。因此**在回呼裡呼叫 `set_model` 是安全的**，
+  煙霧範例實測了這條路徑（回呼裡 `set_model(位移模型)`，`performActionForItemAtIndex:` 正常返回、新選單已裝上），
+  並以 `NSZombieEnabled=YES` 再跑一次，沒有任何 zombie 訊息。
+- `on_event(Box<dyn Fn(MenuEvent) + Send + Sync>)`：回呼**在主執行緒上同步呼叫**。建議回呼只把事件送進通道
   （煙霧範例用 `std::sync::mpsc`，由 GPUI 前景工作取出處理），不得在回呼裡借用 GPUI 的 `App`。
-- 記憶體：`MenuBar` 持有 `NSStatusItem` 與 target；target 的 ivar 是 `Rc<Shared>`（模型、回呼、選單開關狀態），`Shared`
-  不回頭參考 target 或 `MenuBar`，NSMenuItem 對 target、NSMenu 對 delegate 都是弱參考，所以沒有參考循環。
-  drop `MenuBar` 時 `removeStatusItem:`，圖示消失。`MenuBar` 不是 `Send`。
-- 診斷：`perform_item(index)`、`open_menu()`、`close_menu()`、`is_menu_open()`、`describe()`，給煙霧範例與日後除錯用。
+- 記憶體：`MenuBar` 持有 `NSStatusItem`、共享狀態 `Rc<Shared>`（回呼、選單開關狀態、派送深度、已 drop 旗標）與選單世代；
+  每個 target 持有 `Rc<Shared>` 與自己的快照，`Shared` 不回頭參考 target、選單或 `MenuBar`，NSMenuItem 對 target、
+  NSMenu 對 delegate 都是弱參考，所以沒有參考循環。drop `MenuBar` 時 `removeStatusItem:`，圖示消失，已排程的
+  `openMenuNow:` 看到已 drop 旗標就不動作。`MenuBar` 不是 `Send`。
+- 巢狀 run loop 的禁忌寫在 `MenuBar` 的型別文件：`set_model`、`perform_item`、`close_menu`、`on_event`、`describe` 不開巢狀
+  run loop，可在 GPUI 前景工作裡呼叫；`open_menu` 把開選單排到 run loop 下一輪。
+- 診斷：`perform_item(index)`、`perform_retired_item(index)`、`open_menu()`、`close_menu()`、`is_menu_open()`、`describe()`，
+  給煙霧範例與日後除錯用；`tray::is_main_thread()` 讓 shell／app 不必碰 objc2 就能檢查執行緒。
 
 ## 被否決的替案
 
