@@ -5,6 +5,21 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[lib]
+name = "musicat_app"
+path = "src/lib.rs"
+
 [[bin]]
 name = "musicat"
 path = "src/main.rs"
+
+[dependencies]
+musicat-core = { path = "../core" }
+# 真實的 HTTP 實作（app 可用，core 不可）。預設特性 = rustls（純 Rust TLS，不需要系統 OpenSSL）+ gzip。
+ureq = "3"
+# 只用 oneshot：把背景執行緒的結果交回 future，不綁任何執行器。
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# 只給測試與範例的 block_on 用；app 的函式庫本體不依賴任何執行器。
+futures-executor = { version = "0.3", default-features = false, features = ["std"] }
