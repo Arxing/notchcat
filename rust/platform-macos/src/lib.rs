@@ -7,6 +7,7 @@ pub mod helper_wire;
 pub mod mediaremote_control;
 pub mod perl_launcher;
 pub mod supervisor;
+pub mod window_title_source;
 
 /// 建置後放在 `target/<profile>/`（與可執行檔同目錄）的動態庫檔名；
 /// perl 以絕對路徑經 DynaLoader 載入。

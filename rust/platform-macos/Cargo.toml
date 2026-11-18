@@ -16,6 +16,12 @@ base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 # 載入私有 MediaRemote 框架（只在 macOS 才相依；動態載入的 unsafe 由它封裝）。ISC 授權，無其他相依。
 [target.'cfg(target_os = "macos")'.dependencies]
 libloading = "0.8"
+# 視窗列舉（CGWindowListCopyWindowInfo，公開的 CoreGraphics API）。core-graphics 0.25／core-foundation 0.10 皆為
+# MIT OR Apache-2.0；相依只有 core-graphics-types、foreign-types、bitflags、libc 與 core-foundation(-sys)，
+# 純 Rust 綁定、沒有 build script。不用 objc2-core-graphics：它帶進 objc2 家族（Task 21 之前先不引入），
+# 而且 panel.rs 以外不得出現 objc2 繞路。
+core-graphics = "0.25"
+core-foundation = "0.10"
 
 [dev-dependencies]
 # 測試替身（FakeClock、LocalSpawner）。
