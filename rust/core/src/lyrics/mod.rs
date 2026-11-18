@@ -7,6 +7,7 @@ pub mod lrclib;
 pub mod netease;
 pub mod normalizer;
 pub mod provider;
+pub mod repository;
 
 pub use identity::TrackIdentity;
 pub use normalizer::identity_from;

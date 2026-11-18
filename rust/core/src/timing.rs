@@ -209,8 +209,12 @@ impl<K: Hash + Eq, V: Clone> Future for Waiter<K, V> {
     }
 }
 
-/// 等待者離開時把計數減一；歸零就移除表項。`Waiter` 的 `shared` 欄位在這之後才（於鎖外）drop，
-/// 若它是最後一個強參考，內部 future 就在那時被 drop。
+/// 等待者離開時把計數減一；歸零就移除表項。
+///
+/// drop 順序：`Waiter` 的欄位依宣告順序 drop，所以 `shared` 先 drop（若它是最後一個強參考，
+/// 內部 future 就在那時、於鎖外被 drop），這個 guard 才接著減計數。中間的空檔裡表項還在，
+/// 但它的 `WeakShared` 已升級失敗，`join_locked` 視同沒有進行中的執行；
+/// 新開的執行會以新的 id 蓋掉表項，這個 guard 看到 id 不符就不動它。
 struct WaiterGuard<K: Hash + Eq, V> {
     flights: Weak<Mutex<Flights<K, V>>>,
     key: Option<K>,
@@ -273,10 +277,15 @@ mod tests {
         let spawner = LocalSpawner::new();
         let out: Slot<Result<(), TimedOut>> = slot();
 
-        // 被包的 future 永不完成，也不檢查任何取消訊號。
-        let (c, o) = (clock.clone(), out.clone());
+        // 被包的 future 永不完成，也不檢查任何取消訊號；drop 時立旗。
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (c, o, d) = (clock.clone(), out.clone(), dropped.clone());
         let _task = spawner.spawn(Box::pin(async move {
-            let r = with_timeout(&*c, Duration::from_secs(5), std::future::pending::<()>()).await;
+            let inner = async move {
+                let _guard = DropFlag(d);
+                std::future::pending::<()>().await
+            };
+            let r = with_timeout(&*c, Duration::from_secs(5), inner).await;
             *o.lock().unwrap() = Some(r);
         }));
 
@@ -287,11 +296,16 @@ mod tests {
         clock.advance(Duration::from_millis(4_999));
         spawner.run_until_stalled();
         assert!(take(&out).is_none());
+        assert!(!dropped.load(Ordering::SeqCst));
 
         clock.advance(Duration::from_millis(1));
         spawner.run_until_stalled();
         assert_eq!(take(&out), Some(Err(TimedOut)));
         assert_eq!(clock.pending_sleeps(), 0);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "輸家（被包的 future）必須被 drop"
+        );
     }
 
     #[test]
@@ -457,6 +471,41 @@ mod tests {
         let _fc = coalescer.run(key.clone(), make());
         assert_eq!(makes.load(Ordering::SeqCst), 2);
         assert_eq!(coalescer.waiters(&key), 1);
+    }
+
+    #[test]
+    fn coalescer_survivor_still_receives_the_value_after_another_waiter_is_dropped() {
+        let clock = Arc::new(FakeClock::new(0.0));
+        let spawner = LocalSpawner::new();
+        let coalescer: Coalescer<u8, u32> = Coalescer::new();
+        let makes = Arc::new(AtomicUsize::new(0));
+        let make = || {
+            let (c, m) = (clock.clone(), makes.clone());
+            move || -> BoxFuture<'static, u32> {
+                m.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    c.sleep(Duration::from_secs(1)).await;
+                    7
+                })
+            }
+        };
+
+        let (fa, fb) = (coalescer.run(1, make()), coalescer.run(1, make()));
+        let survivor = slot();
+        let o = survivor.clone();
+        let ta = spawner.spawn(Box::pin(async move {
+            fa.await;
+        }));
+        let _tb = spawner.spawn(Box::pin(async move { *o.lock().unwrap() = Some(fb.await) }));
+        spawner.run_until_stalled();
+        drop(ta);
+        spawner.run_until_stalled();
+        assert_eq!(coalescer.waiters(&1), 1);
+
+        clock.advance(Duration::from_secs(1));
+        spawner.run_until_stalled();
+        assert_eq!(take(&survivor), Some(7));
+        assert_eq!(makes.load(Ordering::SeqCst), 1);
     }
 
     #[test]
