@@ -40,19 +40,33 @@ pub const PANEL_WINDOW_LEVEL: isize = 25;
 /// 交出的 **NSView**（GPUI 自己的 `GPUIView`）指標，不是 NSWindow。
 /// 面板的 NSWindow 由 `-[NSView window]` 取得。
 ///
-/// 使用約定：指標必須來自一個仍存活的 GPUI 視窗（在 GPUI 的視窗回呼內取得並立刻使用最安全），
-/// 而且只在主執行緒使用。空指標會被拒絕（印警告、不做事）。
+/// 只能用 `unsafe` 的 [`NativeWindow::from_ns_view`] 建立（欄位是私有的），所以接收它的
+/// [`configure_panel`]、[`set_ignores_mouse_events`]、[`describe_panel`] 可以是安全函式：
+/// 指標的有效性由建立把手的那一處 `unsafe` 負責。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NativeWindow(pub *mut c_void);
+pub struct NativeWindow(*mut c_void);
 
 impl NativeWindow {
+    /// 由 GPUI 交出的 NSView 指標（`AppKitWindowHandle::ns_view`）建立把手。
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` 必須是 GPUI 視窗的 NSView（`GPUIView`），而且在這個把手（與它的所有複本）被使用的整段期間，
+    ///   該視窗都保持開啟、view 保持存活；視窗關閉後不得再把把手傳給本模組的任何函式。
+    /// - 把手只能在主執行緒使用（本模組的函式在其他執行緒會拒絕，但指標本身也不得跨執行緒解參照）。
+    ///
+    /// 空指標是允許的：各函式會拒絕它（印警告、不做事）。
+    pub unsafe fn from_ns_view(ptr: *mut c_void) -> Self {
+        Self(ptr)
+    }
+
     /// 取得 NSView 所在的 NSWindow。空指標或 view 還沒放進視窗時回 `None`。
     fn ns_window(self, _mtm: MainThreadMarker) -> Option<Retained<NSWindow>> {
         if self.0.is_null() {
             return None;
         }
-        // SAFETY: 依 `NativeWindow` 的使用約定，指標是 GPUI 交出的、仍存活的 NSView，
-        // 且我們在主執行緒（持有 MainThreadMarker）。只借用、不轉移所有權。
+        // SAFETY: 把手只能經 `unsafe fn from_ns_view` 建立，其呼叫端保證指標是仍存活的 GPUI NSView；
+        // 我們在主執行緒（持有 MainThreadMarker）。只借用、不轉移所有權。
         let view: &NSView = unsafe { &*self.0.cast::<NSView>() };
         view.window()
     }
@@ -109,8 +123,10 @@ pub fn patch_gpui_panel_class() {
         );
         return;
     };
-    // SAFETY: `answer_no` 的簽章與 `- (BOOL)canBecome…Window` 相符（self、_cmd，回傳 BOOL），
-    // 型別編碼 "B@:" 與之一致（arm64／x86_64 上 objc2 的 `Bool` 即 Objective-C 的 BOOL）。
+    // SAFETY: `answer_no` 的簽章與 `- (BOOL)canBecome…Window` 相符（self、_cmd，回傳 BOOL；
+    // objc2 的 `Bool` 在每個架構上都與 Objective-C 的 BOOL 同 ABI：arm64 為 bool，x86_64 為 signed char）。
+    // 型別編碼 "B@:" 只在 arm64 上與 BOOL 的實際編碼相同（x86_64 是 "c@:"），但兩個方法在 GPUIPanel 上都已存在，
+    // class_replaceMethod 替換既有方法時會忽略這個參數、沿用原本的編碼，所以不影響正確性。
     // class_replaceMethod 是執行緒安全的 runtime 呼叫；類別由 GPUI 擁有且終身存在。
     unsafe {
         let imp: Imp = std::mem::transmute::<extern "C-unwind" fn(*mut AnyObject, Sel) -> Bool, Imp>(
@@ -281,7 +297,8 @@ mod tests {
             eprintln!("test runs on the main thread; skipping");
             return;
         }
-        let bogus = NativeWindow(std::ptr::null_mut());
+        // SAFETY: 空指標由各函式拒絕，不會被解參照。
+        let bogus = unsafe { NativeWindow::from_ns_view(std::ptr::null_mut()) };
         set_accessory_activation_policy();
         configure_panel(bogus, Rect::default());
         set_ignores_mouse_events(bogus, true);

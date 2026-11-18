@@ -41,7 +41,7 @@ mod smoke {
     struct Smoke {
         geometry: NotchGeometry,
         container: Rect,
-        handle: NativeWindow,
+        handle: Option<NativeWindow>,
         ignoring_mouse: Option<bool>,
         t0: Instant,
     }
@@ -63,7 +63,10 @@ mod smoke {
             // 游標貼在螢幕最上緣時 y == top；Rect::contains 含上緣，所以不必特別處理。
             let ignore = !self.preview_global().contains(p);
             if self.ignoring_mouse != Some(ignore) {
-                panel::set_ignores_mouse_events(self.handle, ignore);
+                let Some(handle) = self.handle else {
+                    return;
+                };
+                panel::set_ignores_mouse_events(handle, ignore);
                 self.ignoring_mouse = Some(ignore);
                 println!(
                     "[+{:>5}ms] mouse=({:.1}, {:.1}) click-through={}",
@@ -174,11 +177,26 @@ mod smoke {
 
             let opened = cx.open_window(options, move |window, cx| {
                 let handle = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
-                    Ok(RawWindowHandle::AppKit(h)) => NativeWindow(h.ns_view.as_ptr()),
-                    other => panic!("expected an AppKit window handle, got {other:?}"),
+                    // SAFETY: `ns_view` 是 GPUI 剛建立、此刻正在回呼中的視窗的 NSView，所以現在是存活的。
+                    // 把手只存在 `Smoke` 裡，而 `Smoke` 是這個視窗的根 view：視窗關閉時它跟著被釋放，
+                    // 輪詢工作的 `this.update` 隨即失敗並結束，之後不會再使用把手。範例從不主動關視窗，
+                    // 視窗一直開到 `cx.quit()` 結束行程。所有使用都在 GPUI 的主執行緒上。
+                    Ok(RawWindowHandle::AppKit(h)) => {
+                        Some(unsafe { NativeWindow::from_ns_view(h.ns_view.as_ptr()) })
+                    }
+                    other => {
+                        println!(
+                            "{} expected an AppKit window handle, got {other:?}; quitting",
+                            stamp(t0)
+                        );
+                        cx.quit();
+                        None
+                    }
                 };
-                panel::configure_panel(handle, container);
-                println!("{} panel: {}", stamp(t0), panel::describe_panel(handle));
+                if let Some(handle) = handle {
+                    panel::configure_panel(handle, container);
+                    println!("{} panel: {}", stamp(t0), panel::describe_panel(handle));
+                }
                 println!(
                     "{} foreground_is_fullscreen={} (pending hardware check)",
                     stamp(t0),
@@ -196,11 +214,13 @@ mod smoke {
                     cx.spawn(async move |this, cx| {
                         cx.background_executor().timer(Duration::from_secs(1)).await;
                         let _ = this.update(cx, |s, _| {
-                            println!(
-                                "{} panel@1s: {}",
-                                stamp(t0),
-                                panel::describe_panel(s.handle)
-                            )
+                            if let Some(handle) = s.handle {
+                                println!(
+                                    "{} panel@1s: {}",
+                                    stamp(t0),
+                                    panel::describe_panel(handle)
+                                )
+                            }
                         });
                     })
                     .detach();

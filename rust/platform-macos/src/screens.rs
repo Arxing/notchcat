@@ -48,6 +48,13 @@ pub fn screen_id(display_id: u32) -> String {
     display_id.to_string()
 }
 
+/// 由 `deviceDescription["NSScreenNumber"]` 讀到的值決定螢幕 id：沒有這個鍵、不是數字（`None`），
+/// 或是 0（`kCGNullDirectDisplay`，不是有效的顯示器）時回 `None`，呼叫端略過該螢幕，
+/// 以免多個螢幕共用同一個 id、或拿無效的 id 去查 CoreGraphics。
+pub fn screen_id_from(display_id: Option<u32>) -> Option<String> {
+    display_id.filter(|&id| id != 0).map(screen_id)
+}
+
 /// AppKit 全域點 → MusiCat 全域點（見模組文件）。`primary_height` 是主螢幕高度（點）。
 pub fn appkit_point_to_global(p: Point, primary_height: f64) -> Point {
     Point {
@@ -128,13 +135,17 @@ pub fn list_screens() -> Vec<ScreenInfo> {
 
     NSScreen::screens(mtm)
         .iter()
-        .map(|screen| {
-            let display_id = screen
+        .filter_map(|screen| {
+            let number = screen
                 .deviceDescription()
                 .objectForKey(ns_string!("NSScreenNumber"))
                 .and_then(|n| n.downcast::<NSNumber>().ok())
-                .map(|n| n.unsignedIntValue())
-                .unwrap_or(0);
+                .map(|n| n.unsignedIntValue());
+            if screen_id_from(number).is_none() {
+                eprintln!("musicat: skipping a screen without a valid display id");
+                return None;
+            }
+            let display_id = number?;
             let f = screen.frame();
             let left = screen.auxiliaryTopLeftArea();
             let right = screen.auxiliaryTopRightArea();
@@ -158,7 +169,7 @@ pub fn list_screens() -> Vec<ScreenInfo> {
                 is_primary: display_id == main_id,
                 is_builtin: CGDisplay::new(display_id).is_builtin(),
             };
-            screen_info_from(&raw, primary_height)
+            Some(screen_info_from(&raw, primary_height))
         })
         .collect()
 }
@@ -329,6 +340,18 @@ mod tests {
             }
         );
         assert_eq!(appkit_rect_to_global(appkit, H), panel);
+    }
+
+    #[test]
+    fn screen_without_a_valid_display_id_is_skipped() {
+        // deviceDescription 沒有 NSScreenNumber（或不是數字）→ None；0 是 kCGNullDirectDisplay，也不算。
+        assert_eq!(screen_id_from(None), None);
+        assert_eq!(screen_id_from(Some(0)), None);
+        assert_eq!(screen_id_from(Some(1)), Some("1".to_string()));
+        assert_eq!(
+            screen_id_from(Some(69_734_662)),
+            Some("69734662".to_string())
+        );
     }
 
     #[test]
