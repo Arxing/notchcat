@@ -363,6 +363,9 @@ dependencies = [
 [[package]]
 name = "musicat-platform-macos"
 version = "0.1.0"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "musicat-platform-windows"

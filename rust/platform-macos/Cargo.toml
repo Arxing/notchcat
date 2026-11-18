@@ -4,4 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
+build = "build.rs"
 
+# build.rs 只在目標為 macOS 時才動用 C 編譯器；其他目標它什麼也不做，
+# crate 編成只有兩個字串常數的空 crate。
+[build-dependencies]
+cc = "1"

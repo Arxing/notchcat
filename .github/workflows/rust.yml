@@ -31,12 +31,22 @@ jobs:
       - name: Core purity check
         run: sh scripts/check-core-purity.sh
 
+      # 私有 API（MediaRemote、dlopen/dlsym）只准出現在 platform-macos 的 helper/ 與 mediaremote_control.rs。
+      - name: Private API fence
+        if: runner.os == 'macOS'
+        run: sh scripts/check-private-api.sh
+
       - name: Test musicat-core
         run: cargo test -p musicat-core --features testing
 
       # Windows 只要求編譯通過（未在實機驗證）。
       - name: Build musicat-platform-windows
         run: cargo build -p musicat-platform-windows
+
+      # platform-macos 在非 macOS 目標編成空 crate（build.rs 不呼叫 C 編譯器）。
+      - name: Check musicat-platform-macos (empty crate on Windows)
+        if: runner.os == 'Windows'
+        run: cargo check -p musicat-platform-macos
 
       # 以下僅 macOS：需要 GPUI / AppKit 的工作區其他部分。
       # 有螢幕才能跑的測試以 #[ignore] 標記，不進 CI。
