@@ -190,7 +190,7 @@ GPUI 相對 Tauri 的主要代價是它**還沒有 1.0**（spike 時用 crates.i
 
 **備案**（只在 GPUI 在某個平台做不到時使用，並回報作者）：Tauri v2（macOS 需要社群的 `tauri-nspanel` 外掛，或約一百行的 `objc2` 自寫），或該平台的原生視窗。因為 `core`、平台層與外殼是分開的，換外殼不影響前兩者。
 
-spike 的程式碼在 `spikes/gpui-notch/` 與 `spikes/tauri-notch/`（拋棄式、尚未 commit，只是參考，不是產品程式碼；證據日誌與截圖在 `spikes/gpui-notch/evidence/`）。重要的發現已寫在第 7.3 節。
+GPUI spike 的程式碼在 `spikes/gpui-notch/`（拋棄式，只是參考，不是產品程式碼；證據日誌與截圖在 `spikes/gpui-notch/evidence/`）。Tauri spike 已刪除，它的實測數字保留在上面的表格裡。重要的發現已寫在第 7.3 節。
 
 ### 7.3 GPUI 在 macOS 上需要的繞路（spike 發現）
 
