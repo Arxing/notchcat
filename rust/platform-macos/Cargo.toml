@@ -13,6 +13,10 @@ serde_json = { version = "1", default-features = false, features = ["std"] }
 # artworkData 的 base64 解碼。純 Rust、MIT OR Apache-2.0；關掉預設的 simd-unsafe 以免引入 unsafe 加速路徑。
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 
+[dev-dependencies]
+# 測試替身（FakeClock、LocalSpawner）。
+musicat-core = { path = "../core", features = ["testing"] }
+
 # build.rs 只在目標為 macOS 時才動用 C 編譯器；其他目標它什麼也不做，
 # crate 編成只有兩個字串常數的空 crate。
 [build-dependencies]
