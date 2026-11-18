@@ -10,6 +10,9 @@
 //! 2. [`patch_gpui_panel_class`]：把 GPUI 私有類別 `GPUIPanel` 的 `canBecomeKeyWindow`／
 //!    `canBecomeMainWindow` 換成回傳 NO。最脆弱的一項。
 //! 3. [`set_accessory_activation_policy`]：把 GPUI 啟動時設成 Regular 的啟動模式改為 Accessory（不顯示 Dock 圖示）。
+//!
+//! 另外 [`set_ignores_mouse_events`]、[`set_panel_frame`]、[`set_panel_visible`] 補上 GPUI 0.2.2 `Window`
+//! 沒有的點擊穿透、移動外框、隱藏／再顯示（各函式文件寫明為什麼需要）。
 //! 4. （不在本檔）GPUI 的 Cargo feature `runtime_shaders`：見 `rust/shell/Cargo.toml` 與 `rust/README.md`。
 //!
 //! 座標：所有 [`Rect`]／[`Point`] 都是 MusiCat 全域座標（主螢幕左上原點、y 向下），
@@ -186,6 +189,55 @@ pub fn configure_panel(window: NativeWindow, frame: Rect) {
     win.orderFrontRegardless();
 }
 
+/// 只移動／改變面板的外框到 `frame`（MusiCat 全域座標），不改其他屬性、不改變顯示與否。
+///
+/// 為什麼需要（對應 GPUI 0.2.2）：GPUI 的 `Window` 沒有「設定外框」的 API（只有建立時的 `WindowBounds`，
+/// 而且是以顯示器為準的座標），面板在換螢幕時要移到新螢幕頂端。[`configure_panel`] 也會設外框，
+/// 但它最後 `orderFrontRegardless` 會把被 [`set_panel_visible`] 隱藏的面板又顯示出來，所以另外提供這個只設外框的版本。
+/// 外殼的外框終身不變，只在換螢幕時呼叫。
+pub fn set_panel_frame(window: NativeWindow, frame: Rect) {
+    let Some(mtm) = main_thread("set_panel_frame()") else {
+        return;
+    };
+    let Some(win) = window.ns_window(mtm) else {
+        eprintln!("musicat: set_panel_frame(): no NSWindow behind the given view; ignored");
+        return;
+    };
+    let f = global_rect_to_appkit(frame, primary_screen_height());
+    win.setFrame_display(
+        NSRect::new(NSPoint::new(f.x, f.y), NSSize::new(f.w, f.h)),
+        true,
+    );
+}
+
+/// 顯示（`orderFrontRegardless`，不啟動 App、不搶焦點）或隱藏（`orderOut:`）面板。
+///
+/// 為什麼需要（對應 GPUI 0.2.2）：GPUI 的 `Window` 沒有隱藏／再顯示視窗的 API（只有關閉）；
+/// 外殼在全螢幕前景或使用者關閉面板時要藏起來、之後原樣再顯示，視窗與 GPUI 的 view 都保留。
+/// 隱藏中 GPUI 照常存活（輪詢與狀態不受影響），只是視窗不在畫面上。
+pub fn set_panel_visible(window: NativeWindow, visible: bool) {
+    let Some(mtm) = main_thread("set_panel_visible()") else {
+        return;
+    };
+    let Some(win) = window.ns_window(mtm) else {
+        eprintln!("musicat: set_panel_visible(): no NSWindow behind the given view; ignored");
+        return;
+    };
+    if visible {
+        win.orderFrontRegardless();
+    } else {
+        win.orderOut(None);
+    }
+}
+
+/// 面板目前是否在畫面上（`isVisible`）。給診斷與測試用；視窗不存在時回 `false`。
+pub fn panel_is_visible(window: NativeWindow) -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    window.ns_window(mtm).is_some_and(|w| w.isVisible())
+}
+
 /// 讓面板整個忽略（`true`）或接收（`false`）滑鼠事件，用來做點擊穿透：
 /// 游標不在畫出來的外形上時打開，點擊就落到下層視窗。
 ///
@@ -235,7 +287,7 @@ pub fn describe_panel(window: NativeWindow) -> String {
     let class_name = win.class().name().to_string_lossy().into_owned();
     format!(
         "class={} windowNumber={} level={} appkitFrame=({}, {}, {}x{}) styleMask={:?} opaque={} \
-         shadow={} key={} main={} canBecomeKey={} canBecomeMain={} ignoresMouse={} behavior={:?}",
+         shadow={} key={} main={} canBecomeKey={} canBecomeMain={} ignoresMouse={} visible={} behavior={:?}",
         class_name,
         win.windowNumber(),
         win.level(),
@@ -251,6 +303,7 @@ pub fn describe_panel(window: NativeWindow) -> String {
         win.canBecomeKeyWindow(),
         win.canBecomeMainWindow(),
         win.ignoresMouseEvents(),
+        win.isVisible(),
         win.collectionBehavior(),
     )
 }
@@ -302,6 +355,10 @@ mod tests {
         set_accessory_activation_policy();
         configure_panel(bogus, Rect::default());
         set_ignores_mouse_events(bogus, true);
+        set_panel_frame(bogus, Rect::default());
+        set_panel_visible(bogus, false);
+        set_panel_visible(bogus, true);
+        assert!(!panel_is_visible(bogus));
         assert!(describe_panel(bogus).contains("not on the main thread"));
         assert!(!foreground_is_fullscreen());
     }
