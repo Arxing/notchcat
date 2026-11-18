@@ -35,6 +35,11 @@ use musicat_core::types::TrackSnapshot;
 use crate::helper_wire::{parse_line, HelperMessage, SOURCE_ID};
 
 /// 一個執行中的 helper 行程。
+///
+/// - `terminate()` 可以在行程已經結束之後呼叫，也可以呼叫多次；之後的呼叫都是無害的 no-op。
+/// - 收到 [`HelperEvent::Exited`] 之後，handle 可以不呼叫 `terminate()` 就直接 drop；
+///   實作的 `Drop` 必須回收（reap）行程、釋放它持有的資源（例如 stdin pipe），不得留下殭屍行程。
+/// - handle 可能在 sink 所在的執行緒（例如讀取執行緒）上被 drop，所以 `Drop` 不得 join 該執行緒。
 pub trait HelperHandle: Send {
     fn terminate(&mut self);
 }

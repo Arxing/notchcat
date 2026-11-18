@@ -4,6 +4,7 @@
 //! `build.rs` 只在目標為 macOS 時才編譯 `helper/helper.c`。
 
 pub mod helper_wire;
+pub mod perl_launcher;
 pub mod supervisor;
 
 /// 建置後放在 `target/<profile>/`（與可執行檔同目錄）的動態庫檔名；
