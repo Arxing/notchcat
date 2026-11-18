@@ -6,6 +6,7 @@ pub mod artwork_cache;
 pub mod estimator;
 pub mod http;
 pub mod lyrics;
+pub mod music;
 pub mod nowplaying;
 pub mod runtime;
 pub mod timing;
