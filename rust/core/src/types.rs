@@ -20,9 +20,10 @@ pub struct PositionAnchor {
 }
 
 impl PositionAnchor {
-    /// `max(0, elapsed + max(0, now - timestamp) * rate)`，給定 `cap` 時不超過它。
-    /// `now` 早於 `timestamp` 時不會倒退到 `elapsed` 以下。非有限的輸入不會 panic：
+    /// `max(0, elapsed + max(0, now - timestamp) * rate)`，給定 `cap` 時不超過它；結果永不小於 0
+    /// （負的 `cap` 視為 0）。`now` 早於 `timestamp` 時不會倒退到 `elapsed` 以下。非有限的輸入不會 panic：
     /// NaN 的時間差視為 0（即回傳 `elapsed` 夾到 0），NaN 的 `cap` 視為沒有上限。
+    /// 無上限、速率不為 0、且 `now` 為無限大時結果為無限大（可接受：呼叫端要上限就傳 `cap`）。
     pub fn position_at(&self, now: f64, cap: Option<f64>) -> f64 {
         // `f64::max` 遇到 NaN 會回傳另一個運算元，所以 NaN 的時間差在此變成 0。
         let dt = (now - self.timestamp).max(0.0);
@@ -34,7 +35,8 @@ impl PositionAnchor {
         };
         let advanced = (self.elapsed + advance).max(0.0);
         match cap {
-            Some(cap) => advanced.min(cap),
+            // 先取小再夾到 0：負的 `cap` 得 0；NaN 的 `cap` 讓 `min` 回傳 `advanced`（視為沒有上限）。
+            Some(cap) => advanced.min(cap).max(0.0),
             None => advanced,
         }
     }
@@ -110,6 +112,16 @@ mod tests {
     #[test]
     fn negative_elapsed_clamps_to_zero() {
         close(anchor(-5.0, 1.0).position_at(T, None), 0.0);
+    }
+
+    #[test]
+    fn negative_cap_never_yields_a_negative_position() {
+        close(anchor(10.0, 1.0).position_at(T + 5.0, Some(-3.0)), 0.0);
+        close(anchor(10.0, 1.0).position_at(T + 5.0, Some(-0.0)), 0.0);
+        assert!(anchor(10.0, 1.0).position_at(T + 5.0, Some(f64::NEG_INFINITY)) >= 0.0);
+        // 非負的 cap 照舊。
+        close(anchor(10.0, 1.0).position_at(T + 5.0, Some(0.0)), 0.0);
+        close(anchor(10.0, 1.0).position_at(T + 5.0, Some(12.0)), 12.0);
     }
 
     #[test]

@@ -134,6 +134,27 @@ mod tests {
     }
 
     #[test]
+    fn default_capacity_is_sixteen() {
+        assert_eq!(DEFAULT_CAPACITY, 16);
+        assert_eq!(ArtworkCache::default().capacity, 16);
+    }
+
+    #[test]
+    fn zero_capacity_still_keeps_one_entry() {
+        let mut cache = ArtworkCache::new(0);
+        cache.resolve(art("a", Some(bytes_a())));
+        assert_eq!(data_of(cache.resolve(art("a", None))), Some(bytes_a()));
+
+        cache.resolve(art("b", Some(bytes_b())));
+        assert_eq!(
+            data_of(cache.resolve(art("a", None))),
+            None,
+            "oldest evicted"
+        );
+        assert_eq!(data_of(cache.resolve(art("b", None))), Some(bytes_b()));
+    }
+
+    #[test]
     fn nil_ref_passes_through() {
         assert_eq!(ArtworkCache::default().resolve(None), None);
     }

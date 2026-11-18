@@ -62,11 +62,14 @@ impl Lyrics {
             return None;
         };
         let first = lines.first()?;
-        if position.is_nan() || position < first.time {
+        // 與 Swift 的 `position >= first.time` 守門同義：寫成否定形式，讓 `position` 或第一行時間為 NaN
+        // （比較皆為 false）時一律回 `None`；通過之後 `first.time <= position` 成立，下面的結果 >= 1。
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(position >= first.time) {
             return None;
         }
         // 上界：第一個嚴格晚於 `position` 的行；它前一行就是目前行。
-        // 時間以 `<= position` 為前綴述詞；`first.time <= position` 保證結果 >= 1。
+        // 時間以 `<= position` 為前綴述詞。
         Some(lines.partition_point(|l| l.time <= position) - 1)
     }
 }
@@ -84,6 +87,9 @@ const MAX_SYNCED_TEXT_BYTES: usize = 32 * 1024 * 1024;
 /// 社群歌詞庫品質參差，所以刻意寬鬆：排序所見、丟掉空行，而且沒有真的帶時間戳
 /// 就不稱為同步。以位元組手動掃描而非正規表示式，讓惡意輸入（超大數字、百萬字元
 /// 單行、成千上萬個標籤）只花線性時間且不會 panic。
+///
+/// 輸入大小的上限由呼叫端負責：本函式依賴提供者的 4 MiB 回應本體上限（`provider::MAX_BODY_BYTES`），
+/// 自己不限制輸入長度，只以 [`MAX_SYNCED_TEXT_BYTES`] 限制輸出的文字總量。
 ///
 /// 空輸入、以及唯一的時間戳都落在沒有歌詞文字的行上時回傳 `None`。完全沒有合法
 /// 時間標籤的文字（包含 `[ar:…]` 這類只有中繼資料的標籤）回傳 `Lyrics::Plain`。
@@ -743,9 +749,43 @@ mod tests {
         assert_eq!(texts(&synced("\u{FEFF}\u{FEFF}[00:01.00]hi")), ["hi"]);
     }
 
+    /// 第一行的時間是 NaN（手工建構才可能，解析器不會產生）：與 Swift 的 `position >= first.time`
+    /// 守門相同，沒有任何位置「到得了」第一行，所以是 `None`，而且不得在 `partition_point - 1` 下溢位。
+    #[test]
+    fn line_index_with_a_nan_first_line_is_nil_and_does_not_underflow() {
+        let lyrics = Lyrics::Synced(vec![line(f64::NAN, "a"), line(1.0, "b")]);
+        assert_eq!(lyrics.line_index(5.0), None);
+        assert_eq!(lyrics.line_index(f64::INFINITY), None);
+        assert_eq!(lyrics.line_index(f64::NAN), None);
+    }
+
     #[test]
     fn line_index_on_empty_synced_lyrics_is_nil() {
         assert_eq!(Lyrics::Synced(vec![]).line_index(5.0), None);
+    }
+
+    /// 預算的邊界：輸出文字總量剛好低於 32 MiB 的合法（雖然罕見）輸入仍要被接受，
+    /// 多一點點才被拒絕。4096 個標籤 × 每行文字位元組數，輸入本身只有約 40 KB，輸出約 32 MiB
+    /// （測試中只配置這一份，不慢）。
+    #[test]
+    fn input_just_under_the_output_budget_is_still_accepted() {
+        const TAGS: usize = 4_096;
+        let per_line = MAX_SYNCED_TEXT_BYTES / TAGS - 1; // 8191：TAGS 行共 33_550_336 < 預算
+        assert!(TAGS * per_line < MAX_SYNCED_TEXT_BYTES);
+        let raw = format!("{}{}", "[00:01.00]".repeat(TAGS), "a".repeat(per_line));
+
+        let lines = synced(&raw);
+
+        assert_eq!(lines.len(), TAGS);
+        assert!(lines.iter().all(|l| l.text.len() == per_line));
+    }
+
+    #[test]
+    fn input_just_over_the_output_budget_is_rejected() {
+        const TAGS: usize = 4_096;
+        let per_line = MAX_SYNCED_TEXT_BYTES / TAGS + 1; // 超出預算 TAGS 位元組
+        let raw = format!("{}{}", "[00:01.00]".repeat(TAGS), "a".repeat(per_line));
+        assert_eq!(parse_lrc(&raw), None);
     }
 
     #[test]
