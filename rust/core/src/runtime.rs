@@ -98,6 +98,15 @@ pub struct Subscription {
     unsubscribe: Option<Box<dyn FnOnce() + Send>>,
 }
 
+impl Subscription {
+    /// 以「取消訂閱時要做的事」建立把手，給自行管理訂閱者清單的元件使用（見 `nowplaying::monitor`）。
+    pub fn new(on_unsubscribe: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            unsubscribe: Some(Box::new(on_unsubscribe)),
+        }
+    }
+}
+
 impl Drop for Subscription {
     fn drop(&mut self) {
         if let Some(f) = self.unsubscribe.take() {
