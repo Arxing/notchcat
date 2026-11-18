@@ -94,7 +94,7 @@ LICENSE-MIT  LICENSE-APACHE  README.md  CONTRIBUTING.md
   | NowPlayingMonitorTests／WindowTitleParserTests | 12／7 | `nowplaying/monitor.rs`、`window_title.rs`（T8） |
   | MusicPresentationTests | 12 | `music/presentation.rs`（T9） |
   | MusicViewModelTests | 10 | `music/controller.rs`（T10） |
-  | ModuleManagerPreviewHeightTests／MusicModuleTests | 9／8 | `shell_logic/geometry.rs`、`music/module.rs`（T11、T19） |
+  | ModuleManagerPreviewHeightTests／MusicModuleTests | 9／8 | 前者拆在 `shell_logic/geometry.rs` 與 `music/module.rs`（T11、T19，`rust_location` 以逗號列出多處，腳本加總），後者 `music/module.rs`（T11） |
   | HelperMessageParserTests | 15 | `platform-macos/src/helper_wire.rs`（T14） |
   | MediaRemoteSourceTests | 26 | `platform-macos/src/supervisor.rs`（T15） |
   | MediaRemoteControlTests | 4 | `platform-macos/src/mediaremote_control.rs`（T17） |
@@ -381,7 +381,7 @@ LICENSE-MIT  LICENSE-APACHE  README.md  CONTRIBUTING.md
   ```
 - `ModuleState` 只含狀態；圖示、Preview／Expanded 的 GPUI 內容在 `shell`（Task 24），避免 `core` 依賴 GPUI。
 
-- [ ] **Step 1: 移植測試（失敗）。** 多個 active 時 priority 高者勝；額外高度只取 active 模組的、夾到 `0..=28`（`-5 → 0`、`99 → 28`、NaN → 0）；Music 在有曲目時 `is_active`、沒曲目時不是；歌詞條折疊（`strip_visible == false`）或沒有同步歌詞可顯示時額外高度為 0，否則 24。
+- [ ] **Step 1: 移植測試（失敗）。** 多個 active 時 priority 高者勝；額外高度只取 active 模組的、夾到 `0..=28`（`-5 → 0`、`99 → 28`、NaN → 0）；Music 的 `is_active` 等於「目前快照 `is_playing`」（沒曲目或暫停都不是，同 Swift `monitor.isPlayingPublisher`）；額外高度為 24 當且僅當 `is_playing && strip_visible`，否則 0（沒有同步歌詞時歌詞條改顯示曲名，高度不變）。
 - [ ] **Step 2–4:** Run → FAIL；實作；Run → PASS。更新 `parity.tsv`。Commit: `feat(core): module state and manager`。
 
 ## Task 12：R1 收尾（驗證、開源文件、移植對照）
