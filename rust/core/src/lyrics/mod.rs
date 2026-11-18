@@ -2,6 +2,12 @@
 //!
 //! 時間一律是秒（`f64`）。
 
+pub mod identity;
+pub mod normalizer;
+
+pub use identity::TrackIdentity;
+pub use normalizer::identity_from;
+
 /// 一行帶時間的歌詞。
 #[derive(Clone, PartialEq, Debug)]
 pub struct LyricLine {
