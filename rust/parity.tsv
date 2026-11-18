@@ -12,7 +12,7 @@ Tests/NotchCatKitTests/Music/NowPlayingMonitorTests.swift	core/src/nowplaying/mo
 Tests/NotchCatKitTests/Music/WindowTitleParserTests.swift	core/src/nowplaying/window_title.rs	7	r1	
 Tests/NotchCatKitTests/Music/MusicPresentationTests.swift	core/src/music/presentation.rs	12	r1	
 Tests/NotchCatKitTests/Music/MusicViewModelTests.swift	core/src/music/controller.rs	10	r1	
-Tests/NotchCatKitTests/ModuleManagerPreviewHeightTests.swift	core/src/shell_logic/geometry.rs,core/src/music/module.rs	9	r2	
+Tests/NotchCatKitTests/ModuleManagerPreviewHeightTests.swift	core/src/modules.rs,core/src/shell_logic/geometry.rs	9	r2	
 Tests/NotchCatKitTests/Music/MusicModuleTests.swift	core/src/music/module.rs	8	r1	
 Tests/NotchCatKitTests/Music/HelperMessageParserTests.swift	platform-macos/src/helper_wire.rs	15	r2	
 Tests/NotchCatKitTests/Music/MediaRemoteSourceTests.swift	platform-macos/src/supervisor.rs	26	r2	
