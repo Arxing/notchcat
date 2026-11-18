@@ -10,6 +10,7 @@ pub mod panel;
 pub mod perl_launcher;
 pub mod screens;
 pub mod supervisor;
+pub mod tray;
 pub mod window_title_source;
 
 /// 建置後放在 `target/<profile>/`（與可執行檔同目錄）的動態庫檔名；
