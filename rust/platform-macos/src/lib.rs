@@ -4,6 +4,7 @@
 //! `build.rs` 只在目標為 macOS 時才編譯 `helper/helper.c`。
 
 pub mod helper_wire;
+pub mod mediaremote_control;
 pub mod perl_launcher;
 pub mod supervisor;
 

@@ -13,6 +13,10 @@ serde_json = { version = "1", default-features = false, features = ["std"] }
 # artworkData 的 base64 解碼。純 Rust、MIT OR Apache-2.0；關掉預設的 simd-unsafe 以免引入 unsafe 加速路徑。
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 
+# 載入私有 MediaRemote 框架（只在 macOS 才相依；動態載入的 unsafe 由它封裝）。ISC 授權，無其他相依。
+[target.'cfg(target_os = "macos")'.dependencies]
+libloading = "0.8"
+
 [dev-dependencies]
 # 測試替身（FakeClock、LocalSpawner）。
 musicat-core = { path = "../core", features = ["testing"] }
