@@ -130,6 +130,12 @@ impl Inner {
     }
 
     async fn resolve(&self, track: TrackIdentity, key: String) -> Option<Lyrics> {
+        // 多執行緒競態：呼叫者查快取沒命中之後、本查詢第一次被輪詢之前，另一條執行緒的查詢可能
+        // 已經寫好快取並移除了它的表項（快取一律先寫、表項後移除），於是這裡成了第二輪查詢。
+        // 開頭重查一次快取即可擋下，不必再問一輪來源。
+        if let Some(hit) = self.cached(&key) {
+            return hit;
+        }
         let mut fallback: Option<Lyrics> = None;
         let mut found: Option<Lyrics> = None;
         let mut any_failed = false;
@@ -1316,6 +1322,54 @@ mod tests {
         let newcomer = FakeProvider::result("new", &h.clock, Some(plain("new words")));
         let repo = h.repo(vec![dynp(&newcomer), dynp(&b)]);
         assert_eq!(h.ask(&repo, track()), Some(synced()));
+    }
+
+    /// 多執行緒競態：呼叫者查快取沒命中、登記了查詢，但在查詢第一次被輪詢之前，另一條執行緒的查詢
+    /// 剛好寫好快取並移除了它的表項。被合併的查詢開頭必須重查快取，不得再問一輪來源。
+    /// 以手動排出該交錯：呼叫者的 future 已建立（快取當時沒命中）、尚未輪詢，快取才被填入。
+    #[test]
+    fn coalesced_run_rechecks_the_cache_before_walking_providers() {
+        use futures_util::FutureExt;
+
+        let h = Harness::new();
+        let provider = FakeProvider::result("p", &h.clock, Some(plain("from provider")));
+        let repo = h.repo(vec![dynp(&provider)]);
+
+        let caller = repo.lyrics(track());
+        assert_eq!(repo.in_flight_waiters(&track()), 1);
+        lock(&repo.inner.cache).insert(
+            track().cache_key(),
+            CacheEntry::Found {
+                lyrics: synced(),
+                until: None,
+            },
+        );
+
+        assert_eq!(
+            caller.now_or_never(),
+            Some(Some(synced())),
+            "the run must answer from the cache another run just wrote"
+        );
+        assert_eq!(provider.call_count(), 0, "no duplicate lookup");
+        assert_eq!(repo.in_flight_waiters(&track()), 0);
+    }
+
+    /// 建立後從未輪詢就 drop：不留下等待者，也不碰任何來源。
+    #[test]
+    fn dropping_an_unpolled_lookup_leaves_no_waiter_and_calls_no_provider() {
+        let h = Harness::new();
+        let provider = FakeProvider::result("p", &h.clock, Some(synced()));
+        let repo = h.repo(vec![dynp(&provider)]);
+
+        let caller = repo.lyrics(track());
+        assert_eq!(repo.in_flight_waiters(&track()), 1);
+        drop(caller);
+
+        assert_eq!(repo.in_flight_waiters(&track()), 0);
+        assert_eq!(provider.call_count(), 0);
+        // 沒有留下快取：之後的查詢照常問來源。
+        assert_eq!(h.ask(&repo, track()), Some(synced()));
+        assert_eq!(provider.call_count(), 1);
     }
 
     /// 快取鍵不含曲長：同一首歌回報不同長度（或沒有長度）時直接命中快取。
