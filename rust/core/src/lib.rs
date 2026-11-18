@@ -2,9 +2,16 @@
 //!
 //! 非同步模型見 `docs/adr-0001-async-model.md`：一般 `Future` 加注入的 `Clock`／`Spawner`／`HttpClient`。
 
+pub mod artwork_cache;
+pub mod estimator;
 pub mod http;
 pub mod runtime;
 pub mod timing;
+pub mod types;
+
+pub use artwork_cache::ArtworkCache;
+pub use estimator::PlaybackEstimator;
+pub use types::{ArtworkRef, PositionAnchor, TrackSnapshot};
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
