@@ -1,0 +1,53 @@
+name: rust
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: rustup show
+
+      - name: cargo fmt --check
+        run: cargo fmt --check
+
+      - name: Core purity check
+        run: sh scripts/check-core-purity.sh
+
+      - name: Test musicat-core
+        run: cargo test -p musicat-core --features testing
+
+      # Windows 只要求編譯通過（未在實機驗證）。
+      - name: Build musicat-platform-windows
+        run: cargo build -p musicat-platform-windows
+
+      # 以下僅 macOS：需要 GPUI / AppKit 的工作區其他部分。
+      # 有螢幕才能跑的測試以 #[ignore] 標記，不進 CI。
+      - name: Clippy
+        if: runner.os == 'macOS'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build workspace
+        if: runner.os == 'macOS'
+        run: cargo build --workspace
+
+      - name: Test workspace
+        if: runner.os == 'macOS'
+        run: cargo test --workspace

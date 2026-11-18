@@ -1,0 +1,12 @@
+[package]
+name = "musicat-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# 公開 `testing` 模組（FakeClock、FakeHttp、LocalSpawner）給其他 crate 的測試使用。Task 2 加入該模組。
+testing = []
+
+[dependencies]

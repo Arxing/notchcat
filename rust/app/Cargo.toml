@@ -1,0 +1,10 @@
+[package]
+name = "musicat-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "musicat"
+path = "src/main.rs"

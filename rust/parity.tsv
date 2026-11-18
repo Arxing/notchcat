@@ -1,0 +1,23 @@
+# swift_file	rust_location	swift_case_count	phase	waiver_reason
+# 以 tab 分隔；rust_location 相對於 rust/，可為檔案或目錄，多處以逗號列出（腳本加總 #[test] 數）。
+Tests/NotchCatKitTests/Music/PositionAnchorTests.swift	core/src/types.rs	7	r1	
+Tests/NotchCatKitTests/Music/PlaybackEstimatorTests.swift	core/src/estimator.rs	7	r1	
+Tests/NotchCatKitTests/Music/ArtworkCacheTests.swift	core/src/artwork_cache.rs	6	r1	
+Tests/NotchCatKitTests/Music/LyricsTests.swift	core/src/lyrics/mod.rs	41	r1	
+Tests/NotchCatKitTests/Music/TrackIdentityTests.swift	core/src/lyrics/identity.rs	10	r1	
+Tests/NotchCatKitTests/Music/TrackNormalizerTests.swift	core/src/lyrics/normalizer.rs	15	r1	
+Tests/NotchCatKitTests/Music/ProviderTests.swift	core/src/lyrics/lrclib.rs,core/src/lyrics/netease.rs,core/src/lyrics/provider.rs	48	r1	
+Tests/NotchCatKitTests/Music/LyricsRepositoryTests.swift	core/src/lyrics/repository.rs	30	r1	
+Tests/NotchCatKitTests/Music/NowPlayingMonitorTests.swift	core/src/nowplaying/monitor.rs	12	r1	
+Tests/NotchCatKitTests/Music/WindowTitleParserTests.swift	core/src/nowplaying/window_title.rs	7	r1	
+Tests/NotchCatKitTests/Music/MusicPresentationTests.swift	core/src/music/presentation.rs	12	r1	
+Tests/NotchCatKitTests/Music/MusicViewModelTests.swift	core/src/music/controller.rs	10	r1	
+Tests/NotchCatKitTests/ModuleManagerPreviewHeightTests.swift	core/src/shell_logic/geometry.rs,core/src/music/module.rs	9	r2	
+Tests/NotchCatKitTests/Music/MusicModuleTests.swift	core/src/music/module.rs	8	r1	
+Tests/NotchCatKitTests/Music/HelperMessageParserTests.swift	platform-macos/src/helper_wire.rs	15	r2	
+Tests/NotchCatKitTests/Music/MediaRemoteSourceTests.swift	platform-macos/src/supervisor.rs	26	r2	
+Tests/NotchCatKitTests/Music/MediaRemoteControlTests.swift	platform-macos/src/mediaremote_control.rs	4	r2	
+Tests/NotchCatKitTests/Music/WindowTitleSourceTests.swift	platform-macos/src/window_title_source.rs	11	r2	
+Tests/NotchCatKitTests/Music/MarqueeTextTests.swift	shell/src/marquee.rs	4	r2	
+Tests/NotchCatKitTests/Music/LyricStripPreferenceTests.swift	app/src/config.rs	2	r2	
+Tests/NotchCatKitTests/PackageSmokeTests.swift	-	1	r1	Swift 套件結構測試
