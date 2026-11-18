@@ -83,3 +83,36 @@ System Events 沒有輔助使用權限，無法以 UI scripting 點擊，以下�
 - [ ] **沒有 Dock 圖示、不搶焦點。** 範例執行中 Dock 與 Cmd-Tab 都沒有 `tray_smoke`；打開選單、點項目後，左上角的前景 App 名稱不變
   （`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true'`）。
 - [ ] **圖示與面板不重疊。** 若「♪」剛好落在瀏海旁的 Preview 長條範圍內（兩者都在 25 層），記錄誰蓋住誰。
+
+## Task 23 外殼視窗、固定容器與動畫
+
+對應 `rust/shell/src/window.rs`（`ShellWindow`）與 core 的 `shell_logic::{animation, driver}`。用示範程式（佔位內容，真的 hover／動畫機制）：
+
+```sh
+cd rust
+cargo run -p musicat-shell --example shell_demo            # 60 秒後自動結束（MUSICAT_DEMO_SECS 可改）
+# MUSICAT_DEMO_EXTRA=24：Preview 加 24 點額外高度；MUSICAT_DEMO_BLINK=1：第 3 秒隱藏、第 4 秒再顯示
+# MUSICAT_SHELL_TRACE=1：每畫一格印 shell-frame（高度、圓角），以及待收合／轉移時的游標位置
+```
+
+stdout 每次轉移印一行 `expand`／`collapse`／`visible=..`（epoch 時間戳 + 啟動後毫秒）。
+
+Task 23 已自動驗證（2026-11-18，macOS 15.7 arm64，內建 1512 × 982 有瀏海 185 × 32）：
+以 `spikes/gpui-notch/tools/hover.swift` 的 13 步腳本驅動真實游標，每一步的期望都成立
+（不在 Preview 下方的容器內展開、進長條展開一次、抖動不收合、離開 150 ms 後收合、100 ms 內出去又回來不收合、
+快速進出 ×6 與跨長條下緣抖動都只展開一次、收合時停在長條下方不展開）；`anim.swift` 加 `MUSICAT_SHELL_TRACE` 量到展開 284 ms、
+收合 285 ms（約 120 fps）；CGWindowList 外框 `X=583 Y=0 345×180`、`layer=25`，`set_visible(false)` 後 `onscreen` 消失、再顯示後回來；
+閒置 CPU（release，15 秒）約 0.9%。以下需要人工：
+
+- [ ] **動畫手感。** hover 長條展開、移開收合：大小與下方圓角（10 → 24）一起平順變化約 0.28 秒，沒有跳格、閃爍或內容重新排版；
+  動畫中途反向（剛展開就離開）從當下的樣子接著縮回，不會跳。對照 Swift 版的感覺。
+- [ ] **游標靜止在長條邊緣不閃爍（真實觸控板）。** 用觸控板（不是腳本）把游標慢慢移到 Preview 長條下緣附近停住、手指輕放在觸控板上
+  → 不會開開關關；展開後在容器內小幅晃動不收合；離開後約 150 ms 才收合。
+- [ ] **收合時點擊穿透（透明區域）。** 開一個 Finder 視窗拖到面板正下方，讓它與固定容器（長條下方、同寬、約 180 點高的透明區域）重疊。
+  收合時點容器內、長條以外的透明處 → 點到 Finder（例如選取檔案）。也點一下長條本身旁邊的選單列項目（如果被容器蓋到）→ 照常作用。
+- [ ] **展開時接收點擊、不搶焦點。** 讓 TextEdit 在前景打字，hover 展開後點一下展開的黑色區域，再繼續打字 → 字仍輸入到 TextEdit、
+  前景 App 不變（Task 24 有按鈕後再驗一次按鈕可點）。
+- [ ] **全螢幕 App 之上的行為。** `foreground_is_fullscreen()` 仍固定回 `false`（見 Task 21 的同名待辦）；在 Safari 全螢幕空間裡
+  hover 面板位置，記錄面板是否出現、是否會展開。
+- [ ] **內容裁切。** GPUI 0.2.2 只能矩形裁切：佔位內容刻意不碰下方兩角。Task 24 的真實內容上線後，看下方圓角外是否露出內容。
+- [ ] **隱藏／再顯示。** `MUSICAT_DEMO_BLINK=1` 時第 3 秒面板消失（系統會有很短的淡出）、第 4 秒回來，位置大小不變。
