@@ -44,6 +44,15 @@ pub struct Rect {
     pub h: f64,
 }
 
+impl Rect {
+    /// 點是否落在矩形內。邊界規則：含左、上邊，不含右、下邊（半開區間
+    /// `x <= p.x < x + w`、`y <= p.y < y + h`），所以兩個相鄰矩形不會重疊，
+    /// 寬或高為 0 的矩形不包含任何點。任一座標或矩形欄位是 NaN 時回傳 false。
+    pub fn contains(&self, p: Point) -> bool {
+        p.x >= self.x && p.x < self.x + self.w && p.y >= self.y && p.y < self.y + self.h
+    }
+}
+
 /// 面板的兩種模式（Swift `NotchMode`）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ShellMode {
@@ -301,5 +310,51 @@ mod tests {
             assert_eq!(rect.x, 0.0);
             assert_eq!(rect.y, 0.0);
         }
+    }
+
+    #[test]
+    fn rect_contains_includes_left_top_and_excludes_right_bottom() {
+        let r = Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 100.0,
+            h: 30.0,
+        };
+        assert!(r.contains(Point { x: 10.0, y: 20.0 }));
+        assert!(r.contains(Point {
+            x: 109.999,
+            y: 49.999
+        }));
+        assert!(!r.contains(Point { x: 110.0, y: 30.0 }));
+        assert!(!r.contains(Point { x: 50.0, y: 50.0 }));
+        assert!(!r.contains(Point { x: 9.999, y: 30.0 }));
+        assert!(!r.contains(Point { x: 50.0, y: 19.999 }));
+    }
+
+    #[test]
+    fn rect_contains_is_false_for_empty_rects_and_nan() {
+        let empty = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 10.0,
+        };
+        assert!(!empty.contains(Point { x: 0.0, y: 5.0 }));
+        let r = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+        };
+        assert!(!r.contains(Point {
+            x: f64::NAN,
+            y: 5.0
+        }));
+        assert!(!r.contains(Point {
+            x: 5.0,
+            y: f64::NAN
+        }));
+        let nan_rect = Rect { x: f64::NAN, ..r };
+        assert!(!nan_rect.contains(Point { x: 5.0, y: 5.0 }));
     }
 }

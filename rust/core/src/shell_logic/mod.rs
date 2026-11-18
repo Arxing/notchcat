@@ -4,10 +4,12 @@
 //! 這裡不碰任何作業系統 API，所以 Windows CI 也跑得了這些測試。
 
 pub mod geometry;
+pub mod hover;
 pub mod screens;
 
 pub use geometry::{
     container_frame, container_size, local_rect, mode_size, NotchGeometry, Point, Rect, ShellMode,
     Size, EXPANDED_CORNER_RADIUS, EXPANDED_HEIGHT, PREVIEW_CORNER_RADIUS, WIDTH_PADDING,
 };
+pub use hover::{HoverInput, HoverMachine, HoverOutput, LEAVE_DELAY};
 pub use screens::{choose_screen, geometry_for, ScreenInfo, VirtualNotch};
