@@ -73,6 +73,10 @@ impl MusicModuleState {
     pub const ID: &'static str = "com.musicat.music";
     pub const PRIORITY: i32 = 100;
 
+    /// 注意：模組只持有控制器，而控制器不持有監視器（見 [`MusicController::new`]）。
+    /// 外殼必須在模組存活期間自行持有 `Arc<NowPlayingMonitor>`；否則快照更新會悄悄停止，
+    /// `is_active` 卡在最後的值，沒有任何錯誤。
+    ///
     /// `strip_visible` 與設定共用：歌詞條是否展開（沒有被收起）。`sources` 依優先序，
     /// 由 [`ModuleState::on_start`]／[`ModuleState::on_stop`] 啟動與停止（來源只能在主執行緒上啟停，
     /// 由呼叫端保證）。
@@ -406,12 +410,13 @@ mod tests {
     fn a_track_already_playing_at_construction_is_active_immediately() {
         let fx = Fixture::new();
         fx.play(true);
+        // 控制器只持有對監視器的弱參照：監視器要活到斷言結束。
         let monitor = Arc::new(NowPlayingMonitor::new(
             vec![fx.source.clone() as Arc<dyn NowPlayingSource>],
             ArtworkCache::default(),
         ));
         let controller = MusicController::new(
-            monitor,
+            monitor.clone(),
             Arc::new(NoLyrics),
             None,
             Arc::new(fx.spawner.clone()),
@@ -419,6 +424,7 @@ mod tests {
         let late = MusicModuleState::new(controller, fx.strip_visible.clone(), vec![]);
         assert!(late.is_active());
         assert_eq!(late.preview_extra_height(), 24.0);
+        drop(monitor);
     }
 
     #[test]

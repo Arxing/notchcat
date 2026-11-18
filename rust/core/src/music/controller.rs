@@ -54,6 +54,11 @@ pub struct MusicController {
 }
 
 impl MusicController {
+    /// 建立控制器並訂閱 `monitor`（目前值會被冪等地套用）。
+    ///
+    /// **監視器的存活期必須由呼叫端負責**：控制器**不**持有 `Arc<NowPlayingMonitor>`，
+    /// 對監視器的訂閱也隨監視器 drop 而取消。監視器一旦被 drop，快照更新就悄悄停止
+    /// （狀態與依賴它的 `is_active` 卡在最後的值，沒有任何錯誤）。外殼要在控制器存活期間保有該 `Arc`。
     pub fn new(
         monitor: Arc<NowPlayingMonitor>,
         resolver: Arc<dyn LyricsResolving>,

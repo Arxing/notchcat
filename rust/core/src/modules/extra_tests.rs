@@ -28,16 +28,12 @@ fn highest_priority_active_module_wins_and_ties_go_to_the_first_registered() {
 }
 
 #[test]
-fn clamped_preview_extra_handles_edge_values() {
-    assert_eq!(MAX_PREVIEW_EXTRA_HEIGHT, 28.0);
-    assert_eq!(clamped_preview_extra(-5.0), 0.0);
-    assert_eq!(clamped_preview_extra(0.0), 0.0);
-    assert_eq!(clamped_preview_extra(10.0), 10.0);
-    assert_eq!(clamped_preview_extra(28.0), 28.0);
-    assert_eq!(clamped_preview_extra(99.0), 28.0);
+fn clamped_preview_extra_handles_non_finite_and_boundary_values() {
     assert_eq!(clamped_preview_extra(f64::NAN), 0.0);
     assert_eq!(clamped_preview_extra(f64::INFINITY), 28.0);
     assert_eq!(clamped_preview_extra(f64::NEG_INFINITY), 0.0);
+    assert_eq!(clamped_preview_extra(99.0), 28.0);
+    assert_eq!(clamped_preview_extra(10.0), 10.0);
 }
 
 #[test]

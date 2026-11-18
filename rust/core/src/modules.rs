@@ -375,6 +375,17 @@ mod tests {
         assert_eq!(manager.active_module_id(), None);
     }
 
+    /// Swift `testClampedPreviewExtra`（Swift 的 `NotchMode.clampedPreviewExtra`；NaN 另見 extra_tests）。
+    #[test]
+    fn clamped_preview_extra_clamps_to_zero_through_maximum() {
+        assert_eq!(MAX_PREVIEW_EXTRA_HEIGHT, 28.0);
+        assert_eq!(clamped_preview_extra(-5.0), 0.0);
+        assert_eq!(clamped_preview_extra(0.0), 0.0);
+        assert_eq!(clamped_preview_extra(24.0), 24.0);
+        assert_eq!(clamped_preview_extra(28.0), 28.0);
+        assert_eq!(clamped_preview_extra(500.0), 28.0);
+    }
+
     /// Swift `testNotchModuleDefaultIsZero`：沒覆寫額外高度的模組，預設就是 0（trait 的預設方法）。
     #[test]
     fn notch_module_default_is_zero() {
