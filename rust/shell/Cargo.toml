@@ -5,3 +5,18 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[dependencies]
+musicat-core = { path = "../core" }
+# GPUI 以確切版本鎖死（spec 第 7.2 節）；升級是獨立任務，升級後要重驗 platform-macos/src/panel.rs 的每個繞路。
+#
+# 繞路 4（對應 GPUI 0.2.2）：`runtime_shaders`。GPUI 預設在建置時用 Xcode 的 Metal Toolchain（`xcrun metal`）
+# 把 shader 預先編好；沒有安裝 Metal Toolchain 的機器會在 gpui 的 build script 失敗。開啟這個 feature 後
+# shader 改在執行時（第一次開視窗時）由系統的 Metal 編譯，不需要 Metal Toolchain。
+# 已裝 Metal Toolchain 的開發者可以拿掉它（建置說明見 rust/README.md）；在 Windows 上這個 feature 沒有作用。
+gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+# 取得 GPUI 視窗的原生把手（macOS 為 NSView），交給 platform-macos 的面板繞路。
+raw-window-handle = "0.6"
+
+# 面板繞路只在 macOS；shell 本身不碰 Objective-C，只呼叫 musicat_platform_macos::panel 的公開函式。
+[target.'cfg(target_os = "macos")'.dependencies]
+musicat-platform-macos = { path = "../platform-macos" }

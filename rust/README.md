@@ -29,7 +29,44 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-macOS 上建置 GPUI 所需的 Metal Toolchain 說明，將於 Task 21 補上。
+第一次建置會編譯 GPUI（`=0.2.2`）與它的整個相依樹，需要好幾分鐘；之後是增量建置。
+crates.io 下載逾時時可加 `CARGO_HTTP_TIMEOUT=120` 重試。
+
+### macOS：GPUI 的 shader 與 Metal Toolchain（`runtime_shaders`）
+
+GPUI 預設在**建置時**用 Xcode 的 Metal Toolchain（`xcrun metal`）預先編譯 shader。新版 Xcode 不再內建 Metal Toolchain，
+沒有安裝時 gpui 的 build script 會失敗（開發機實測：`cannot execute tool 'metal' due to missing Metal Toolchain`）。所以 `rust/shell/Cargo.toml` 預設開啟 GPUI 的 `runtime_shaders` feature：
+shader 改在**執行時**（第一次開視窗時）由系統的 Metal 編譯，不需要 Metal Toolchain，只要有 Xcode 或 Command Line Tools 即可。
+
+- **沒有 Metal Toolchain（預設）**：保留 `runtime_shaders`，直接建置。這是目前唯一實際驗證過的方式。
+- **已安裝 Metal Toolchain**（`xcodebuild -downloadComponent MetalToolchain`；`xcrun -sdk macosx metal --version` 能執行）：
+  可以把 `rust/shell/Cargo.toml` 裡 gpui 的 `features = ["runtime_shaders"]` 拿掉，改用預先編譯的 shader（啟動略快）。
+  **這條路尚未驗證**：開發機沒有 Metal Toolchain，已列入 [`docs/HANDOFF-rust.md`](docs/HANDOFF-rust.md) 待作者確認。
+
+Windows 上這個 feature 沒有作用。
+
+### 面板煙霧範例
+
+確認 GPUI 視窗能變成瀏海面板（層級高於選單列、不搶焦點、不出現在 Dock）：
+
+```sh
+cd rust
+cargo run -p musicat-shell --example panel_smoke
+```
+
+它會在有瀏海的螢幕頂端（沒有瀏海就用主螢幕與 200 × 32 的虛擬瀏海）顯示黑色長條，寫著 `MusiCat` 與 `現正播放`，
+並把螢幕、幾何與視窗狀態印到 stdout，8 秒後自動結束。`MUSICAT_SMOKE_SECS=60` 可延長顯示時間（手動驗證用）。
+
+### 疑難排解：helper 動態庫不見了
+
+`musicat-platform-macos` 的 build script 會把 MediaRemote helper 編成 `target/<profile>/libmusicat_mediaremote_helper.dylib`。
+若只手動刪掉這個檔案，Cargo 不會自動重建它（build script 只在 `helper/` 或 `build.rs` 變更時重跑）。執行：
+
+```sh
+cargo clean -p musicat-platform-macos
+```
+
+再重新建置即可。
 
 ## 隱私
 
