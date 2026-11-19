@@ -3361,7 +3361,10 @@ version = "0.1.0"
 name = "musicat-shell"
 version = "0.1.0"
 dependencies = [
+ "futures-channel",
+ "futures-util",
  "gpui",
+ "image",
  "musicat-core",
  "musicat-platform-macos",
  "raw-window-handle",

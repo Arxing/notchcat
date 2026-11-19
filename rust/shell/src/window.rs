@@ -56,10 +56,7 @@ use musicat_core::shell_logic::{
 use musicat_platform_macos::panel::{self, NativeWindow};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use crate::{ShellContent, ShellEvent};
-
-/// Expanded 內容槽上方的留白（Swift `NotchContentView` 的 `.padding(.top, 8)`）。
-pub const EXPANDED_TOP_PADDING: f64 = 8.0;
+use crate::{ShellContent, ShellEvent, EXPANDED_TOP_PADDING};
 
 /// 多久重新問一次 `foreground_is_fullscreen()`（秒）：它之後可能要查 CGWindowList，不必每拍查。
 const FULLSCREEN_POLL_SECONDS: f64 = 1.0;

@@ -2,16 +2,28 @@
 //!
 //! - [`ShellContent`]：外殼要畫的內容（Preview／Expanded 兩種畫面）與它需要的回呼。Task 24 的音樂畫面實作它。
 //! - [`ShellWindow`]（僅 macOS）：固定大小的瀏海面板視窗，內含 hover 狀態機、0.28 秒的形狀動畫與點擊穿透。
+//! - [`MusicShellContent`]：音樂模組的 Preview／Expanded 畫面（Task 24），版面常數與純運算在 [`music_layout`]，
+//!   跑馬燈在 [`marquee`]，封面解碼與快取在 [`artwork`]。
 //!
 //! 外殼本身不碰 Objective-C：視窗繞路全部經 `musicat_platform_macos::panel` 的公開函式。
 
 use gpui::{AnyElement, App, Window};
+
+pub mod artwork;
+pub mod marquee;
+pub mod music_layout;
+mod music_views;
+
+pub use music_views::MusicShellContent;
 
 #[cfg(target_os = "macos")]
 mod window;
 
 #[cfg(target_os = "macos")]
 pub use window::ShellWindow;
+
+/// Expanded 內容槽上方的留白（Swift `NotchContentView` 的 `.padding(.top, 8)`）。
+pub const EXPANDED_TOP_PADDING: f64 = 8.0;
 
 /// 外殼通知內容（或 app）的狀態轉移，給日誌與診斷用。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

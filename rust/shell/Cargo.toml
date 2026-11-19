@@ -16,6 +16,13 @@ musicat-core = { path = "../core" }
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
 # 取得 GPUI 視窗的原生把手（macOS 為 NSView），交給 platform-macos 的面板繞路。
 raw-window-handle = "0.6"
+# 封面解碼（偵測格式後裁成正方形縮圖再交給 GPUI，見 src/artwork.rs）。與 gpui 0.2.2 依賴的是同一個 crate
+# （Cargo.lock 已有 0.25.x，授權 MIT OR Apache-2.0），只列出要用的格式。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "bmp"] }
+# 把任意執行緒上的狀態變動通知帶回 GPUI 主執行緒（src/music_views.rs）：無界 channel 與 StreamExt。
+# 都已在 Cargo.lock（MIT OR Apache-2.0），不帶任何執行器。
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # 面板繞路只在 macOS；shell 本身不碰 Objective-C，只呼叫 musicat_platform_macos::panel 的公開函式。
 [target.'cfg(target_os = "macos")'.dependencies]
