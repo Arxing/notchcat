@@ -6,3 +6,4 @@ pub mod config;
 pub mod http_ureq;
 pub mod menu;
 pub mod real_runtime;
+pub mod switchable;
