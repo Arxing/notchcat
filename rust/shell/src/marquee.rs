@@ -49,11 +49,17 @@ impl MarqueeLayout {
     }
 }
 
+/// 跑馬燈開始捲動時呼叫的回呼。
+type Waker = Rc<dyn Fn()>;
+
 /// 一個跑馬燈位置的捲動狀態（目前文字與開始捲動的時刻）。複製的把手共用同一份狀態。
 #[derive(Clone, Default)]
 pub struct MarqueeState {
     inner: Rc<RefCell<Option<(SharedString, Instant)>>>,
     scrolling: Rc<Cell<bool>>,
+    /// 上一格是否在捲動（[`MarqueeState::clear_scrolling`] 時記下），用來只在「開始捲動」那一刻喚醒擁有者。
+    was_scrolling: Rc<Cell<bool>>,
+    waker: Rc<RefCell<Option<Waker>>>,
 }
 
 impl MarqueeState {
@@ -65,12 +71,30 @@ impl MarqueeState {
     pub fn reset(&self) {
         self.inner.borrow_mut().take();
         self.scrolling.set(false);
+        self.was_scrolling.set(false);
+    }
+
+    /// 文字從「靜止」變成「捲動」時呼叫 `f`（在 paint 中，所以 `f` 不得碰 GPUI，只能設旗標或送訊號）。
+    /// 讓閒置中的擁有者知道要開始定時重繪；持續捲動時不再呼叫。
+    pub fn set_waker(&self, f: impl Fn() + 'static) {
+        *self.waker.borrow_mut() = Some(Rc::new(f));
     }
 
     /// 清掉「正在捲動」：擁有它的 view 每次 render 開頭呼叫，只有這一格真的畫到、而且放不下的跑馬燈會再設回來
     /// （不再出現的跑馬燈不會讓定時重繪一直跑）。
     pub fn clear_scrolling(&self) {
-        self.scrolling.set(false);
+        self.was_scrolling.set(self.scrolling.replace(false));
+    }
+
+    /// paint 時記下這一格放不下、正在捲動；剛開始捲動時喚醒擁有者。
+    fn mark_scrolling(&self) {
+        self.scrolling.set(true);
+        if !self.was_scrolling.replace(true) {
+            let waker = self.waker.borrow().clone();
+            if let Some(waker) = waker {
+                waker();
+            }
+        }
     }
 
     /// 上一次畫的時候文字放不下、正在捲動（擁有者據此決定要不要定時重繪）。
@@ -160,7 +184,7 @@ fn paint_marquee(
             let _ = line.paint(point(x, bounds.origin.y), line_height, window, cx);
             let x2 = x + px((text_width + MarqueeLayout::GAP) as f32);
             let _ = line.paint(point(x2, bounds.origin.y), line_height, window, cx);
-            state.scrolling.set(true);
+            state.mark_scrolling();
         } else {
             // 放得下：置中、靜止；文字改變時仍記下起點，之後若變得放不下就從頭捲。
             let _ = state.elapsed(&text);

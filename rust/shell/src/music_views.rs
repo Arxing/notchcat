@@ -17,14 +17,17 @@
 //!
 //! 控制器、模組狀態與模組管理器的通知可能在**任何**執行緒上抵達。訂閱的回呼只做一件事：
 //! 若「待處理」旗標原本是 false 就設為 true，並往一個無界 channel 送一個 `()`（合併連續的通知）。
-//! 主執行緒上的 GPUI 工作（`App::spawn`）等這個 channel，收到時清旗標、對兩個 entity `cx.notify()`；
-//! render 一律重讀 `MusicController::state()` 等現值，不信任通知的順序。回呼只持有 channel 的送出端，
-//! 不持有任何 GPUI 物件，所以從不在外部執行緒碰 GPUI。
+//! 主執行緒上的 GPUI 工作（`App::spawn`）等這個 channel，收到時清旗標、把快取的狀態快照標為過期、
+//! 對兩個 entity `cx.notify()`，並喚醒定時器工作。render 讀的是 `Shared::state()`：過期時才重新
+//! `MusicController::state()`（含歌詞的整份複製），所以每次狀態改變只複製一次，每一格不複製；
+//! 現值一律重讀，不信任通知的順序。回呼只持有 channel 的送出端，不持有任何 GPUI 物件，所以從不在外部執行緒碰 GPUI。
 //!
 //! 定時重繪（音柱 12 fps、跑馬燈捲動時 30 fps、歌詞條／進度／歌詞跟隨 4 Hz）由另一個主執行緒工作依
-//! [`tick_interval`](crate::music_layout::tick_interval) 決定：面板隱藏、Preview 沒在播、Expanded 沒有隨時間
-//! 變化的東西時不重繪，只每 0.5 秒重新判斷一次（不畫任何東西）。只有歌詞換行的 0.3 秒捲動動畫由 render
-//! `request_animation_frame()`，只在進行中才要求。
+//! [`tick_interval`](crate::music_layout::tick_interval) 決定：需要時以該週期計時，同時也等「喚醒」；
+//! 不需要時（面板隱藏、Preview 沒在播、Expanded 沒有隨時間變化的東西）**只等喚醒**，不定時醒來。
+//! 喚醒來源：狀態改變（事件工作）、外殼的模式／可見性改變（`on_shell_event`）、跑馬燈開始捲動（paint）。
+//! 所以按下播放後音柱立刻開始動。只有歌詞換行的 0.3 秒捲動動畫由 render `request_animation_frame()`，
+//! 只在進行中才要求。
 //!
 //! # 生命週期
 //!
@@ -38,6 +41,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_channel::mpsc;
+use futures_util::future::{select, Either};
 use futures_util::StreamExt;
 use gpui::{
     black, canvas, div, img, point, prelude::*, px, white, AnyElement, App, AsyncApp, Bounds,
@@ -46,7 +50,7 @@ use gpui::{
 };
 use musicat_core::lyrics::LyricLine;
 use musicat_core::modules::{ModuleManager, ModuleState};
-use musicat_core::music::controller::MusicController;
+use musicat_core::music::controller::{MusicController, MusicState};
 use musicat_core::music::module::{MusicModuleState, LYRIC_STRIP_HEIGHT, LYRIC_STRIP_OPACITY};
 use musicat_core::music::presentation::{
     has_progress, progress_fraction, strip_content, StripContent,
@@ -57,14 +61,27 @@ use musicat_core::shell_logic::{mode_size, NotchGeometry, ShellMode};
 use musicat_core::types::{ArtworkRef, TrackSnapshot};
 
 use crate::artwork::{
-    decode_cover, CoverCache, CoverEntry, CoverKey, COVER_CACHE_CAPACITY, COVER_TEXTURE_PIXELS,
+    decode_cover, CoverCache, CoverEntry, CoverKey, DecodeQueue, COVER_CACHE_CAPACITY,
+    COVER_TEXTURE_PIXELS,
 };
 use crate::marquee::{marquee, MarqueeState, MarqueeStyle, SYSTEM_FONT};
 use crate::music_layout::*;
 use crate::{ShellContent, ShellEvent};
 
-/// 沒有需要定時重繪時，多久重新判斷一次（秒）。只讀狀態、不畫任何東西。
-const IDLE_RECHECK_SECONDS: f64 = 0.5;
+/// 喚醒定時器工作（主執行緒內使用；合併連續的喚醒）。
+struct Kick {
+    tx: mpsc::UnboundedSender<()>,
+    pending: Cell<bool>,
+}
+
+impl Kick {
+    fn kick(&self) {
+        if !self.pending.replace(true) {
+            // 定時器工作已結束（內容正在 drop）時送出失敗，忽略。
+            let _ = self.tx.unbounded_send(());
+        }
+    }
+}
 
 /// 兩個 view 共用的狀態。只在 GPUI 主執行緒使用。
 struct Shared {
@@ -78,6 +95,12 @@ struct Shared {
     /// 面板實際可見（`ShellEvent::Visible`）。
     visible: Cell<bool>,
     covers: RefCell<CoverCache<Arc<RenderImage>>>,
+    /// 封面解碼排程：同時最多一個，只解最新要求的（見 `artwork::DecodeQueue`）。
+    decodes: RefCell<DecodeQueue<CoverKey, Arc<[u8]>>>,
+    /// 控制器狀態的快照；`state_dirty` 時才重新複製（事件工作在每次狀態通知時標為過期）。
+    state_cache: RefCell<Option<Rc<MusicState>>>,
+    state_dirty: Cell<bool>,
+    kick: Kick,
     /// 被快取擠出、等下一次 render（有 `Window`）時從 GPU 圖集釋放的封面。
     released: RefCell<Vec<Arc<RenderImage>>>,
     strip_marquee: MarqueeState,
@@ -89,6 +112,15 @@ struct Shared {
 }
 
 impl Shared {
+    /// 目前的音樂狀態。只在收到狀態通知後才重新從控制器複製（歌詞可能有上百行，不要每格複製）。
+    fn state(&self) -> Rc<MusicState> {
+        let mut cache = self.state_cache.borrow_mut();
+        if self.state_dirty.replace(false) || cache.is_none() {
+            *cache = Some(Rc::new(self.controller.state()));
+        }
+        cache.clone().unwrap_or_default()
+    }
+
     fn music_is_active(&self) -> bool {
         self.modules.active_module_id().as_deref() == Some(MusicModuleState::ID)
     }
@@ -98,7 +130,7 @@ impl Shared {
     }
 
     fn tick_inputs(&self) -> TickInputs {
-        let state = self.controller.state();
+        let state = self.state();
         let playing = state.snapshot.as_ref().is_some_and(|s| s.is_playing);
         let expanded_live = playing
             && self.music_is_selected()
@@ -179,6 +211,8 @@ impl MusicShellContent {
         modules: Arc<ModuleManager>,
         clock: Arc<dyn Clock>,
     ) -> Self {
+        // 定時器的喚醒 channel：送出端在 Shared 裡（主執行緒），Shared drop 時定時器工作隨之結束。
+        let (kick_tx, mut kick_rx) = mpsc::unbounded::<()>();
         let shared = Rc::new(Shared {
             controller,
             module_state,
@@ -188,6 +222,13 @@ impl MusicShellContent {
             mode: Cell::new(ShellMode::Preview),
             visible: Cell::new(true),
             covers: RefCell::new(CoverCache::new(COVER_CACHE_CAPACITY)),
+            decodes: RefCell::new(DecodeQueue::new()),
+            state_cache: RefCell::new(None),
+            state_dirty: Cell::new(true),
+            kick: Kick {
+                tx: kick_tx,
+                pending: Cell::new(false),
+            },
             released: RefCell::new(Vec::new()),
             strip_marquee: MarqueeState::new(),
             title_marquee: MarqueeState::new(),
@@ -228,10 +269,29 @@ impl MusicShellContent {
         // 只留回呼裡的送出端：訂閱取消時 channel 隨之結束，事件工作自然停止。
         drop(tx);
 
+        // 跑馬燈開始捲動時喚醒定時器（它可能正閒置等待）。
+        for marquee in [
+            &shared.strip_marquee,
+            &shared.title_marquee,
+            &shared.artist_marquee,
+        ] {
+            let weak = Rc::downgrade(&shared);
+            marquee.set_waker(move || {
+                if let Some(shared) = weak.upgrade() {
+                    shared.kick.kick();
+                }
+            });
+        }
+
         let (wp, we) = (preview.downgrade(), expanded.downgrade());
+        let events_shared: Weak<Shared> = Rc::downgrade(&shared);
         let events = cx.spawn(async move |cx: &mut AsyncApp| {
             while rx.next().await.is_some() {
                 pending.store(false, Ordering::SeqCst);
+                if let Some(shared) = events_shared.upgrade() {
+                    shared.state_dirty.set(true);
+                    shared.kick.kick();
+                }
                 let a = wp.update(cx, |_, cx| cx.notify());
                 let b = we.update(cx, |_, cx| cx.notify());
                 if a.is_err() && b.is_err() {
@@ -246,6 +306,8 @@ impl MusicShellContent {
             let Some(shared) = weak_shared.upgrade() else {
                 break;
             };
+            // 這一輪會重新判斷，之前累積的喚醒都算處理了。
+            shared.kick.pending.set(false);
             let interval = tick_interval(shared.tick_inputs());
             let target: &WeakEntity<MusicView> = if shared.mode.get() == ShellMode::Expanded {
                 &we
@@ -256,11 +318,23 @@ impl MusicShellContent {
             if interval.is_some() && target.update(cx, |_, cx| cx.notify()).is_err() {
                 break;
             }
-            cx.background_executor()
-                .timer(Duration::from_secs_f64(
-                    interval.unwrap_or(IDLE_RECHECK_SECONDS),
-                ))
-                .await;
+            let woken = match interval {
+                Some(seconds) => {
+                    let timer = cx
+                        .background_executor()
+                        .timer(Duration::from_secs_f64(seconds));
+                    match select(Box::pin(timer), kick_rx.next()).await {
+                        Either::Left(_) => true,
+                        Either::Right((kick, _)) => kick.is_some(),
+                    }
+                }
+                // 閒置：只等喚醒，不定時醒來。
+                None => kick_rx.next().await.is_some(),
+            };
+            if !woken {
+                // 送出端（Shared）已不在：內容已 drop。
+                break;
+            }
         });
 
         Self {
@@ -306,8 +380,10 @@ impl ShellContent for MusicShellContent {
         self.expanded.clone().into_any_element()
     }
 
+    /// 外殼每拍（16–40 ms）讀一次：用模組管理器快取的值（已夾到 0…28），不每拍重算、不複製狀態。
+    /// 本輪只有音樂一個模組，所以它就是 `MusicModuleState::preview_extra_height()`（播放中且歌詞條展開時 24）。
     fn preview_extra_height(&self) -> f64 {
-        self.shared.module_state.preview_extra_height()
+        self.shared.modules.preview_extra_height()
     }
 
     /// spec 5.3：每次新展開把模組切換列的選取重設為 active 模組。只碰 core（不碰 GPUI），
@@ -332,6 +408,8 @@ impl ShellContent for MusicShellContent {
             }
             ShellEvent::Visible(v) => s.visible.set(v),
         }
+        // 模式或可見性改變：定時器重新判斷（例如再顯示時音柱立刻恢復）。
+        s.kick.kick();
         if let Some(hook) = &self.event_hook {
             hook(event);
         }
@@ -380,14 +458,14 @@ impl MusicView {
         if !s.music_is_active() {
             return empty();
         }
-        let state = s.controller.state();
+        let state = s.state();
         let Some(snapshot) = state.snapshot.as_ref() else {
             return empty();
         };
         let g = s.geometry.get();
         let notch_w = finite_non_negative(g.notch.w);
         let row_h = finite_non_negative(g.notch.h);
-        let extra = s.module_state.preview_extra_height();
+        let extra = s.modules.preview_extra_height();
         let size = mode_size(ShellMode::Preview, &g, extra);
         let wing = wing_width(size.w, notch_w);
         let side = preview_cover_side(wing, row_h);
@@ -494,34 +572,46 @@ impl MusicView {
             id: artwork.id.clone(),
             len: data.len(),
         };
-        let mut covers = self.shared.covers.borrow_mut();
-        match covers.get(&key) {
+        let cached = self.shared.covers.borrow_mut().get(&key);
+        match cached {
             Some(CoverEntry::Ready(image)) => Some(image),
-            Some(CoverEntry::Pending | CoverEntry::Failed) => None,
+            Some(CoverEntry::Failed) => None,
             None => {
-                let evicted = covers.insert(key.clone(), CoverEntry::Pending);
-                drop(covers);
-                self.shared.released.borrow_mut().extend(evicted);
-                let bytes = data.clone();
-                cx.spawn(async move |this, cx| {
-                    let decoded = cx
-                        .background_executor()
-                        .spawn(async move { decode_cover(&bytes, COVER_TEXTURE_PIXELS) })
-                        .await;
-                    let entry = match decoded {
-                        Some(image) => CoverEntry::Ready(Arc::new(image)),
-                        None => CoverEntry::Failed,
-                    };
-                    let _ = this.update(cx, |view, cx| {
-                        let orphan = view.shared.covers.borrow_mut().finish(&key, entry);
-                        view.shared.released.borrow_mut().extend(orphan);
-                        cx.notify();
-                    });
-                })
-                .detach();
+                // 排進解碼佇列（最新的要求取代排隊中的舊要求），先畫佔位。
+                self.shared.decodes.borrow_mut().request(key, data.clone());
+                self.pump_decodes(cx);
                 None
             }
         }
+    }
+
+    /// 沒有解碼在進行時，在背景開始解排隊中的封面；完成後只在結果仍需要時放進快取，接著解下一個。
+    fn pump_decodes(&self, cx: &mut Context<Self>) {
+        let Some((key, bytes)) = self.shared.decodes.borrow_mut().start_next() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { decode_cover(&bytes, COVER_TEXTURE_PIXELS) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                let wanted = view.shared.decodes.borrow_mut().finish(&key);
+                if wanted {
+                    let entry = match decoded {
+                        Some(image) => CoverEntry::Ready(Arc::new(image)),
+                        // 失敗也記住，不重試（畫佔位）。
+                        None => CoverEntry::Failed,
+                    };
+                    let evicted = view.shared.covers.borrow_mut().insert(key, entry);
+                    view.shared.released.borrow_mut().extend(evicted);
+                }
+                // 不需要的結果直接丟棄：它從沒畫過，不在 GPU 圖集裡。
+                view.pump_decodes(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     // ------------------------------------------------------------------ Expanded
@@ -606,7 +696,7 @@ impl MusicView {
             .flex()
             .flex_col()
             .overflow_hidden();
-        let state = s.controller.state();
+        let state = s.state();
         let Some(snapshot) = state.snapshot.as_ref() else {
             return page
                 .items_center()
