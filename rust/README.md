@@ -68,6 +68,31 @@ cargo clean -p musicat-platform-macos
 
 再重新建置即可。
 
+## 執行（macOS）
+
+```sh
+cd rust
+cargo run --release -p musicat-app
+```
+
+可執行檔是 `target/release/musicat`。它會在有瀏海的螢幕（沒有就用主螢幕與虛擬瀏海）頂端顯示面板，並在選單列放一個「♪」圖示
+（選單：顯示螢幕、歌詞來源、歌詞條、perl 宿主、結束）。沒有 Dock 圖示。
+
+- 讀取系統現正播放需要 helper 動態庫 `libmusicat_mediaremote_helper.dylib` 放在**可執行檔旁邊**（建置時自動產生在
+  `target/<profile>/`）。找不到時印一行 `system now-playing unavailable` 並只用視窗標題備援，程式照常執行。
+- 選單列圖示很多時，macOS 會把放不下的圖示藏起來（有瀏海的螢幕特別明顯）；看不到「♪」時請按住 ⌘ 拖曳其他圖示騰出位置。
+- 從選單「結束」會先停掉 perl helper 再結束；即使程式被 `kill -9`，helper 也會在 stdin 關閉時自行結束。
+
+開發與測試用的環境變數（日誌一律寫到 stderr）：
+
+| 變數 | 作用 |
+|---|---|
+| `MUSICAT_LOG=1` | 印出現正播放（**含曲名與演出者**）、歌詞狀態（行數，不含內容）、外殼狀態與選單列狀態。沒設時不印任何與曲目有關的內容。 |
+| `MUSICAT_AUTO_QUIT_SECS=<n>` | n 秒後走與選單「結束」相同的路徑結束（自動化驗證用）。 |
+| `MUSICAT_CONFIG=<path>` | 改用這個設定檔（測試用，避免動到真正的設定檔）。 |
+
+例如：`MUSICAT_LOG=1 MUSICAT_AUTO_QUIT_SECS=25 cargo run --release -p musicat-app`。
+
 ## 設定
 
 設定檔是 TOML，位置：
@@ -103,7 +128,10 @@ virtual_height = 32            # 10 到 400
   第一次需要存檔時，原檔會先被改名為 `musicat.toml.bak`（蓋掉更舊的 `.bak`）再寫入新檔。
 - 未知的鍵與型別錯誤的值只會被警告並忽略（只有那個欄位退回預設值）；日誌只印鍵名，不印值。
 - 程式存設定時會把檔案重寫成標準格式：**手寫的註解與未知的鍵不會保留**。
-- `screen` 記下的螢幕 id 不會因為該螢幕暫時沒接（拔掉、闔上）而被清掉。
+- `screen` 記下的螢幕 id 不會因為該螢幕暫時沒接（拔掉、闔上）而被清掉：面板暫時移到預設螢幕，螢幕接回來後（每 2 秒偵測一次）移回去。
+- 選單的變更立即生效並寫回設定檔；「結束」與點選目前已是該值的項目不會寫檔。Expanded 畫面右下角的歌詞條折疊箭頭也會被記住（最多 2 秒內寫回）。
+- 環境變數 `HOME`（Windows 為 `APPDATA`、其他平台另有 `XDG_CONFIG_HOME`）是空的或相對路徑時一律不採用。
+- 設定檔若是符號連結，程式存檔時會把它換成一般檔案（連結的目標不會被更新）。
 
 ## 隱私
 

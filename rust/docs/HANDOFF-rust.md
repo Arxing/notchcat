@@ -183,3 +183,58 @@ CPU（release、螢幕醒著、停在 Preview、15 秒 `ps -o time`）：音柱 
 - [ ] **（HANDOFF 3）拖動進度。** 要真實來源（Task 25）：在播放器拖動進度後，Expanded 的進度條與目前歌詞行在 1 秒內跟上。
 - [ ] **字形。** 控制列的上一首／播放／暫停／下一首與折疊箭頭是以路徑畫的（GPUI 沒有 SF Symbols），對照 Swift 版確認大小與粗細可接受；
   ♪（U+266A，系統字型）在切換列與封面佔位是否清楚。
+
+## Task 25 真正的 App（組裝、選單、螢幕、喚醒）
+
+對應 `rust/app/src/{main.rs, composition.rs, gated_source.rs}`、`rust/shell/src/runtime.rs`、`rust/platform-macos/src/power.rs`。
+執行方式見 `rust/README.md` 的「執行（macOS）」：
+
+```sh
+cd rust
+MUSICAT_LOG=1 cargo run --release -p musicat-app     # MUSICAT_LOG=1 會在 stderr 印曲名與演出者，自己看就好
+```
+
+Task 25b 已自動驗證（2026-11-20，macOS 15.7 arm64，只接內建有瀏海的螢幕，顯示器醒著且未鎖定）：
+- `MUSICAT_LOG=1 MUSICAT_AUTO_QUIT_SECS=25`：面板 `layer=25 bounds 583,0 345×180`（CGWindowList）；選單列圖示的視窗
+  `Item-0`（layer 25、27 × 37）存在，`MenuBar::describe` 為 `visible=true` 且選單項目正確——但這台機器選單列圖示太多，
+  21 個圖示裡有 17 個（包括 MusiCat）被系統移到畫面外；perl helper 在啟動 0.08 秒內出現（`pgrep -f musicat_helper_main`），
+  日誌有現正播放的更新（當時是暫停中的曲目，來源 `mediaremote`）；25 秒時自己結束、`exit=0`、helper 已不在。
+- `kill -9` App：0.05 秒內 `pgrep -f musicat_helper_main` 為空（helper 在 stdin 關閉時自行結束）。
+- 損毀的設定檔（以 `MUSICAT_CONFIG` 指到暫存檔）：印出警告、以預設值啟動（perl 宿主照預設開啟），檔案的 SHA-1 前後相同、沒有 `.bak`。
+  `perl_host = false`：沒有 helper 行程，只用視窗標題備援。
+- 閒置（曲目暫停、Preview 空黑條）15 秒：App CPU 0.19 秒 ≈ 1.3%，RSS 約 42 MB；helper 0.04 秒 ≈ 0.3%，RSS 約 13 MB。
+- 喚醒通知：`cargo run -p musicat-shell --example wake_smoke` 以程式發出 `NSWorkspaceDidWakeNotification`（**沒有**讓機器睡眠），
+  回呼在主執行緒上被呼叫 2 次、取消登記後不再被呼叫，`PASS`。
+
+以下需要滑鼠、外接螢幕或真的睡眠，請人工確認（括號內是對應的 Swift `docs/HANDOFF.md` 項目編號）：
+
+- [ ] **選單用滑鼠操作。** 點「♪」打開選單（看不到圖示時先按住 ⌘ 把其他圖示拖開）。項目：自動、各螢幕、分隔線、
+  歌詞來源：LRCLIB、歌詞來源：網易雲音樂、顯示歌詞條、使用 perl 宿主讀取現正播放（macOS）、分隔線、結束 MusiCat（⌘Q）。
+  每點一次，勾選立刻翻轉，`MUSICAT_LOG=1` 時 stderr 有對應的一行；設定檔（`~/Library/Application Support/MusiCat/musicat.toml`）
+  只在值真的改變時被寫入。
+- [ ] **換螢幕（接外接螢幕）。** 選單選外接螢幕 → 面板 2 秒內移到外接螢幕頂端（沒有瀏海時是 200 × 32 的虛擬瀏海），重新啟動後仍在那裡。
+  拔掉外接螢幕 → 面板移回內建螢幕、程式不結束、選單裡外接螢幕的項目消失且「自動」**不**打勾（設定仍記著外接螢幕）；
+  接回來 → 面板移回外接螢幕。選「自動」→ 回到有瀏海的內建螢幕。闔上筆電只用外接螢幕時面板在外接螢幕上。
+- [ ] **（9）從選單關閉 perl 宿主。** 播放 YouTube Music 時取消勾選「使用 perl 宿主」→ `pgrep -f musicat_helper_main` 變空，
+  畫面改由視窗標題備援顯示（只有曲名，見下一項）；再勾回來 → helper 回來、資料恢復完整。啟動時就是 `perl_host = false` 的話，
+  勾選後才第一次建立 helper（不需要重新啟動）。
+- [ ] **（9）helper 被殺掉後恢復。** `pkill -f musicat_helper_main` → 1 秒左右 helper 自動重啟、畫面恢復。
+  暫時把 `target/release/libmusicat_mediaremote_helper.dylib` 改名後啟動 → 不崩潰，stderr 印一次 `system now-playing unavailable`，
+  只剩視窗標題備援；（改回名字後要重新啟動才會用 helper。）
+- [ ] **（11、20）視窗標題備援。** 關掉 perl 宿主後只顯示曲名（沒有演出者、不查歌詞）；在有／沒有「螢幕錄製」權限下各看一次
+  （沒有權限時預期什麼都不顯示）。
+- [ ] **（10）LRCLIB／網易雲開關與離線。** 兩個都關 → 下一首起沒有歌詞、不發任何請求；只開一個 → 只查那一個。
+  切換只影響**下一首**（目前曲目已顯示的歌詞保留到換曲）。斷網時歌詞靜默消失、曲目顯示不受影響。
+- [ ] **歌詞條折疊的記憶。** 在 Expanded 點右下角箭頭把歌詞條收起 → 2 秒內設定檔的 `lyric_strip_visible` 變成 `false`、
+  選單的「顯示歌詞條」勾選跟著消失；結束再啟動仍是收起的。從選單切換也一樣，且 Expanded 的箭頭方向跟著變。
+- [ ] **（17）睡眠與喚醒。** 播放音樂時讓 Mac 睡眠再喚醒 → `MUSICAT_LOG=1` 時 stderr 有 `system woke from sleep`，
+  helper 被換成新的行程（pid 改變），幾秒內畫面上的曲目與進度是新的。
+- [ ] **（18）結束不留 helper。** 從選單「結束 MusiCat」→ 圖示與面板消失、`pgrep -f musicat_helper_main` 為空；
+  對 App 下 `kill -9` 也一樣（已自動驗證，請在實際使用中再看一次）。
+- [ ] **（19）重新建置後恢復。** App 執行中重新 `cargo build --release -p musicat-app`（動態庫被重新連結）→ `pkill -f musicat_helper_main`
+  之後 helper 能以新的動態庫重啟。
+- [ ] **真實播放器的控制與 CPU。** YouTube Music、Spotify 各播一首：Preview／Expanded 正常、按鈕控制得動（Task 24 的 HANDOFF 8 待辦）、
+  播放中（音柱動畫）App 的 CPU 量一次（`ps -o time` 15 秒）。
+
+已知限制：沒有「螢幕參數變更」的即時通知，螢幕增減最多 2 秒後才反映；Expanded 箭頭造成的歌詞條變更最多 2 秒後才寫回設定檔
+（2 秒內被 `kill -9` 會遺失）。
