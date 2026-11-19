@@ -6,9 +6,14 @@
 //!
 //! 環境變數：
 //! - `MUSICAT_DEMO_SECS`：幾秒後自動結束（預設 60）。
-//! - `MUSICAT_DEMO_EXTRA`：Preview 額外高度（點，預設 0；外殼夾到 0…28）。
+//! - `MUSICAT_DEMO_EXTRA`：歌詞條（Preview 額外高度）出現時的高度（點，預設 24；外殼夾到 0…28）。
+//! - `MUSICAT_DEMO_TOGGLE_SECS`：每幾秒切換一次歌詞條的有無（預設 6；0 = 一直顯示）。每次切換印 `extra=..`。
+//!   歌詞條是外殼黑底下方、透明區域上的 0.6 不透明黑色帶（Preview 有額外高度時外殼只塗瀏海高度）。
 //! - `MUSICAT_DEMO_BLINK=1`：第 3 秒 `set_visible(false)`、第 4 秒 `set_visible(true)`（驗證隱藏／再顯示）。
 //! - `MUSICAT_SHELL_TRACE=1`：外殼每畫一格印一行 `shell-frame`（量動畫長度用）。
+//!
+//! 結束前 drop `ShellWindow`，確認輪詢停止（`poll after drop: ...`；內容的 `preview_extra_height`
+//! 每拍被呼叫一次，用它數拍數）。
 //!
 //! 執行：`cd rust && cargo run -p musicat-shell --example shell_demo`
 //! 只在 macOS 有效；其他平台印一行訊息就結束。
@@ -25,10 +30,11 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 mod demo {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use gpui::{div, prelude::*, px, rgb, AnyElement, App, Application, Window};
+    use gpui::{div, prelude::*, px, rgb, rgba, AnyElement, App, Application, Window};
     use musicat_core::shell_logic::{
         choose_screen, container_frame, geometry_for, mode_size, NotchGeometry, ShellMode,
         VirtualNotch,
@@ -49,16 +55,27 @@ mod demo {
         )
     }
 
-    /// 佔位內容：Preview 是左右兩個色塊「翼」加中央的深色標籤膠囊（在實體瀏海後面時看不到）；Expanded 是標題列、三個色塊與幾行文字。
+    /// 佔位內容：Preview 是左右兩個色塊「翼」加中央的深色標籤膠囊（在實體瀏海後面時看不到），
+    /// 有額外高度時下方再加一條 0.6 不透明的黑色歌詞條；Expanded 是標題列、三個色塊與幾行文字。
     struct Placeholder {
         geometry: NotchGeometry,
-        extra: f64,
+        /// 目前的額外高度（f64 的位元）。
+        extra_bits: AtomicU64,
+        /// `preview_extra_height` 被呼叫的次數 = 外殼的輪詢拍數。
+        ticks: AtomicU64,
         t0: Instant,
+    }
+
+    impl Placeholder {
+        fn extra(&self) -> f64 {
+            f64::from_bits(self.extra_bits.load(Ordering::Relaxed))
+        }
     }
 
     impl ShellContent for Placeholder {
         fn preview(&self, _window: &mut Window, _cx: &mut App) -> AnyElement {
-            let size = mode_size(ShellMode::Preview, &self.geometry, self.extra);
+            let extra = self.extra();
+            let size = mode_size(ShellMode::Preview, &self.geometry, extra);
             let wing = ((size.w - self.geometry.notch.w) / 2.0) as f32;
             let notch_h = self.geometry.notch.h as f32;
             let square = |color: u32| div().size(px(14.)).rounded_sm().bg(rgb(color));
@@ -71,8 +88,9 @@ mod demo {
                     .justify_center()
                     .child(square(color))
             };
-            div()
-                .size_full()
+            let band = div()
+                .w_full()
+                .h(px(notch_h))
                 .flex()
                 .flex_row()
                 .justify_between()
@@ -96,8 +114,25 @@ mod demo {
                                 .child("MusiCat"),
                         ),
                 )
-                .child(wing_box(0x30d158))
-                .into_any_element()
+                .child(wing_box(0x30d158));
+            let mut root = div().size_full().flex().flex_col().child(band);
+            if extra > 0.0 {
+                // 歌詞條：外殼在這一段不塗黑，由內容畫半透明背景（spec：黑底不透明度 0.6）。
+                root = root.child(
+                    div()
+                        .w_full()
+                        .h(px((size.h - self.geometry.notch.h) as f32))
+                        .rounded_b(px(10.))
+                        .bg(rgba(0x0000_0099))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(11.))
+                        .text_color(rgb(0xffffff))
+                        .child("♪ 佔位歌詞條（0.6 黑）"),
+                );
+            }
+            root.into_any_element()
         }
 
         fn expanded(&self, _window: &mut Window, _cx: &mut App) -> AnyElement {
@@ -139,7 +174,8 @@ mod demo {
         }
 
         fn preview_extra_height(&self) -> f64 {
-            self.extra
+            self.ticks.fetch_add(1, Ordering::Relaxed);
+            self.extra()
         }
 
         fn on_expand(&self) {
@@ -162,7 +198,8 @@ mod demo {
     pub fn run() {
         let t0 = Instant::now();
         let secs = env_f64("MUSICAT_DEMO_SECS").unwrap_or(60.0).max(0.0);
-        let extra = env_f64("MUSICAT_DEMO_EXTRA").unwrap_or(0.0);
+        let strip = env_f64("MUSICAT_DEMO_EXTRA").unwrap_or(24.0);
+        let toggle_secs = env_f64("MUSICAT_DEMO_TOGGLE_SECS").unwrap_or(6.0).max(0.0);
         let blink = std::env::var("MUSICAT_DEMO_BLINK").as_deref() == Ok("1");
         println!("hover the top-centre of the built-in screen to expand");
 
@@ -189,12 +226,15 @@ mod demo {
                 std::process::id()
             );
 
+            let initial_extra = if toggle_secs > 0.0 { 0.0 } else { strip };
             let content = Arc::new(Placeholder {
                 geometry,
-                extra,
+                extra_bits: AtomicU64::new(f64::to_bits(initial_extra)),
+                ticks: AtomicU64::new(0),
                 t0,
             });
-            let shell = match ShellWindow::open(cx, geometry, content) {
+            println!("{} extra={initial_extra}", stamp(t0));
+            let shell = match ShellWindow::open(cx, geometry, content.clone()) {
                 Ok(shell) => shell,
                 Err(e) => {
                     println!("{} open failed: {e:?}; quitting", stamp(t0));
@@ -202,6 +242,26 @@ mod demo {
                     return;
                 }
             };
+
+            // 歌詞條切換：每 toggle_secs 秒在 0 與 strip 之間切換。
+            if toggle_secs > 0.0 {
+                let toggler = content.clone();
+                cx.spawn(async move |cx| loop {
+                    cx.background_executor()
+                        .timer(Duration::from_secs_f64(toggle_secs))
+                        .await;
+                    let next = if toggler.extra() > 0.0 { 0.0 } else { strip };
+                    toggler
+                        .extra_bits
+                        .store(f64::to_bits(next), Ordering::Relaxed);
+                    println!(
+                        "{} extra={next} ticks={}",
+                        stamp(toggler.t0),
+                        toggler.ticks.load(Ordering::Relaxed)
+                    );
+                })
+                .detach();
+            }
 
             cx.spawn(async move |cx| {
                 let timer = |s: f64| cx.background_executor().timer(Duration::from_secs_f64(s));
@@ -213,9 +273,21 @@ mod demo {
                     shell.set_visible(true);
                     elapsed = 4.0;
                 }
-                timer(secs - elapsed).await;
-                println!("{} {secs}s elapsed; quitting", stamp(t0));
+                timer((secs - elapsed).max(0.0)).await;
+                println!("{} {secs}s elapsed; dropping the ShellWindow", stamp(t0));
+                let before = content.ticks.load(Ordering::Relaxed);
                 drop(shell);
+                // 關閉請求在下一拍（≤ 40 ms）處理；之後拍數不得再增加。
+                timer(0.2).await;
+                let after_close = content.ticks.load(Ordering::Relaxed);
+                timer(0.6).await;
+                let later = content.ticks.load(Ordering::Relaxed);
+                println!(
+                    "{} poll after drop: ticks {before} -> {after_close} (+200ms) -> {later} (+800ms) stopped={}",
+                    stamp(t0),
+                    later == after_close
+                );
+                println!("{} quitting", stamp(t0));
                 let _ = cx.update(|cx| cx.quit());
             })
             .detach();

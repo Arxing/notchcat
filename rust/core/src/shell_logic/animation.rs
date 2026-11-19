@@ -1,44 +1,71 @@
-//! 外殼形狀的大小動畫（純邏輯，不碰時間來源：`now` 由驅動端傳入，單位秒、單調時鐘）。
+//! 外殼形狀的動畫（純邏輯，不碰時間來源：`now` 由驅動端傳入，單位秒、單調時鐘）。
 //!
-//! 外殼視窗的外框終身不變（見 [`super::geometry`]），只有畫出來的形狀在容器內改變大小。
-//! [`Animator`] 記住「目前畫出的大小」與目標，每次 `update` 以 [`ANIMATION_SECONDS`]、[`ease_in_out`]
-//! 算出這一刻該畫的大小。
+//! 外殼視窗的外框終身不變（見 [`super::geometry`]），只有畫出來的形狀在容器內改變。
+//! [`Animator`] 記住「目前畫出的值」與目標，每次 `update` 以 [`ANIMATION_SECONDS`]、[`ease_in_out`]
+//! 算出這一刻該畫的值。外殼以 `Animator<ShapeLayout>` 同時做外框、黑底與圓角的動畫（同一條曲線、同一段時間），
+//! 所以 Preview 歌詞條出現／消失、展開／收合時黑底與圓角都連續變化、不跳。
 //!
 //! 規則：
-//! - 目標改變（例如 Preview → Expanded，或 Preview 的模組額外高度改變）時，新動畫從**目前畫出的大小**
+//! - 目標改變（例如 Preview → Expanded，或 Preview 的模組額外高度改變）時，新動畫從**目前畫出的值**
 //!   開始、重新計 0.28 秒，所以動畫中途反向不會跳。目標不變則不重新起算。
 //! - 動畫結束（經過 ≥ 0.28 秒）時回傳的就是目標本身（不是浮點誤差後的近似值）。
 //! - 時間容錯同 [`super::hover::HoverMachine`]：`now` 比看過的最大值早，或為 NaN／無限大，視為沒有時間流逝。
-//! - 含 NaN／無限大的目標被忽略（沿用原本的目標）；初始值不是有限數時當成 0×0。
+//! - 含 NaN／無限大的目標被忽略（沿用原本的目標）；初始值不是有限數時當成預設值（0）。
 
-use super::geometry::{ease_in_out, lerp_size, Size, ANIMATION_SECONDS};
+use super::geometry::{ease_in_out, lerp_size, ShapeLayout, Size, ANIMATION_SECONDS};
 
-fn is_finite(s: Size) -> bool {
-    s.w.is_finite() && s.h.is_finite()
+/// 可以做動畫的值：線性插值與「是否全為有限數」。
+pub trait Animatable: Copy + PartialEq + Default {
+    /// `t = 0` 為 `from`、`t = 1` 為 `to`。
+    fn lerp(from: Self, to: Self, t: f64) -> Self;
+    /// 所有欄位都是有限數。
+    fn is_finite(&self) -> bool;
 }
 
-/// 畫出來的大小的動畫器。
+impl Animatable for Size {
+    fn lerp(from: Self, to: Self, t: f64) -> Self {
+        lerp_size(from, to, t)
+    }
+    fn is_finite(&self) -> bool {
+        self.w.is_finite() && self.h.is_finite()
+    }
+}
+
+impl Animatable for ShapeLayout {
+    fn lerp(from: Self, to: Self, t: f64) -> Self {
+        ShapeLayout {
+            outer: lerp_size(from.outer, to.outer, t),
+            fill: lerp_size(from.fill, to.fill, t),
+            radius: from.radius + (to.radius - from.radius) * t,
+        }
+    }
+    fn is_finite(&self) -> bool {
+        self.outer.is_finite() && self.fill.is_finite() && self.radius.is_finite()
+    }
+}
+
+/// 畫出來的值（大小或整個外形）的動畫器。
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Animator {
-    /// 動畫起點（上次改目標時畫出的大小）。
-    from: Size,
+pub struct Animator<T: Animatable = Size> {
+    /// 動畫起點（上次改目標時畫出的值）。
+    from: T,
     /// 目前的目標。
-    target: Size,
-    /// 上次改目標的時間；`None` = 尚未有任何時間（第一次 `update` 前）或已靜止。
+    target: T,
+    /// 上次改目標的時間；`None` = 已靜止。
     start: Option<f64>,
-    /// 上次 `update` 算出的大小。
-    current: Size,
+    /// 上次 `update` 算出的值。
+    current: T,
     /// 看過的最大有限 `now`。
     last_now: Option<f64>,
 }
 
-impl Animator {
-    /// 以 `initial` 為已靜止的大小建立（沒有進行中的動畫）。
-    pub fn new(initial: Size) -> Self {
-        let initial = if is_finite(initial) {
+impl<T: Animatable> Animator<T> {
+    /// 以 `initial` 為已靜止的值建立（沒有進行中的動畫）。
+    pub fn new(initial: T) -> Self {
+        let initial = if initial.is_finite() {
             initial
         } else {
-            Size::default()
+            T::default()
         };
         Self {
             from: initial,
@@ -59,8 +86,8 @@ impl Animator {
         effective
     }
 
-    /// 某時刻、依目前起點與目標應畫出的大小。
-    fn sample(&self, now: f64) -> Size {
+    /// 某時刻、依目前起點與目標應畫出的值。
+    fn sample(&self, now: f64) -> T {
         let Some(start) = self.start else {
             return self.target;
         };
@@ -68,15 +95,15 @@ impl Animator {
         if t >= 1.0 {
             self.target
         } else {
-            lerp_size(self.from, self.target, ease_in_out(t))
+            T::lerp(self.from, self.target, ease_in_out(t))
         }
     }
 
-    /// 在 `now`（秒）取目前應畫出的大小。`target` 和上次不同時，從這一刻畫出的大小重新起算動畫。
-    pub fn update(&mut self, now: f64, target: Size) -> Size {
+    /// 在 `now`（秒）取目前應畫出的值。`target` 和上次不同時，從這一刻畫出的值重新起算動畫。
+    pub fn update(&mut self, now: f64, target: T) -> T {
         let now = self.effective_now(now);
-        if is_finite(target) && target != self.target {
-            // 先以舊目標算出此刻畫出的大小，當作新動畫的起點（不跳）。
+        if target.is_finite() && target != self.target {
+            // 先以舊目標算出此刻畫出的值，當作新動畫的起點（不跳）。
             self.from = self.sample(now);
             self.target = target;
             self.start = Some(now);
@@ -89,22 +116,27 @@ impl Animator {
         self.current
     }
 
-    /// 上次 `update` 算出的大小。
-    pub fn current(&self) -> Size {
+    /// 上次 `update` 算出的值。
+    pub fn current(&self) -> T {
         self.current
     }
 
-    /// 動畫是否還在進行（上次算出的大小還不是目標）。驅動端據此決定要不要繼續逐格重繪。
+    /// 目前的目標。
+    pub fn target(&self) -> T {
+        self.target
+    }
+
+    /// 動畫是否還在進行（上次算出的值還不是目標）。驅動端據此決定要不要繼續逐格重繪。
     pub fn is_animating(&self) -> bool {
         self.current != self.target
     }
 
-    /// 不做動畫，直接停在 `size`（換螢幕時用）。不是有限數時忽略。
-    pub fn snap_to(&mut self, size: Size) {
-        if is_finite(size) {
-            self.from = size;
-            self.target = size;
-            self.current = size;
+    /// 不做動畫，直接停在 `value`（換螢幕、隱藏時用）。不是有限數時忽略。
+    pub fn snap_to(&mut self, value: T) {
+        if value.is_finite() {
+            self.from = value;
+            self.target = value;
+            self.current = value;
             self.start = None;
         }
     }
@@ -272,5 +304,87 @@ mod tests {
             a.update(0.2, Size { w: 360.0, h: 32.0 }),
             Size { w: 360.0, h: 32.0 }
         );
+    }
+
+    mod shape {
+        use super::super::super::geometry::{shape_layout, NotchGeometry, ShellMode};
+        use super::*;
+
+        fn g() -> NotchGeometry {
+            NotchGeometry {
+                notch: Size { w: 185.0, h: 32.0 },
+                center_x: 756.0,
+                top_y: 0.0,
+            }
+        }
+
+        /// 以 120 fps 跑完一段動畫，回傳每格的外形。
+        fn run(a: &mut Animator<ShapeLayout>, t0: f64, target: ShapeLayout) -> Vec<ShapeLayout> {
+            (0..=40)
+                .map(|i| a.update(t0 + i as f64 / 120.0, target))
+                .collect()
+        }
+
+        fn assert_continuous(frames: &[ShapeLayout]) {
+            // ease-in-out 斜率上限約 1.72：每 1/120 秒最多走全程的 1.72 / (120 * 0.28) ≈ 5.2%。
+            let k = 1.75 / (120.0 * ANIMATION_SECONDS);
+            for w in frames.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                assert!((a.outer.h - b.outer.h).abs() <= 180.0 * k, "{a:?} -> {b:?}");
+                assert!((a.fill.h - b.fill.h).abs() <= 180.0 * k, "{a:?} -> {b:?}");
+                assert!((a.radius - b.radius).abs() <= 24.0 * k, "{a:?} -> {b:?}");
+                assert!(b.fill.h <= b.outer.h + 1e-9);
+            }
+        }
+
+        #[test]
+        fn strip_appearing_in_preview_keeps_the_black_band_and_fades_the_radius_to_square() {
+            let plain = shape_layout(ShellMode::Preview, &g(), 0.0);
+            let strip = shape_layout(ShellMode::Preview, &g(), 24.0);
+            let mut a = Animator::new(plain);
+            let frames = run(&mut a, 1.0, strip);
+            assert_continuous(&frames);
+            // 黑底一直停在瀏海高度，不跳；外框 32 → 56；圓角 10 → 0。
+            assert!(frames.iter().all(|f| f.fill.h == 32.0));
+            assert_eq!(frames[0], plain);
+            assert_eq!(*frames.last().unwrap(), strip);
+            // 消失時反過來。
+            let frames = run(&mut a, 3.0, plain);
+            assert_continuous(&frames);
+            assert_eq!(*frames.last().unwrap(), plain);
+        }
+
+        #[test]
+        fn expanding_and_collapsing_with_a_strip_animate_the_black_band_continuously() {
+            let strip = shape_layout(ShellMode::Preview, &g(), 24.0);
+            let expanded = shape_layout(ShellMode::Expanded, &g(), 24.0);
+            let mut a = Animator::new(strip);
+            let frames = run(&mut a, 1.0, expanded);
+            assert_continuous(&frames);
+            assert_eq!(frames[0], strip);
+            assert_eq!(*frames.last().unwrap(), expanded);
+            let frames = run(&mut a, 2.0, strip);
+            assert_continuous(&frames);
+            assert_eq!(*frames.last().unwrap(), strip);
+        }
+
+        #[test]
+        fn retargeting_mid_way_between_all_shapes_never_jumps() {
+            let shapes = [
+                shape_layout(ShellMode::Preview, &g(), 0.0),
+                shape_layout(ShellMode::Preview, &g(), 24.0),
+                shape_layout(ShellMode::Expanded, &g(), 0.0),
+                shape_layout(ShellMode::Preview, &g(), 28.0),
+            ];
+            let mut a = Animator::new(shapes[0]);
+            let mut frames = vec![a.current()];
+            let mut now = 0.0;
+            for i in 0..400 {
+                now += 1.0 / 120.0;
+                // 每 7 格換一次目標（遠短於 0.28 秒）。
+                frames.push(a.update(now, shapes[(i / 7) % shapes.len()]));
+            }
+            assert_continuous(&frames);
+        }
     }
 }

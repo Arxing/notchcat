@@ -45,13 +45,15 @@ pub struct TickState {
     pub mouse_near: bool,
     /// `HoverOutput::next_deadline`：待收合的期限。
     pub deadline: Option<f64>,
+    /// 面板目前可見。隱藏時一律算閒置（不畫、不展開，游標在附近也沒有意義）。
+    pub visible: bool,
 }
 
 /// 下一拍要等多久（秒）。動畫中、游標在附近或待收合時用 [`FAST_TICK`]，否則 [`IDLE_TICK`]；
 /// 有期限時不晚於期限醒來（HoverMachine 需要在 `next_deadline` 準時再被呼叫一次）。
 /// 結果在 `MIN_TICK..=IDLE_TICK` 之間；NaN 的時間或期限當作沒有期限。
 pub fn next_tick(s: TickState) -> f64 {
-    let base = if s.animating || s.mouse_near || s.deadline.is_some() {
+    let base = if s.visible && (s.animating || s.mouse_near || s.deadline.is_some()) {
         FAST_TICK
     } else {
         IDLE_TICK
@@ -133,7 +135,24 @@ mod tests {
             animating,
             mouse_near,
             deadline,
+            visible: true,
         }
+    }
+
+    #[test]
+    fn a_hidden_panel_ticks_at_the_idle_rate_even_if_animating_or_near() {
+        let hidden = |s: TickState| {
+            next_tick(TickState {
+                visible: false,
+                ..s
+            })
+        };
+        assert_eq!(hidden(state(true, true, None)), IDLE_TICK);
+        assert_eq!(hidden(state(true, false, None)), IDLE_TICK);
+        assert_eq!(hidden(state(false, true, None)), IDLE_TICK);
+        // 期限仍準時（HoverMachine 隱藏時不會給期限，但驅動端不該因此漏掉）。
+        let got = hidden(state(false, false, Some(10.005)));
+        assert!((got - 0.005).abs() < 1e-12);
     }
 
     #[test]

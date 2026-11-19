@@ -91,7 +91,7 @@ System Events 沒有輔助使用權限，無法以 UI scripting 點擊，以下�
 ```sh
 cd rust
 cargo run -p musicat-shell --example shell_demo            # 60 秒後自動結束（MUSICAT_DEMO_SECS 可改）
-# MUSICAT_DEMO_EXTRA=24：Preview 加 24 點額外高度；MUSICAT_DEMO_BLINK=1：第 3 秒隱藏、第 4 秒再顯示
+# 每 6 秒切換一次 24 點高的佔位歌詞條（MUSICAT_DEMO_TOGGLE_SECS、MUSICAT_DEMO_EXTRA 可改）；MUSICAT_DEMO_BLINK=1：第 3 秒隱藏、第 4 秒再顯示
 # MUSICAT_SHELL_TRACE=1：每畫一格印 shell-frame（高度、圓角），以及待收合／轉移時的游標位置
 ```
 
@@ -116,3 +116,7 @@ Task 23 已自動驗證（2026-11-18，macOS 15.7 arm64，內建 1512 × 982 有
   hover 面板位置，記錄面板是否出現、是否會展開。
 - [ ] **內容裁切。** GPUI 0.2.2 只能矩形裁切：佔位內容刻意不碰下方兩角。Task 24 的真實內容上線後，看下方圓角外是否露出內容。
 - [ ] **隱藏／再顯示。** `MUSICAT_DEMO_BLINK=1` 時第 3 秒面板消失（系統會有很短的淡出）、第 4 秒回來，位置大小不變。
+- [ ] **Preview 歌詞條的黑底與半透明。** 示範每 6 秒切換歌詞條（stdout 印 `extra=24`／`extra=0`）。出現時：瀏海高度那一段仍是純黑、
+  下方兩角從圓角平順變成直角，下面長出一條看得到桌面／視窗透出來的 0.6 黑色帶；消失時反過來，黑底高度不跳。
+  展開與收合（有歌詞條時）黑底從瀏海高度平順長到 180、圓角 0 → 24，反之亦然。
+- [ ] **drop 即關閉。** 示範結束前 drop `ShellWindow`：面板立刻消失，stdout `poll after drop: ... stopped=true`（自動檢查，記錄即可）。

@@ -177,29 +177,50 @@ pub fn lerp_size(from: Size, to: Size, t: f64) -> Size {
     }
 }
 
-/// 畫出的高度為 `drawn_h` 時下方圓角的半徑：依高度在 Preview → Expanded 之間的位置
-/// （`(drawn_h - preview_h) / (expanded_h - preview_h)`，夾到 `0..=1`），把半徑從
-/// [`PREVIEW_CORNER_RADIUS`] 線性插值到 [`EXPANDED_CORNER_RADIUS`]。
+/// 外形某一刻的樣子：外框（內容裁切範圍）、黑底（從外框左上角開始、同寬）與黑底下方兩角的圓角半徑。
 ///
-/// 高度本身已是 ease-in-out 插值的結果，所以半徑跟著同一條曲線、同一段時間變化，
-/// 動畫中途改目標時也從目前畫出的樣子連續接上。`preview_h` 與 `expanded_h` 是**目前**兩個模式的高度
-/// （Preview 含模組額外高度）。兩者相等（無從插值）或 `drawn_h` 為 NaN 時回傳 `mode`（目標模式）的半徑。
-pub fn corner_radius_for_height(
-    drawn_h: f64,
-    preview_h: f64,
-    expanded_h: f64,
-    mode: ShellMode,
-) -> f64 {
-    let span = expanded_h - preview_h;
-    let progress = (drawn_h - preview_h) / span;
-    if !progress.is_finite() {
-        return match mode {
-            ShellMode::Preview => PREVIEW_CORNER_RADIUS,
-            ShellMode::Expanded => EXPANDED_CORNER_RADIUS,
-        };
+/// 外框與黑底分開，是為了 Preview 的模組額外高度（歌詞條）：Swift `NotchContentView` 在
+/// `mode == .preview && extra > 0` 時只在瀏海高度的範圍塗黑、下方兩角直角（半徑 0），額外高度那一段透明，
+/// 由模組自己畫半透明背景。
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct ShapeLayout {
+    /// 外框：頂端置中於容器、內容槽在這個範圍內被裁切。
+    pub outer: Size,
+    /// 黑底：與外框同寬、頂端對齊；高度不超過外框。
+    pub fill: Size,
+    /// 黑底下方兩角的圓角半徑（上方兩角恆為直角）。
+    pub radius: f64,
+}
+
+/// 該模式（含 Preview 額外高度）靜止時的外形，也就是動畫的目標。
+///
+/// - Preview、額外高度（夾過）為 0：整個外框塗黑，下方圓角 [`PREVIEW_CORNER_RADIUS`]。
+/// - Preview、額外高度 > 0：只塗瀏海高度那一段（下方直角，半徑 0），以下透明、交給模組畫。
+/// - Expanded：整個外框塗黑，下方圓角 [`EXPANDED_CORNER_RADIUS`]（額外高度無關）。
+///
+/// 模式或額外高度改變時由 `Animator<ShapeLayout>` 在兩個目標之間插值，所以黑底高度與圓角都連續變化。
+pub fn shape_layout(mode: ShellMode, g: &NotchGeometry, preview_extra: f64) -> ShapeLayout {
+    let outer = mode_size(mode, g, preview_extra);
+    match mode {
+        ShellMode::Preview if clamped_preview_extra(preview_extra) > 0.0 => ShapeLayout {
+            outer,
+            fill: Size {
+                w: outer.w,
+                h: non_negative(g.notch.h),
+            },
+            radius: 0.0,
+        },
+        ShellMode::Preview => ShapeLayout {
+            outer,
+            fill: outer,
+            radius: PREVIEW_CORNER_RADIUS,
+        },
+        ShellMode::Expanded => ShapeLayout {
+            outer,
+            fill: outer,
+            radius: EXPANDED_CORNER_RADIUS,
+        },
     }
-    let p = progress.clamp(0.0, 1.0);
-    PREVIEW_CORNER_RADIUS + (EXPANDED_CORNER_RADIUS - PREVIEW_CORNER_RADIUS) * p
 }
 
 #[cfg(test)]
@@ -483,46 +504,76 @@ mod tests {
         assert_eq!(lerp_size(b, a, 0.5), Size { w: 200.0, h: 106.0 });
     }
 
-    #[test]
-    fn corner_radius_follows_the_height_between_preview_and_expanded() {
-        let r = |h| corner_radius_for_height(h, 32.0, 180.0, ShellMode::Expanded);
-        assert_eq!(r(32.0), PREVIEW_CORNER_RADIUS);
-        assert_eq!(r(180.0), EXPANDED_CORNER_RADIUS);
-        assert!((r(106.0) - 17.0).abs() < 1e-12);
-        // 超出範圍夾到兩端（例如 Preview 額外高度改變時的暫態）。
-        assert_eq!(r(10.0), PREVIEW_CORNER_RADIUS);
-        assert_eq!(r(500.0), EXPANDED_CORNER_RADIUS);
-        // Preview 有額外高度：高度停在 56 也是 Preview 的半徑。
-        assert_eq!(
-            corner_radius_for_height(56.0, 56.0, 180.0, ShellMode::Preview),
-            PREVIEW_CORNER_RADIUS
-        );
+    fn g185() -> NotchGeometry {
+        geometry_with(185.0, 32.0)
     }
 
     #[test]
-    fn corner_radius_handles_degenerate_heights() {
-        // 兩個模式一樣高：無從插值，直接用目標模式的半徑。
-        assert_eq!(
-            corner_radius_for_height(180.0, 180.0, 180.0, ShellMode::Preview),
-            PREVIEW_CORNER_RADIUS
-        );
-        assert_eq!(
-            corner_radius_for_height(180.0, 180.0, 180.0, ShellMode::Expanded),
-            EXPANDED_CORNER_RADIUS
-        );
-        // 很高的瀏海：Preview 比 Expanded 高，插值方向反過來仍正確。
-        assert_eq!(
-            corner_radius_for_height(428.0, 428.0, 180.0, ShellMode::Preview),
-            PREVIEW_CORNER_RADIUS
-        );
-        assert_eq!(
-            corner_radius_for_height(180.0, 428.0, 180.0, ShellMode::Expanded),
-            EXPANDED_CORNER_RADIUS
-        );
-        // NaN 高度：用目標模式的半徑，不 panic。
-        assert_eq!(
-            corner_radius_for_height(f64::NAN, 32.0, 180.0, ShellMode::Expanded),
-            EXPANDED_CORNER_RADIUS
-        );
+    fn shape_layout_preview_without_extra_is_fully_black_with_radius_10() {
+        let s = shape_layout(ShellMode::Preview, &g185(), 0.0);
+        assert_eq!(s.outer, Size { w: 345.0, h: 32.0 });
+        assert_eq!(s.fill, s.outer);
+        assert_eq!(s.radius, PREVIEW_CORNER_RADIUS);
+    }
+
+    #[test]
+    fn shape_layout_preview_with_extra_fills_only_the_notch_band_with_square_corners() {
+        let s = shape_layout(ShellMode::Preview, &g185(), 24.0);
+        assert_eq!(s.outer, Size { w: 345.0, h: 56.0 });
+        assert_eq!(s.fill, Size { w: 345.0, h: 32.0 });
+        assert_eq!(s.radius, 0.0);
+        // 額外高度被夾到 28。
+        let s = shape_layout(ShellMode::Preview, &g185(), 99.0);
+        assert_eq!(s.outer.h, 60.0);
+        assert_eq!(s.fill.h, 32.0);
+        assert_eq!(s.radius, 0.0);
+    }
+
+    #[test]
+    fn shape_layout_treats_negative_and_nan_extra_as_no_strip() {
+        for extra in [-5.0, f64::NAN, f64::NEG_INFINITY, 0.0] {
+            let s = shape_layout(ShellMode::Preview, &g185(), extra);
+            assert_eq!(
+                s,
+                shape_layout(ShellMode::Preview, &g185(), 0.0),
+                "extra={extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn shape_layout_expanded_is_fully_black_with_radius_24_regardless_of_extra() {
+        for extra in [0.0, 24.0, f64::NAN] {
+            let s = shape_layout(ShellMode::Expanded, &g185(), extra);
+            assert_eq!(s.outer, Size { w: 345.0, h: 180.0 });
+            assert_eq!(s.fill, s.outer);
+            assert_eq!(s.radius, EXPANDED_CORNER_RADIUS);
+        }
+    }
+
+    #[test]
+    fn shape_layout_outer_matches_mode_size_and_fill_never_exceeds_it() {
+        for g in [
+            g185(),
+            geometry(),
+            geometry_with(0.0, 0.0),
+            geometry_with(200.0, 400.0),
+        ] {
+            for mode in [ShellMode::Preview, ShellMode::Expanded] {
+                for extra in [0.0, 10.0, 28.0] {
+                    let s = shape_layout(mode, &g, extra);
+                    assert_eq!(s.outer, mode_size(mode, &g, extra));
+                    assert_eq!(s.fill.w, s.outer.w);
+                    assert!(s.fill.h <= s.outer.h);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shape_layout_zero_height_notch_with_extra_has_an_empty_black_band() {
+        let s = shape_layout(ShellMode::Preview, &geometry_with(200.0, 0.0), 24.0);
+        assert_eq!(s.outer.h, 24.0);
+        assert_eq!(s.fill.h, 0.0);
     }
 }

@@ -11,8 +11,8 @@ pub mod screens;
 
 pub use animation::Animator;
 pub use geometry::{
-    container_frame, container_size, corner_radius_for_height, ease_in_out, lerp_size, local_rect,
-    mode_size, NotchGeometry, Point, Rect, ShellMode, Size, ANIMATION_SECONDS,
+    container_frame, container_size, ease_in_out, lerp_size, local_rect, mode_size, shape_layout,
+    NotchGeometry, Point, Rect, ShapeLayout, ShellMode, Size, ANIMATION_SECONDS,
     EXPANDED_CORNER_RADIUS, EXPANDED_HEIGHT, PREVIEW_CORNER_RADIUS, WIDTH_PADDING,
 };
 pub use hover::{HoverInput, HoverMachine, HoverOutput, LEAVE_DELAY};

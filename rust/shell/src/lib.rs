@@ -42,11 +42,15 @@ pub enum ShellEvent {
 ///   （`ModuleManager::preview_extra_height()`）。外殼每一拍（16–40 ms）讀一次並夾到 `0..=28`；
 ///   改變時 Preview 的高度與 hover 範圍跟著以同樣的動畫改變。
 /// - [`on_expand`](Self::on_expand)：每次**新**展開呼叫一次（`HoverOutput::just_expanded`）。
-///   app 在這裡呼叫 `ModuleManager::reset_selection_to_active()`（spec 5.3）。在外殼的更新中途呼叫，
-///   不要在裡面同步呼叫 [`ShellWindow`] 的方法以外的 GPUI 重入操作。
-/// - 裁切的限制（GPUI 0.2.2）：`overflow_hidden` 只能以**矩形**裁切，不會依下方圓角裁切。內容若畫進
-///   外形下方兩角（Preview 10 點、Expanded 24 點的圓角範圍）會露出圓角外。內容請在下方兩角留白，
-///   或自己用圓角背景（Swift 版本來就不裁切內容，所以這與 Swift 一致）。
+///   app 在這裡呼叫 `ModuleManager::reset_selection_to_active()`（spec 5.3）。在外殼的輪詢更新中途呼叫，
+///   沒有 GPUI context；可以呼叫 [`ShellWindow`] 的方法（它們只設旗標）。
+/// - Preview 有額外高度（> 0）時，外殼的黑底只蓋瀏海高度（下方直角），額外高度那一段**透明**：
+///   內容自己畫那一段的背景（例如歌詞條的 0.6 不透明黑底，同 Swift `NotchContentView`）。
+///   額外高度出現／消失時，外框、黑底與圓角一起以 0.28 秒動畫連續變化。
+/// - 裁切的限制（GPUI 0.2.2）：`overflow_hidden` 只能以**矩形**裁切，不會依下方圓角裁切。
+///   **Expanded 內容在下方兩角至少留 24 點（`EXPANDED_CORNER_RADIUS`）的空白**（Preview 為 10 點），
+///   否則會露出圓角外。Swift 版本來就不裁切內容，所以這與 Swift 一致。
+/// - 主執行緒以外的重繪：見 [`ShellWindow::refresh`] 的說明（建議用內容自己的 entity）。
 pub trait ShellContent: 'static {
     /// Preview（收合）時的內容。
     fn preview(&self, window: &mut Window, cx: &mut App) -> AnyElement;
