@@ -2,5 +2,6 @@
 //!
 //! 這裡沒有任何 OS 專屬程式碼，Windows 也能編譯。
 
+pub mod config;
 pub mod http_ureq;
 pub mod real_runtime;

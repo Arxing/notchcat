@@ -3322,6 +3322,7 @@ dependencies = [
  "futures-channel",
  "futures-executor",
  "musicat-core",
+ "toml 0.8.23",
  "ureq",
 ]
 

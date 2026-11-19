@@ -19,7 +19,12 @@ musicat-core = { path = "../core" }
 ureq = "3"
 # 只用 oneshot：把背景執行緒的結果交回 future，不綁任何執行器。
 futures-channel = { version = "0.3", default-features = false, features = ["std"] }
+# 設定檔（TOML）。只用 parse（讀）與 display（寫字串值時的跳脫）；不用 serde 衍生，欄位以寬鬆的手動擷取讀出，
+# 好讓單一欄位的型別錯誤只影響該欄位。純 Rust，MIT OR Apache-2.0。
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
 
 [dev-dependencies]
+# FakeHttp／FakeClock（switchable 的測試用）。
+musicat-core = { path = "../core", features = ["testing"] }
 # 只給測試與範例的 block_on 用；app 的函式庫本體不依賴任何執行器。
 futures-executor = { version = "0.3", default-features = false, features = ["std"] }
