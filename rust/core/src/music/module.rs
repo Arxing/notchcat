@@ -108,6 +108,14 @@ impl MusicModuleState {
         }
     }
 
+    /// 歌詞條目前是否展開（共用旗標的現值）。Expanded 的折疊開關用它畫自己的狀態。
+    ///
+    /// 注意：只改旗標而 `is_active`／額外高度沒變時（例如暫停中折疊），訂閱者**不會**被通知；
+    /// 畫面在呼叫 [`Self::set_strip_visible`] 之後要自己重繪。
+    pub fn strip_visible(&self) -> bool {
+        self.inner.strip_visible.load(Ordering::SeqCst)
+    }
+
     /// 歌詞條展開或收起：寫入共用的旗標並立刻更新額外高度。
     /// 別處直接改旗標不會通知；要讓高度立即跟上請走這個方法。
     pub fn set_strip_visible(&self, visible: bool) {
@@ -324,6 +332,17 @@ mod tests {
         fx.play(true);
         assert_eq!(fx.last_height(), Some(0.0));
         assert_eq!(fx.module.preview_extra_height(), 0.0);
+    }
+
+    #[test]
+    fn strip_visible_reads_the_shared_flag() {
+        let fx = Fixture::new();
+        assert!(fx.module.strip_visible());
+        fx.module.set_strip_visible(false);
+        assert!(!fx.module.strip_visible());
+        // 別處直接改共用旗標（例如設定檔）也讀得到，雖然不會通知。
+        fx.strip_visible.store(true, Ordering::SeqCst);
+        assert!(fx.module.strip_visible());
     }
 
     #[test]
