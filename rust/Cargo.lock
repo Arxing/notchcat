@@ -3321,7 +3321,11 @@ version = "0.1.0"
 dependencies = [
  "futures-channel",
  "futures-executor",
+ "futures-util",
+ "gpui",
  "musicat-core",
+ "musicat-platform-macos",
+ "musicat-shell",
  "toml 0.8.23",
  "ureq",
 ]

@@ -669,6 +669,11 @@ impl ConfigStore {
         &self.path
     }
 
+    /// 設定檔當初載入的結果（日誌用）。
+    pub fn load_source(&self) -> LoadSource {
+        self.source
+    }
+
     /// 套用變更並存檔（**一律存檔**，即使沒有任何值改變）。存檔失敗回 `Err`，但記憶體中的變更保留
     /// （程式照常用新設定，只是沒存下來）。
     pub fn update(&mut self, change: impl FnOnce(&mut Config)) -> io::Result<()> {

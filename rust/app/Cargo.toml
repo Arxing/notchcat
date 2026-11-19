@@ -28,3 +28,13 @@ toml = { version = "0.8", default-features = false, features = ["parse", "displa
 musicat-core = { path = "../core", features = ["testing"] }
 # 只給測試與範例的 block_on 用；app 的函式庫本體不依賴任何執行器。
 futures-executor = { version = "0.3", default-features = false, features = ["std"] }
+
+# 可執行檔 `musicat` 的組裝（src/main.rs）只在 macOS：GPUI 外殼、macOS 平台層與 GPUI 本身。
+# 函式庫（src/lib.rs）不依賴它們，所以在其他平台仍可編譯與測試。gpui 與 shell 同樣鎖死在 =0.2.2 並開 runtime_shaders
+# （理由見 rust/shell/Cargo.toml）。futures-util 只用 StreamExt（在主執行緒的前景工作裡等選單事件 channel）；
+# 以上都已在 Cargo.lock，授權皆為 MIT 或 MIT OR Apache-2.0。
+[target.'cfg(target_os = "macos")'.dependencies]
+musicat-shell = { path = "../shell" }
+musicat-platform-macos = { path = "../platform-macos" }
+gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
