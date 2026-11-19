@@ -9,7 +9,10 @@
 //! |---|---|
 //! | macOS | `$HOME/Library/Application Support/MusiCat/musicat.toml` |
 //! | Windows | `%APPDATA%\MusiCat\musicat.toml` |
-//! | 其他 | `$XDG_CONFIG_HOME/musicat/musicat.toml`（需為絕對路徑），否則 `$HOME/.config/musicat/musicat.toml` |
+//! | 其他 | `$XDG_CONFIG_HOME/musicat/musicat.toml`，否則 `$HOME/.config/musicat/musicat.toml` |
+//!
+//! 環境變數是空字串或**相對路徑**時視為沒有設定（`HOME`、`APPDATA`、`XDG_CONFIG_HOME` 一律如此）：
+//! 相對路徑會讓設定檔跟著工作目錄跑。
 //!
 //! # 格式
 //!
@@ -50,7 +53,12 @@
 //!   新檔的暫存檔先寫好才備份，所以寫入失敗時原檔原封不動。
 //! - **有效的檔案**存檔時會被重寫成標準格式：**註解與未知的鍵會遺失**（這一層不保留它們），
 //!   也不會有 `.bak`。想保留手寫註解的人請把設定放在版本控制裡。
+//! - 備份那一步一成功就記下（[`ConfigStore`]），即使同一次存檔的最後一步失敗：之後的重試不會再備份一次，
+//!   所以 `.bak` 裡使用者的原檔不會被換掉。
 //! - 路徑是資料夾 → 存檔回 `Err`，什麼都不動。
+//! - **設定檔是符號連結時，存檔會把連結換成一般檔案**（改名覆蓋取代的是連結本身，連結指向的檔案不會被更新）。
+//!   想用連結管理設定檔的人請連結資料夾而不是檔案。
+//! - [`ConfigStore::apply_menu_event`] 只在設定真的改變時存檔；[`ConfigStore::update`] 一律存檔。
 
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
@@ -58,7 +66,10 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use musicat_core::menu::MenuEvent;
 use toml::{Table, Value};
+
+use crate::menu::{apply_event, Effect};
 
 /// 設定檔大小上限；更大的檔案視為損毀（不讀進記憶體）。
 pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -190,7 +201,8 @@ impl Os {
 /// 設定檔路徑（對 `os` 與環境變數查詢是純函式，所以每個平台都能在任何主機上測）。
 /// 需要的環境變數缺少或為空字串 → `None`。
 pub fn config_path_from(os: Os, env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
-    let var = |name: &str| env(name).filter(|v| !v.is_empty());
+    // 空字串與相對路徑一律視為沒有設定（相對路徑會讓設定檔跟著工作目錄跑）。
+    let var = |name: &str| env(name).filter(|v| is_absolute_for(os, v));
     match os {
         Os::MacOs => Some(
             PathBuf::from(var("HOME")?)
@@ -205,13 +217,29 @@ pub fn config_path_from(os: Os, env: &dyn Fn(&str) -> Option<String>) -> Option<
                 .join("musicat.toml"),
         ),
         Os::Other => {
-            // XDG 規範：相對路徑無效，忽略。
-            let base = match var("XDG_CONFIG_HOME").map(PathBuf::from) {
-                Some(p) if p.is_absolute() => p,
-                _ => PathBuf::from(var("HOME")?).join(".config"),
+            // XDG 規範：相對路徑無效，忽略（`var` 已濾掉）。
+            let base = match var("XDG_CONFIG_HOME") {
+                Some(p) => PathBuf::from(p),
+                None => PathBuf::from(var("HOME")?).join(".config"),
             };
             Some(base.join("musicat").join("musicat.toml"))
         }
+    }
+}
+
+/// `value` 在 `os` 上是不是絕對路徑。純字串判斷（不用 `Path::is_absolute`，那只認得編譯主機的規則），
+/// 所以每個平台的規則都能在任何主機上測。Windows：`X:\` 或 `X:/` 開頭，或 UNC（`\\`）；其他：`/` 開頭。
+fn is_absolute_for(os: Os, value: &str) -> bool {
+    match os {
+        Os::Windows => {
+            let b = value.as_bytes();
+            (b.len() >= 3
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && matches!(b[2], b'\\' | b'/'))
+                || value.starts_with(r"\\")
+        }
+        Os::MacOs | Os::Other => value.starts_with('/'),
     }
 }
 
@@ -521,36 +549,62 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> io::Result<PathBuf> {
 /// 原子存檔（規則見模組說明）。`load_source` 是這份設定當初載入的結果：
 /// `Broken` 時，原檔會先被改名為 `.bak`。
 pub fn save(path: &Path, cfg: &Config, load_source: LoadSource) -> io::Result<()> {
-    if path.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "設定檔路徑是資料夾",
-        ));
-    }
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent)?;
-    }
-
-    // 1. 先把新內容完整寫進同目錄的暫存檔：失敗時原檔原封不動。
-    let tmp = write_temp(path, &serialize(cfg))?;
-
-    // 2. 損毀的原檔先備份（蓋掉更舊的 .bak）。備份失敗就放棄，不能毀掉使用者的檔案。
-    if load_source == LoadSource::Broken {
-        let backup =
-            sibling_with_suffix(path, ".bak").and_then(|bak| match fs::rename(path, bak) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()), // 載入後被使用者刪掉了
-                other => other,
-            });
-        if let Err(e) = backup {
-            let _ = fs::remove_file(&tmp);
-            return Err(e);
-        }
-    }
-
-    // 3. 改名覆蓋。
-    fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = fs::remove_file(&tmp);
+    save_with(path, cfg, load_source == LoadSource::Broken, &|from, to| {
+        fs::rename(from, to)
     })
+    .result
+}
+
+/// [`save_with`] 的結果：`backed_up` 在備份那一步成功時就為真，**不論之後的步驟是否失敗**。
+struct SaveOutcome {
+    result: io::Result<()>,
+    backed_up: bool,
+}
+
+/// `save` 的本體；`rename` 可注入（測試用來讓最後一步失敗）。
+fn save_with(
+    path: &Path,
+    cfg: &Config,
+    back_up_first: bool,
+    rename: &dyn Fn(&Path, &Path) -> io::Result<()>,
+) -> SaveOutcome {
+    let mut backed_up = false;
+    let result = (|| {
+        if path.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "設定檔路徑是資料夾",
+            ));
+        }
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            fs::create_dir_all(parent)?;
+        }
+
+        // 1. 先把新內容完整寫進同目錄的暫存檔：失敗時原檔原封不動。
+        let tmp = write_temp(path, &serialize(cfg))?;
+
+        // 2. 損毀的原檔先備份（蓋掉更舊的 .bak）。備份失敗就放棄，不能毀掉使用者的檔案。
+        if back_up_first {
+            let backup =
+                sibling_with_suffix(path, ".bak").and_then(|bak| match rename(path, &bak) {
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()), // 載入後被使用者刪掉了
+                    other => other,
+                });
+            if let Err(e) = backup {
+                let _ = fs::remove_file(&tmp);
+                return Err(e);
+            }
+            // 備份這一步已完成：即使下面的改名失敗，之後的重試也不得再備份一次
+            // （那會把 .bak 裡使用者的原檔換成別的東西）。
+            backed_up = true;
+        }
+
+        // 3. 改名覆蓋。
+        rename(&tmp, path).inspect_err(|_| {
+            let _ = fs::remove_file(&tmp);
+        })
+    })();
+    SaveOutcome { result, backed_up }
 }
 
 fn write_temp(path: &Path, contents: &str) -> io::Result<PathBuf> {
@@ -582,6 +636,8 @@ pub struct ConfigStore {
     cfg: Config,
     source: LoadSource,
     backed_up: bool,
+    /// 改名函式；只有測試會換掉它（讓存檔的最後一步失敗）。
+    rename: fn(&Path, &Path) -> io::Result<()>,
 }
 
 impl ConfigStore {
@@ -599,6 +655,7 @@ impl ConfigStore {
                 cfg: config,
                 source,
                 backed_up: false,
+                rename: |from, to| fs::rename(from, to),
             },
             warnings,
         )
@@ -612,20 +669,36 @@ impl ConfigStore {
         &self.path
     }
 
-    /// 套用變更並存檔。存檔失敗回 `Err`，但記憶體中的變更保留（程式照常用新設定，只是沒存下來）。
+    /// 套用變更並存檔（**一律存檔**，即使沒有任何值改變）。存檔失敗回 `Err`，但記憶體中的變更保留
+    /// （程式照常用新設定，只是沒存下來）。
     pub fn update(&mut self, change: impl FnOnce(&mut Config)) -> io::Result<()> {
         change(&mut self.cfg);
-        let needs_backup = self.source == LoadSource::Broken && !self.backed_up;
-        let source = if needs_backup {
-            LoadSource::Broken
-        } else {
-            LoadSource::Loaded
-        };
-        save(&self.path, &self.cfg, source)?;
-        if needs_backup {
+        self.save_now()
+    }
+
+    /// 把選單事件套用到設定（[`crate::menu::apply_event`]），**只有設定真的改變時才存檔**：
+    /// 「結束」、點已勾選的螢幕、把開關設成它目前的值都不會寫檔（損毀的原檔因此不會被無謂地備份）。
+    ///
+    /// 回傳要執行的副作用與存檔結果。存檔失敗時副作用照樣回傳、記憶體中的設定照樣更新：
+    /// 呼叫端應照常執行副作用並記錄錯誤（變更只是沒存下來）。
+    pub fn apply_menu_event(&mut self, event: MenuEvent) -> (Vec<Effect>, io::Result<()>) {
+        let mut next = self.cfg.clone();
+        let effects = apply_event(&mut next, event);
+        if next == self.cfg {
+            return (effects, Ok(()));
+        }
+        self.cfg = next;
+        (effects, self.save_now())
+    }
+
+    fn save_now(&mut self) -> io::Result<()> {
+        let back_up_first = self.source == LoadSource::Broken && !self.backed_up;
+        let rename = self.rename;
+        let outcome = save_with(&self.path, &self.cfg, back_up_first, &rename);
+        if outcome.backed_up {
             self.backed_up = true;
         }
-        Ok(())
+        outcome.result
     }
 }
 
@@ -1262,6 +1335,122 @@ mod tests {
         assert!(warnings.is_empty());
         assert!(!again.config().macos.perl_host);
         assert!(again.config().sources.lrclib, "other fields keep defaults");
+    }
+
+    // ---------------------------------------------------------------- 25b：備份旗標、相對路徑、選單事件
+
+    /// 只讓「暫存檔 → 正式檔」那一步失敗的改名函式（備份那一步照常成功）。
+    fn rename_failing_the_final_step(from: &Path, to: &Path) -> io::Result<()> {
+        if from.to_string_lossy().contains(".tmp-") {
+            Err(io::Error::other("injected failure"))
+        } else {
+            fs::rename(from, to)
+        }
+    }
+
+    #[test]
+    fn the_backup_flag_is_set_as_soon_as_the_backup_rename_succeeds() {
+        let dir = TempDir::new();
+        write(&dir.file(), "broken original = = =");
+        let (mut store, _) = ConfigStore::open(dir.file());
+        store.rename = rename_failing_the_final_step;
+
+        // 備份成功、最後一步失敗：原檔已在 .bak，沒有殘留暫存檔。
+        assert!(store.update(|c| c.lyric_strip_visible = false).is_err());
+        assert_eq!(fs::read(dir.bak()).unwrap(), b"broken original = = =");
+        assert_eq!(dir.entries(), ["musicat.toml.bak"]);
+
+        // 之後路徑上又出現一個檔案（例如使用者手動放回），重試不得再備份一次而把 .bak 裡的原檔蓋掉。
+        write(&dir.file(), "something else");
+        store.rename = |from, to| fs::rename(from, to);
+        store.update(|c| c.sources.lrclib = false).unwrap();
+        assert_eq!(
+            fs::read(dir.bak()).unwrap(),
+            b"broken original = = =",
+            "the user's broken original must survive a retry"
+        );
+        let r = load(&dir.file());
+        assert!(!r.config.lyric_strip_visible && !r.config.sources.lrclib);
+    }
+
+    #[test]
+    fn relative_home_or_appdata_is_rejected_like_xdg() {
+        for os in [Os::MacOs, Os::Other] {
+            assert_eq!(
+                config_path_from(os, &env_of(&[("HOME", "relative/home")])),
+                None,
+                "{os:?}"
+            );
+        }
+        assert_eq!(
+            config_path_from(Os::Windows, &env_of(&[("APPDATA", r"AppData\Roaming")])),
+            None
+        );
+        assert_eq!(
+            config_path_from(Os::Windows, &env_of(&[("APPDATA", r"C:relative")])),
+            None
+        );
+        // 絕對路徑照常：磁碟機代號（兩種斜線）與 UNC。
+        for appdata in [r"D:\Users\me\AppData", "D:/x", r"\\server\share\me"] {
+            assert!(
+                config_path_from(Os::Windows, &env_of(&[("APPDATA", appdata)])).is_some(),
+                "{appdata}"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_menu_event_saves_only_when_the_config_changed() {
+        use crate::menu::{Effect, TOGGLE_LRCLIB};
+        use musicat_core::menu::MenuEvent;
+        let dir = TempDir::new();
+        let (mut store, _) = ConfigStore::open(dir.file());
+
+        let (effects, saved) = store.apply_menu_event(MenuEvent::Quit);
+        assert_eq!(effects, [Effect::Quit]);
+        assert!(saved.is_ok());
+        let (effects, saved) = store.apply_menu_event(MenuEvent::Toggled(TOGGLE_LRCLIB, true));
+        assert!(effects.is_empty(), "already on: no-op");
+        assert!(saved.is_ok());
+        assert!(dir.entries().is_empty(), "no-ops and Quit never write");
+
+        let (effects, saved) = store.apply_menu_event(MenuEvent::Toggled(TOGGLE_LRCLIB, false));
+        assert_eq!(effects, [Effect::RebuildLyricsProviders]);
+        assert!(saved.is_ok());
+        assert!(!store.config().sources.lrclib);
+        assert!(!load(&dir.file()).config.sources.lrclib);
+    }
+
+    #[test]
+    fn apply_menu_event_leaves_a_broken_file_untouched_until_the_first_real_change() {
+        use crate::menu::TOGGLE_LYRIC_STRIP;
+        use musicat_core::menu::MenuEvent;
+        let dir = TempDir::new();
+        write(&dir.file(), "half written = ");
+        let (mut store, _) = ConfigStore::open(dir.file());
+        let _ = store.apply_menu_event(MenuEvent::Quit);
+        let _ = store.apply_menu_event(MenuEvent::ScreenChosen(None));
+        assert_eq!(dir.entries(), ["musicat.toml"]);
+        assert_eq!(fs::read(dir.file()).unwrap(), b"half written = ");
+
+        let (_, saved) = store.apply_menu_event(MenuEvent::Toggled(TOGGLE_LYRIC_STRIP, false));
+        saved.unwrap();
+        assert_eq!(fs::read(dir.bak()).unwrap(), b"half written = ");
+        assert!(!load(&dir.file()).config.lyric_strip_visible);
+    }
+
+    #[test]
+    fn apply_menu_event_reports_a_failed_save_but_keeps_the_effects_and_the_change() {
+        use crate::menu::{Effect, TOGGLE_PERL_HOST};
+        use musicat_core::menu::MenuEvent;
+        let dir = TempDir::new();
+        let blocker = dir.0.join("blocker");
+        write(&blocker, "file in the way");
+        let (mut store, _) = ConfigStore::open(blocker.join("musicat.toml"));
+        let (effects, saved) = store.apply_menu_event(MenuEvent::Toggled(TOGGLE_PERL_HOST, false));
+        assert_eq!(effects, [Effect::SetPerlHost(false)]);
+        assert!(saved.is_err());
+        assert!(!store.config().macos.perl_host);
     }
 
     #[test]
