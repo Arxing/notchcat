@@ -13,27 +13,57 @@ use std::io::Read;
 
 use futures_channel::oneshot;
 use musicat_core::http::{HttpClient, HttpError, HttpRequest, HttpResponse};
-use musicat_core::lyrics::provider::MAX_BODY_BYTES;
+use musicat_core::lyrics::provider::{MAX_BODY_BYTES, USER_AGENT};
 use musicat_core::runtime::BoxFuture;
 
-/// 真實網路的 [`HttpClient`]。無狀態；每次請求建一個獨立的 ureq agent（沒有連線池，請求很少）。
-#[derive(Debug, Clone, Copy, Default)]
-pub struct UreqHttp;
+/// 真實網路的 [`HttpClient`]。每次請求建一個獨立的 ureq agent（沒有連線池，請求很少）。
+///
+/// # Proxy
+///
+/// **刻意保留** ureq 預設的「從環境變數讀 proxy」行為：`HTTP_PROXY`／`HTTPS_PROXY`／`ALL_PROXY`
+/// （與小寫版本）有設就會被遵守，因為需要 proxy 才能上網的使用者（公司網路、某些地區）只能靠它。
+/// 不另外提供設定檔選項。
+///
+/// # User-Agent
+///
+/// 在 agent 層固定為 [`USER_AGENT`]（`MusiCat`），呼叫端漏帶標頭也不會變成 ureq 的預設值；
+/// 呼叫端自己帶的 `User-Agent` 標頭（core 的提供者一律帶同一個值）優先。
+#[derive(Debug, Clone, Copy)]
+pub struct UreqHttp {
+    use_env_proxy: bool,
+}
+
+impl Default for UreqHttp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl UreqHttp {
     pub fn new() -> Self {
-        Self
+        Self {
+            use_env_proxy: true,
+        }
+    }
+
+    /// 不讀環境變數的 proxy 設定。只給測試用：本機測試伺服器不能被開發者的 `HTTP_PROXY` 繞走。
+    #[cfg(test)]
+    fn without_proxy() -> Self {
+        Self {
+            use_env_proxy: false,
+        }
     }
 }
 
 impl HttpClient for UreqHttp {
     fn get(&self, req: HttpRequest) -> BoxFuture<'_, Result<HttpResponse, HttpError>> {
         let (tx, rx) = oneshot::channel();
+        let use_env_proxy = self.use_env_proxy;
         let spawned = std::thread::Builder::new()
             .name("musicat-http".into())
             .spawn(move || {
                 // 接收端若已被 drop（呼叫者放棄），結果直接丟掉。
-                let _ = tx.send(blocking_get(&req));
+                let _ = tx.send(blocking_get(&req, use_env_proxy));
             });
         Box::pin(async move {
             if spawned.is_err() {
@@ -45,12 +75,18 @@ impl HttpClient for UreqHttp {
     }
 }
 
-fn blocking_get(req: &HttpRequest) -> Result<HttpResponse, HttpError> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+fn blocking_get(req: &HttpRequest, use_env_proxy: bool) -> Result<HttpResponse, HttpError> {
+    let builder = ureq::Agent::config_builder()
+        .user_agent(USER_AGENT)
         .timeout_global(Some(req.timeout))
-        .http_status_as_error(false)
-        .build()
-        .into();
+        .http_status_as_error(false);
+    // 預設值就是「從環境變數讀 proxy」；只有明確要求時才關掉。
+    let builder = if use_env_proxy {
+        builder
+    } else {
+        builder.proxy(None)
+    };
+    let agent: ureq::Agent = builder.build().into();
 
     let mut request = agent.get(&req.url);
     for (name, value) in &req.headers {
@@ -113,7 +149,6 @@ fn describe_io(e: &std::io::Error) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use musicat_core::lyrics::provider::{MAX_BODY_BYTES, USER_AGENT};
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc;
@@ -179,7 +214,7 @@ mod tests {
     }
 
     fn get(url: String) -> Result<HttpResponse, HttpError> {
-        futures_executor::block_on(UreqHttp::new().get(req(url, Duration::from_secs(5))))
+        futures_executor::block_on(UreqHttp::without_proxy().get(req(url, Duration::from_secs(5))))
     }
 
     #[test]
@@ -224,7 +259,7 @@ mod tests {
         let url = serve_silent();
         let start = Instant::now();
         let result = futures_executor::block_on(
-            UreqHttp::new().get(req(format!("{url}/hang"), Duration::from_millis(200))),
+            UreqHttp::without_proxy().get(req(format!("{url}/hang"), Duration::from_millis(200))),
         );
         assert!(matches!(result, Err(HttpError::Transport(_))), "{result:?}");
         assert!(
@@ -245,6 +280,31 @@ mod tests {
         assert!(head.starts_with("get /h http/1.1"), "{head}");
         assert!(head.contains("user-agent: musicat\r\n"), "{head}");
         assert!(head.contains("x-test: hello\r\n"), "{head}");
+    }
+
+    #[test]
+    fn user_agent_is_musicat_even_when_the_caller_forgets_the_header() {
+        // 深度防禦：agent 層固定 User-Agent，呼叫端漏帶也不會變成 ureq 的預設值。
+        let (base, rx) = serve("200 OK", b"ok".to_vec());
+        let request = HttpRequest {
+            url: format!("{base}/ua"),
+            headers: Vec::new(),
+            timeout: Duration::from_secs(5),
+        };
+        futures_executor::block_on(UreqHttp::without_proxy().get(request)).unwrap();
+        let head = rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .to_lowercase();
+        assert!(head.contains("user-agent: musicat\r\n"), "{head}");
+        assert!(!head.contains("ureq"), "{head}");
+    }
+
+    #[test]
+    fn the_default_client_keeps_environment_proxy_support_and_the_test_client_does_not() {
+        assert!(UreqHttp::new().use_env_proxy);
+        assert!(UreqHttp::default().use_env_proxy);
+        assert!(!UreqHttp::without_proxy().use_env_proxy);
     }
 
     #[test]
@@ -270,7 +330,7 @@ mod tests {
     fn the_returned_future_is_send_and_dropping_it_does_not_block() {
         fn assert_send<T: Send>(_: &T) {}
         let url = serve_silent();
-        let client = UreqHttp::new();
+        let client = UreqHttp::without_proxy();
         let fut = client.get(req(format!("{url}/hang"), Duration::from_secs(5)));
         assert_send(&fut);
         let start = Instant::now();
