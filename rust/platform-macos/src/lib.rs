@@ -8,6 +8,8 @@ pub mod mediaremote_control;
 #[cfg(target_os = "macos")]
 pub mod panel;
 pub mod perl_launcher;
+#[cfg(target_os = "macos")]
+pub mod power;
 pub mod screens;
 pub mod supervisor;
 pub mod tray;
