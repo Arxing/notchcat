@@ -595,6 +595,7 @@ impl MusicView {
                 .background_executor()
                 .spawn(async move { decode_cover(&bytes, COVER_TEXTURE_PIXELS) })
                 .await;
+            // view 已被釋放（內容 drop 中）時 update 失敗、佇列的 in_flight 不會清掉：無害，佇列隨 Shared 一起消失。
             let _ = this.update(cx, |view, cx| {
                 let wanted = view.shared.decodes.borrow_mut().finish(&key);
                 if wanted {

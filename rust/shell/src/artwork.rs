@@ -10,11 +10,30 @@
 //!
 //! 1. 輸入超過 [`MAX_COVER_BYTES`] 直接拒絕，不碰解碼器。
 //! 2. 先只讀檔頭的寬高（[`cover_dimensions`]，不配置像素緩衝區）；任一邊超過 [`MAX_DECODE_DIMENSION`] 就拒絕。
+//!    **讀檔頭本身也要設上限**（[`HEADER_CHECK_ALLOC`]）：`image` 的 PNG 解碼器讀檔頭時會讀到第一個 IDAT 為止，
+//!    途中把 iCCP（ICC 色彩描述檔）等壓縮的附屬區塊**立刻解壓**（png 0.18.1 `decoder/stream.rs` 的 `parse_iccp`：
+//!    `fdeflate::decompress_to_vec_bounded(buf, limits.bytes)`）。不設限時用的是 `image` 預設的 512 MiB，
+//!    一個 489 KB、1 × 1 的 PNG 就能讓「檔頭檢查」吃到約 376 MB（審查者實測）。設了上限後，解壓輸出到上限就停下；
+//!    png 0.18.1 對 iCCP 是 `let _ = self.parse_iccp_raw();`，也就是**超過上限不算錯誤**：描述檔被丟掉
+//!    （`icc_profile()` 為 `None`），檔頭照常讀完。所以 png 自己不會拒絕炸彈；檔頭檢查最多只花 4 MiB，
+//!    而且本版再補一條：PNG **有** iCCP 區塊（[`png_has_iccp`] 只掃區塊表）但描述檔在 4 MiB 內沒有留下來時，
+//!    整張封面視為不可信、畫佔位，不進第 3 步（否則解碼會以 64 MiB 的預算把同一顆炸彈再解一次）。
+//!    代價：描述檔損毀（不是過大）的真實封面也會變成佔位，這種封面很少見。
+//!    其他壓縮的附屬區塊（zTXt／iTXt）在讀檔頭時只保留壓縮後的位元組（並從同一預算扣），`image` 從不要求解壓，
+//!    壓縮後的大小又受第 1 步的 8 MiB 所限。
 //! 3. 解碼時再套 `image` 的 `Limits`（寬高同上、`max_alloc` = [`MAX_DECODE_ALLOC`]）：`image` 0.25.10 的
 //!    `ImageReader::decode` 先以 `Limits::reserve(decoder.total_bytes())` 檢查整個輸出緩衝區，再 `set_limits`
-//!    檢查寬高，所以 16 位元或其他會超過 64 MiB 的輸出也會被拒絕。
-//! 4. 裁切用 `imageops::crop_imm` 的**檢視**（不複製），直接縮成 ≤ 160 × 160 的縮圖；
-//!    所以一次解碼的峰值 ≈ 解碼後的原圖（≤ 64 MiB）加上很小的縮圖。
+//!    檢查寬高，所以 16 位元或其他會超過上限的輸出也會被拒絕。解碼會**重新**讀一次檔頭（`image` 0.25.10 的
+//!    `PngDecoder::set_limits` 不會改 png 內部的上限，見它的 TODO，所以不能沿用第 2 步那個 4 MiB 的解碼器），
+//!    這時 iCCP 的解壓以 64 MiB 為上限：超過就停下並丟掉；沒超過的描述檔會從同一份 64 MiB 預算扣掉，
+//!    所以 PNG 的「描述檔 + 像素」合計仍 ≤ 64 MiB（審查者實測同一顆炸彈走解碼路徑峰值約 69 MB）。
+//! 4. 裁切用 `imageops::crop_imm` 的**檢視**（不複製），直接縮成 ≤ 160 × 160 的縮圖。
+//!
+//! **實際峰值（誠實的上界）。** 解碼後的原圖最大 3072 × 3072 × 4 = 36 MiB（在 `Limits` 之內），但有些解碼器的
+//! 暫存緩衝區**不在** `Limits` 的計算裡：審查者在 4096² 實測漸進式 4:4:4 JPEG 約 150 MiB、無 alpha 的
+//! 無損 WebP 約 112 MiB 峰值。依面積換算到 3072²（× 0.5625）約為 85 MiB 與 63 MiB，所以一次解碼的實際峰值
+//! 約 **≤ 90 MiB**（漸進式 JPEG 最差；本版沒有在 3072² 另外實測）。這就是把邊長上限從 4096 降到 3072 的原因：
+//! 真實的封面遠小於此（常見 600–1400 像素）。
 //! 5. 同時最多一個解碼（[`DecodeQueue`]）：只排隊最新要求的封面，被取代的要求直接丟掉，
 //!    已不需要的結果在完成時丟棄。
 
@@ -27,10 +46,14 @@ use image::{imageops, Frame, ImageReader, Limits};
 pub const COVER_TEXTURE_PIXELS: u32 = 160;
 /// 封面位元組的上限：超過就不解碼（真實封面通常是數十到數百 KB）。
 pub const MAX_COVER_BYTES: usize = 8 * 1024 * 1024;
-/// 解碼的寬、高上限（像素）：防止惡意或損毀的位元組宣稱超大尺寸而吃光記憶體。
-pub const MAX_DECODE_DIMENSION: u32 = 4096;
-/// 解碼可配置的記憶體上限（位元組）：4096 × 4096 × 4（RGBA8）剛好 64 MiB。
+/// 解碼的寬、高上限（像素）：防止惡意或損毀的位元組宣稱超大尺寸而吃光記憶體。3072 仍遠大於任何真實封面，
+/// 而且讓不在 `Limits` 計算內的解碼器暫存區（漸進式 JPEG、無損 WebP）的峰值也維持在約 90 MiB 以下（見模組文件）。
+pub const MAX_DECODE_DIMENSION: u32 = 3072;
+/// 解碼可配置的記憶體上限（位元組）：涵蓋 3072 × 3072 × 4（RGBA8，36 MiB）的輸出與 PNG 附屬區塊。
 pub const MAX_DECODE_ALLOC: u64 = 64 * 1024 * 1024;
+/// 檔頭檢查（[`cover_dimensions`]）可配置的記憶體上限：只夠讀檔頭與正常大小的附屬區塊
+/// （真實的 ICC 描述檔通常是數 KB 到數百 KB），用來擋下解壓炸彈。
+pub const HEADER_CHECK_ALLOC: u64 = 4 * 1024 * 1024;
 /// LRU 保留的封面數（brief：最近 4 個 id）。
 pub const COVER_CACHE_CAPACITY: usize = 4;
 
@@ -59,18 +82,66 @@ fn to_image_format(format: ImageFormat) -> Option<image::ImageFormat> {
     }
 }
 
+/// 檔頭檢查用的 `Limits`：只限制配置量（[`HEADER_CHECK_ALLOC`]）；寬高由 [`cover_dimensions`] 自己比較。
+fn header_limits() -> Limits {
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(HEADER_CHECK_ALLOC);
+    limits
+}
+
+/// 解碼用的 `Limits`：寬高 [`MAX_DECODE_DIMENSION`]、配置量 [`MAX_DECODE_ALLOC`]。
+fn decode_limits() -> Limits {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_DIMENSION);
+    limits.max_image_height = Some(MAX_DECODE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    limits
+}
+
 /// 解碼前的檢查：位元組數、格式與檔頭宣告的寬高都在上限內時回傳 `(格式, 寬, 高)`。
-/// 只讀檔頭（`ImageReader::into_dimensions`），不配置像素緩衝區。
+/// 只讀檔頭（`ImageReader::into_dimensions`），不配置像素緩衝區；讀檔頭途中的配置（例如 PNG 的 iCCP 解壓）
+/// 以 [`HEADER_CHECK_ALLOC`] 為上限，超過即拒絕。
 pub fn cover_dimensions(bytes: &[u8]) -> Option<(image::ImageFormat, u32, u32)> {
     if bytes.len() > MAX_COVER_BYTES {
         return None;
     }
     let format = to_image_format(detect_image_format(bytes)?)?;
-    let (w, h) = ImageReader::with_format(Cursor::new(bytes), format)
-        .into_dimensions()
-        .ok()?;
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+    reader.limits(header_limits());
+    let mut decoder = reader.into_decoder().ok()?;
+    let (w, h) = image::ImageDecoder::dimensions(&decoder);
+    if format == image::ImageFormat::Png
+        && png_has_iccp(bytes)
+        && image::ImageDecoder::icc_profile(&mut decoder)
+            .ok()
+            .flatten()
+            .is_none()
+    {
+        // 描述檔在 4 MiB 內沒有留下來（太大被丟掉，或損毀）：不再以更大的預算解碼它。
+        return None;
+    }
+    drop(decoder);
     let ok = |d: u32| d > 0 && d <= MAX_DECODE_DIMENSION;
     (ok(w) && ok(h)).then_some((format, w, h))
+}
+
+/// PNG 在第一個 IDAT 之前有沒有 iCCP 區塊：只讀區塊表（長度與型別），不解壓。格式不完整時回 false。
+pub fn png_has_iccp(bytes: &[u8]) -> bool {
+    let mut pos = 8usize; // 簽章
+    while let Some(header) = bytes.get(pos..pos + 8) {
+        let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        match &header[4..8] {
+            b"iCCP" => return true,
+            b"IDAT" | b"IEND" => return false,
+            _ => {}
+        }
+        // 長度 + 型別 + 資料 + CRC。
+        pos = match pos.checked_add(12).and_then(|p| p.checked_add(len)) {
+            Some(next) => next,
+            None => return false,
+        };
+    }
+    false
 }
 
 /// 解碼封面：[`cover_dimensions`] 檢查 → 解碼（有尺寸與記憶體上限）→ 以檢視從中央裁成正方形 →
@@ -79,11 +150,7 @@ pub fn cover_dimensions(bytes: &[u8]) -> Option<(image::ImageFormat, u32, u32)> 
 pub fn decode_cover(bytes: &[u8], max_pixels: u32) -> Option<RenderImage> {
     let (format, _, _) = cover_dimensions(bytes)?;
     let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(MAX_DECODE_DIMENSION);
-    limits.max_image_height = Some(MAX_DECODE_DIMENSION);
-    limits.max_alloc = Some(MAX_DECODE_ALLOC);
-    reader.limits(limits);
+    reader.limits(decode_limits());
     let decoded = reader.decode().ok()?;
     let (w, h) = (decoded.width(), decoded.height());
     if w == 0 || h == 0 {
@@ -355,35 +422,171 @@ mod tests {
         assert!(c.get(&other).is_none());
     }
 
-    /// 只有 PNG 簽章、IHDR（宣告寬高）與一個空 IDAT 的檔，沒有像素資料。
-    fn png_header(w: u32, h: u32) -> Vec<u8> {
-        fn crc32(data: &[u8]) -> u32 {
-            let mut crc = 0xFFFF_FFFFu32;
-            for &b in data {
-                crc ^= u32::from(b);
-                for _ in 0..8 {
-                    crc = if crc & 1 != 0 {
-                        (crc >> 1) ^ 0xEDB8_8320
-                    } else {
-                        crc >> 1
-                    };
-                }
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
             }
-            !crc
         }
-        let mut chunk = b"IHDR".to_vec();
-        chunk.extend_from_slice(&w.to_be_bytes());
-        chunk.extend_from_slice(&h.to_be_bytes());
-        chunk.extend_from_slice(&[8, 6, 0, 0, 0]); // 8 位元 RGBA
-        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
-        out.extend_from_slice(&13u32.to_be_bytes());
+        !crc
+    }
+
+    fn push_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        let mut chunk = kind.to_vec();
+        chunk.extend_from_slice(data);
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
         out.extend_from_slice(&chunk);
         out.extend_from_slice(&crc32(&chunk).to_be_bytes());
-        // 一個空的 IDAT：PNG 解碼器讀檔頭時會讀到第一個 IDAT 為止，所以要有它（但沒有任何像素資料）。
-        out.extend_from_slice(&0u32.to_be_bytes());
-        out.extend_from_slice(b"IDAT");
-        out.extend_from_slice(&crc32(b"IDAT").to_be_bytes());
+    }
+
+    /// PNG 簽章、IHDR（宣告寬高）、`ancillary` 附屬區塊、一個空 IDAT：沒有像素資料。
+    /// PNG 解碼器讀檔頭時會讀到第一個 IDAT 為止，所以要有它。
+    fn png_with_chunks(w: u32, h: u32, ancillary: &[(&[u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8 位元 RGBA
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        push_chunk(&mut out, b"IHDR", &ihdr);
+        for (kind, data) in ancillary {
+            push_chunk(&mut out, kind, data);
+        }
+        push_chunk(&mut out, b"IDAT", &[]);
         out
+    }
+
+    /// 只有 PNG 簽章、IHDR（宣告寬高）與一個空 IDAT 的檔，沒有像素資料。
+    fn png_header(w: u32, h: u32) -> Vec<u8> {
+        png_with_chunks(w, h, &[])
+    }
+
+    /// 解壓後是 `1 + 258 × refs` 個 0 位元組的 zlib 串流（固定 Huffman：一個字面 0，之後每個
+    /// 「長度 258、距離 1」的回溯 13 位元），所以壓縮比約 1:160。只寫出壓縮後的位元組，
+    /// 測試本身不配置解壓後的大小。回傳（串流, 解壓後長度）。
+    fn zlib_zeros(refs: usize) -> (Vec<u8>, u64) {
+        struct Bits {
+            out: Vec<u8>,
+            acc: u64,
+            n: u32,
+        }
+        impl Bits {
+            /// 依 deflate 的規則從最低位元開始寫。
+            fn put(&mut self, value: u32, len: u32) {
+                self.acc |= u64::from(value) << self.n;
+                self.n += len;
+                while self.n >= 8 {
+                    self.out.push(self.acc as u8);
+                    self.acc >>= 8;
+                    self.n -= 8;
+                }
+            }
+            /// Huffman 碼以最高位元先寫：反轉後再 `put`。
+            fn huff(&mut self, code: u32, len: u32) {
+                self.put(code.reverse_bits() >> (32 - len), len);
+            }
+        }
+        let mut bits = Bits {
+            out: vec![0x78, 0x9C],
+            acc: 0,
+            n: 0,
+        };
+        bits.put(1, 1); // BFINAL
+        bits.put(1, 2); // BTYPE = 01（固定 Huffman）
+        bits.huff(0x30, 8); // 字面 0
+        for _ in 0..refs {
+            bits.huff(0xC5, 8); // 長度碼 285 = 258
+            bits.huff(0, 5); // 距離碼 0 = 1
+        }
+        bits.huff(0, 7); // 區塊結尾 256
+        if bits.n > 0 {
+            bits.out.push(bits.acc as u8);
+        }
+        let len = 1 + 258 * refs as u64;
+        // 全是 0 的 Adler-32：a 一直是 1，b = 長度 mod 65521。
+        let adler = (((len % 65521) as u32) << 16) | 1;
+        bits.out.extend_from_slice(&adler.to_be_bytes());
+        (bits.out, len)
+    }
+
+    /// 1 × 1 的 PNG，帶一個解壓後有 `1 + 258 × refs` 位元組的 iCCP 區塊。
+    fn png_with_iccp(refs: usize) -> (Vec<u8>, u64) {
+        let (stream, len) = zlib_zeros(refs);
+        let mut iccp = b"bomb\0\0".to_vec(); // 名稱、NUL、壓縮方法 0
+        iccp.extend_from_slice(&stream);
+        (png_with_chunks(1, 1, &[(b"iCCP", iccp)]), len)
+    }
+
+    #[test]
+    fn small_iccp_profiles_still_pass_the_header_check() {
+        // 64 KiB 的描述檔：正常大小，檔頭檢查照常讀出寬高（證明 iCCP 建構正確、會被解壓）。
+        let (png, len) = png_with_iccp(254);
+        assert!(len < HEADER_CHECK_ALLOC);
+        assert_eq!(
+            cover_dimensions(&png),
+            Some((image::ImageFormat::Png, 1, 1))
+        );
+        assert_eq!(icc_len(&png, header_limits()), Some(len as usize));
+    }
+
+    /// 用 `limits` 讀檔頭後拿到的 ICC 描述檔長度（被丟掉時為 `None`）。
+    fn icc_len(png: &[u8], limits: Limits) -> Option<usize> {
+        use image::ImageDecoder;
+        let mut reader = ImageReader::with_format(Cursor::new(png), image::ImageFormat::Png);
+        reader.limits(limits);
+        let mut decoder = reader.into_decoder().expect("the header itself is valid");
+        decoder
+            .icc_profile()
+            .expect("png reports Ok")
+            .map(|p| p.len())
+    }
+
+    #[test]
+    fn iccp_bomb_is_cut_off_by_the_bounded_header_check() {
+        // 約 17 MiB 的描述檔（壓縮後約 110 KB）：遠大於檔頭檢查的 4 MiB 上限。
+        let (bomb, len) = png_with_iccp(70_000);
+        assert!(bomb.len() < 1024 * 1024, "{}", bomb.len());
+        assert!(len > 4 * HEADER_CHECK_ALLOC, "{len}");
+        // 串流是真的：上限夠大時描述檔完整解出來（這裡配置約 17 MiB，只是對照組）。
+        let mut generous = Limits::default();
+        generous.max_alloc = Some(64 * 1024 * 1024);
+        assert_eq!(icc_len(&bomb, generous), Some(len as usize));
+        // 檔頭檢查的上限：解壓到 4 MiB 就停下、描述檔被丟掉（png 0.18.1 不把它當錯誤）。
+        assert_eq!(icc_len(&bomb, header_limits()), None);
+        // 有 iCCP 但描述檔沒留下來：整張封面被拒絕，不會再以 64 MiB 的預算解碼。
+        assert!(png_has_iccp(&bomb));
+        assert_eq!(cover_dimensions(&bomb), None);
+        assert!(decode_cover(&bomb, 160).is_none());
+    }
+
+    #[test]
+    fn png_has_iccp_walks_the_chunk_table_only() {
+        let (with, _) = png_with_iccp(1);
+        assert!(png_has_iccp(&with));
+        assert!(!png_has_iccp(&png_header(10, 10)));
+        // 截斷或長度溢位的區塊表不會 panic。
+        assert!(!png_has_iccp(&with[..12]));
+        let mut bad = png_header(10, 10);
+        bad[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(!png_has_iccp(&bad));
+        assert!(!png_has_iccp(b""));
+    }
+
+    #[test]
+    fn decode_path_also_bounds_ancillary_decompression() {
+        // 約 80 MiB 的描述檔（壓縮後約 520 KB）走解碼的上限：解壓到 64 MiB 就停下並丟掉
+        // （測試期間最多配置 64 MiB）。正常大小的描述檔在同樣的上限下照常保留。
+        let (bomb, len) = png_with_iccp(325_000);
+        assert!(bomb.len() < 1024 * 1024, "{}", bomb.len());
+        assert!(len > MAX_DECODE_ALLOC, "{len}");
+        assert_eq!(icc_len(&bomb, decode_limits()), None);
+        let (small, small_len) = png_with_iccp(254);
+        assert_eq!(icc_len(&small, decode_limits()), Some(small_len as usize));
     }
 
     #[test]
@@ -416,8 +619,9 @@ mod tests {
             cover_dimensions(&png_header(MAX_DECODE_DIMENSION, MAX_DECODE_DIMENSION)).is_some()
         );
         assert_eq!(cover_dimensions(&png_header(0, 10)), None);
-        // 上限本身：4096² × 4 = 64 MiB。
-        assert_eq!(u64::from(MAX_DECODE_DIMENSION).pow(2) * 4, MAX_DECODE_ALLOC);
+        // 上限本身：3072² × 4（36 MiB）放得進解碼預算。
+        assert_eq!(MAX_DECODE_DIMENSION, 3072);
+        assert!(u64::from(MAX_DECODE_DIMENSION).pow(2) * 4 <= MAX_DECODE_ALLOC);
     }
 
     #[test]
