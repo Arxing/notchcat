@@ -39,7 +39,16 @@
 //! # 結束
 //!
 //! 選單「結束」（或 `MUSICAT_AUTO_QUIT_SECS`）→ 停止所有來源（監管者終止並回收 perl helper）→ `cx.quit()`。
-//! 被 `kill -9` 時沒有機會清理：helper 在 stdin 的 pipe 關閉（父行程消失）時自行結束。
+//!
+//! 其他結束路徑：
+//!
+//! - **經由 AppKit 的 terminate**（Dock 選單的結束、⌘Q、登出、關機）：GPUI 在 `applicationWillTerminate`
+//!   呼叫 `cx.on_app_quit` 的觀察者，這裡在觀察者裡也停止所有來源（`stop_sources` 只做一次，與選單路徑不會重複）。
+//!   已驗證：對執行中的 App 呼叫 `NSRunningApplication.terminate()`（送出與登出、Dock 結束相同的結束 Apple Event）→
+//!   日誌出現 `app quit notification`、行程與 helper 都消失。
+//! - **不經過 terminate**：`kill -9`（Activity Monitor 的強制結束）、`SIGINT`／`SIGTERM`（Ctrl-C、`kill`）
+//!   直接殺行程，GPUI 與這裡都沒有機會清理，**`stop_sources` 不會被呼叫**。helper 在 stdin 的 pipe 關閉
+//!   （父行程消失）時自行結束，所以不會留下孤兒（`kill -9` 與 `SIGTERM` 都已驗證 0.5 秒內 `pgrep -f musicat_helper_main` 為空）。
 //!
 //! # 環境變數（開發與測試用）
 //!
@@ -63,7 +72,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -74,7 +83,8 @@ mod macos {
     use gpui::{App, Application, AsyncApp};
     use musicat_app::composition::{
         auto_quit_after, config_path_with_override, describe_lyrics, describe_snapshot,
-        log_enabled, placement, target_geometry, Placement, ScreenTracker, SCREEN_POLL_INTERVAL,
+        log_enabled, placement, should_log_no_screens, target_geometry, Placement, ScreenTracker,
+        SCREEN_POLL_INTERVAL,
     };
     use musicat_app::config::{config_path, ConfigStore, LoadSource};
     use musicat_app::gated_source::GatedSource;
@@ -141,6 +151,10 @@ mod macos {
         geometry: Option<NotchGeometry>,
         screens: ScreenTracker,
         open_failed_logged: bool,
+        /// 「沒有螢幕」的日誌只在狀況開始時寫一次（見 `should_log_no_screens`）。
+        no_screens_logged: bool,
+        /// `stop_sources` 已跑過（選單「結束」與 AppKit 的結束通知兩條路徑都會呼叫，只做一次）。
+        sources_stopped: Cell<bool>,
         menu: Option<MenuBar>,
         _wake: Option<WakeObserver>,
         _log_subscriptions: Vec<Subscription>,
@@ -199,6 +213,27 @@ mod macos {
                 }
             }
 
+            // 選單「結束」以外、經由 AppKit 的 terminate 結束的路徑（Dock 選單的結束、⌘Q、登出、關機）：
+            // GPUI 在 applicationWillTerminate 呼叫這個觀察者，在這裡也停掉來源，不必靠 helper 的 stdin 關閉。
+            // 借用失敗（不該發生：結束通知在主執行緒的事件迴圈裡，不在任何借用之內）時略過，helper 仍會自行結束。
+            cx.on_app_quit({
+                let state = state.clone();
+                move |_cx| {
+                    match state.try_borrow() {
+                        // 選單「結束」已經停過了就不再印。
+                        Ok(st) if st.sources_stopped.get() => {}
+                        Ok(st) => {
+                            log!("app quit notification: stopping now-playing sources");
+                            st.stop_sources();
+                        }
+                        Err(_) => {
+                            log!("app quit notification while the state is borrowed; skipping")
+                        }
+                    }
+                    std::future::ready(())
+                }
+            })
+            .detach();
             cx.spawn({
                 let state = state.clone();
                 async move |cx: &mut AsyncApp| menu_loop(state, rx, cx).await
@@ -346,6 +381,8 @@ mod macos {
             geometry: None,
             screens: ScreenTracker::default(),
             open_failed_logged: false,
+            no_screens_logged: false,
+            sources_stopped: Cell::new(false),
             menu,
             _wake: wake,
             _log_subscriptions: log_subscriptions,
@@ -384,6 +421,9 @@ mod macos {
 
         /// 停止所有來源（perl helper 被終止並回收）。結束前呼叫。
         fn stop_sources(&self) {
+            if self.sources_stopped.replace(true) {
+                return;
+            }
             for source in &self.sources {
                 source.stop();
             }
@@ -403,12 +443,15 @@ mod macos {
         } else {
             None
         };
+        if should_log_no_screens(
+            &mut st.no_screens_logged,
+            target.is_some(),
+            st.shell.is_some(),
+        ) {
+            log!("no screens yet; waiting");
+        }
         match placement(current, target.as_ref().map(|(_, g)| *g)) {
-            Placement::Stay => {
-                if target.is_none() && st.shell.is_none() {
-                    log!("no screens yet; waiting");
-                }
-            }
+            Placement::Stay => {}
             Placement::Move(geometry) => {
                 if let Some(shell) = &st.shell {
                     shell.reposition(geometry);

@@ -43,7 +43,7 @@ mod demo {
     use std::sync::{Arc, Mutex, PoisonError};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use gpui::{App, Application, BackgroundExecutor};
+    use gpui::{App, Application};
     use image::{ImageEncoder, Rgba, RgbaImage};
     use musicat_core::artwork_cache::ArtworkCache;
     use musicat_core::lyrics::repository::LyricsResolving;
@@ -54,12 +54,12 @@ mod demo {
     use musicat_core::nowplaying::{
         NowPlayingMonitor, NowPlayingSource, PlaybackCommand, PlaybackControl, SnapshotCallback,
     };
-    use musicat_core::runtime::{BoxFuture, Clock, Notifier, Spawner, Subscription, TaskHandle};
+    use musicat_core::runtime::{BoxFuture, Clock, Notifier, Subscription};
     use musicat_core::shell_logic::{choose_screen, container_frame, geometry_for, VirtualNotch};
     use musicat_core::types::{ArtworkRef, PositionAnchor, TrackSnapshot};
     use musicat_platform_macos::panel;
     use musicat_platform_macos::screens::list_screens;
-    use musicat_shell::{MusicShellContent, ShellEvent, ShellWindow};
+    use musicat_shell::{GpuiSpawner, MusicShellContent, ShellEvent, ShellWindow};
 
     fn unix_now() -> f64 {
         SystemTime::now()
@@ -89,16 +89,6 @@ mod demo {
             Box::pin(async move {
                 let _ = rx.await;
             })
-        }
-    }
-
-    /// 以 GPUI 的背景執行器實作 core 的 `Spawner`；drop 把手即 drop GPUI 的 `Task`（取消）。
-    struct GpuiSpawner(BackgroundExecutor);
-
-    impl Spawner for GpuiSpawner {
-        fn spawn(&self, f: BoxFuture<'static, ()>) -> TaskHandle {
-            let task = self.0.spawn(f);
-            TaskHandle::new(move || drop(task))
         }
     }
 
@@ -448,7 +438,7 @@ mod demo {
                 monitor.clone(),
                 Arc::new(DemoLyrics { scene }),
                 control,
-                Arc::new(GpuiSpawner(cx.background_executor().clone())),
+                Arc::new(GpuiSpawner::new(cx.background_executor().clone())),
             );
             let module_state = Arc::new(MusicModuleState::new(
                 controller.clone(),

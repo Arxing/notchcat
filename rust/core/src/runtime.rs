@@ -27,7 +27,17 @@ pub struct TaskHandle {
 }
 
 impl TaskHandle {
-    /// 以「取消時要做的事」建立把手。`Spawner` 實作可以把執行器自己的 task 物件 move 進來再 drop 掉。
+    /// 以「取消時要做的事」建立把手：drop 把手時呼叫 `on_cancel`。
+    ///
+    /// # 注意：`detach()` 不會呼叫 `on_cancel`
+    ///
+    /// [`TaskHandle::detach`] 是把取消閉包**不呼叫就 drop 掉**。所以如果實作把執行器的 task 物件
+    /// move 進閉包、再寫成 `TaskHandle::new(move || drop(task))`，`detach()` 會因為閉包被 drop 而
+    /// 連帶 drop 那個 task——多數執行器（包括 GPUI 的 `Task`）會因此**取消**工作，`detach` 就變成取消。
+    ///
+    /// 正確作法：task 放進「被 drop 時讓 task 脫離（detach）」的守衛，取消路徑才在閉包裡先取出 task
+    /// 再 drop。參考 `shell/src/runtime.rs` 的 `GpuiSpawner::spawn` 與 `DetachOnDrop`。
+    /// 不需要持有 task 的實作（例如 [`abortable_task`] 只設旗標）不受影響。
     pub fn new(on_cancel: impl FnOnce() + Send + 'static) -> Self {
         Self {
             cancel: Some(Box::new(on_cancel)),

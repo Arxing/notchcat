@@ -81,7 +81,9 @@ cargo run --release -p musicat-app
 - 讀取系統現正播放需要 helper 動態庫 `libmusicat_mediaremote_helper.dylib` 放在**可執行檔旁邊**（建置時自動產生在
   `target/<profile>/`）。找不到時印一行 `system now-playing unavailable` 並只用視窗標題備援，程式照常執行。
 - 選單列圖示很多時，macOS 會把放不下的圖示藏起來（有瀏海的螢幕特別明顯）；看不到「♪」時請按住 ⌘ 拖曳其他圖示騰出位置。
-- 從選單「結束」會先停掉 perl helper 再結束；即使程式被 `kill -9`，helper 也會在 stdin 關閉時自行結束。
+- **結束與 helper**：從選單「結束」，以及 Dock 選單的結束、⌘Q、登出、關機這些經由 AppKit 結束通知的路徑，都會先停掉 perl helper 再結束。
+  Activity Monitor 的強制結束（`kill -9`）與 `SIGINT`／`SIGTERM`（Ctrl-C、`kill`）會直接殺掉行程，**不會**呼叫停止來源的程式；
+  這時 helper 在 stdin 的 pipe 關閉（父行程消失）時自行結束，所以同樣不會留下孤兒行程（`kill -9`、`SIGTERM`、`SIGINT` 都已實測 0.5 秒內 helper 消失）。
 
 開發與測試用的環境變數（日誌一律寫到 stderr）：
 
@@ -89,9 +91,13 @@ cargo run --release -p musicat-app
 |---|---|
 | `MUSICAT_LOG=1` | 印出現正播放（**含曲名與演出者**）、歌詞狀態（行數，不含內容）、外殼狀態與選單列狀態。沒設時不印任何與曲目有關的內容。 |
 | `MUSICAT_AUTO_QUIT_SECS=<n>` | n 秒後走與選單「結束」相同的路徑結束（自動化驗證用）。 |
-| `MUSICAT_CONFIG=<path>` | 改用這個設定檔（測試用，避免動到真正的設定檔）。 |
+| `MUSICAT_CONFIG=<path>` | 改用這個設定檔（測試用，避免動到真正的設定檔）。第一次存檔時，若給定路徑的上層資料夾不存在，程式會把它建起來。 |
 
 例如：`MUSICAT_LOG=1 MUSICAT_AUTO_QUIT_SECS=25 cargo run --release -p musicat-app`。
+也可以用 `sh rust/scripts/run.sh`（從任何目錄都行；先 `cargo build --release -p musicat-app` 再啟動，參數與環境變數照常傳給程式）。
+
+實際使用的設定檔路徑（以及它是否存在）在啟動時一律印到 stderr，不必開 `MUSICAT_LOG`：
+`musicat [+  0.000s] config <path> (missing: using defaults)`。
 
 ## 設定
 

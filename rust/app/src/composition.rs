@@ -55,6 +55,20 @@ pub fn placement(current: Option<NotchGeometry>, target: Option<NotchGeometry>) 
     }
 }
 
+/// 「沒有螢幕、面板也還沒開」這個狀況是否該寫日誌：狀況持續期間只寫一次（`logged` 記住已寫過），
+/// 有螢幕可用時重設，下一次再發生才會再寫。輪詢每 2 秒一次，不能每次都印。
+pub fn should_log_no_screens(logged: &mut bool, have_target: bool, panel_open: bool) -> bool {
+    if have_target {
+        *logged = false;
+        return false;
+    }
+    if panel_open || *logged {
+        return false;
+    }
+    *logged = true;
+    true
+}
+
 /// 記住上一次列舉到的螢幕，回答「這次是否不同」。第一次觀察一律算不同。
 #[derive(Default, Debug)]
 pub struct ScreenTracker {
@@ -202,6 +216,24 @@ mod tests {
         c.notch.virtual_height = 40.0;
         let (_, g) = target_geometry(&[screen("9", 0.0, false, false, true)], &c).unwrap();
         assert_eq!((g.notch.w, g.notch.h), (300.0, 40.0));
+    }
+
+    #[test]
+    fn the_no_screens_notice_is_logged_once_until_a_screen_appears() {
+        let mut logged = false;
+        // 沒有螢幕、面板沒開：第一次要寫，之後（每 2 秒的輪詢）都不寫。
+        assert!(should_log_no_screens(&mut logged, false, false));
+        for _ in 0..5 {
+            assert!(!should_log_no_screens(&mut logged, false, false));
+        }
+        // 有螢幕了：不寫，並重設；再度沒有螢幕（面板仍沒開）時再寫一次。
+        assert!(!should_log_no_screens(&mut logged, true, false));
+        assert!(should_log_no_screens(&mut logged, false, false));
+        assert!(!should_log_no_screens(&mut logged, false, false));
+        // 面板已開時（螢幕暫時消失）不寫，也不佔用「已寫過」。
+        let mut logged = false;
+        assert!(!should_log_no_screens(&mut logged, false, true));
+        assert!(!logged);
     }
 
     #[test]

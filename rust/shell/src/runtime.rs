@@ -2,9 +2,12 @@
 //!
 //! - [`GpuiClock`]：`now()` 是牆上時間（Unix epoch 秒）；`sleep(d)` 是 `BackgroundExecutor::timer(d)`，
 //!   在 macOS 上是 GCD 的 `dispatch_after`，**不會為每次睡眠開執行緒**。drop 回傳的 future 即取消計時器。
-//! - [`GpuiSpawner`]：`spawn` 把 future 交給 `BackgroundExecutor::spawn`，回傳的 GPUI `Task` 被搬進
-//!   [`TaskHandle`] 的取消閉包：drop 把手 = drop `Task` = 取消；[`TaskHandle::detach`] 則讓 `Task` 永遠不被 drop，
-//!   future 跑到完成（GPUI 的 `Task::detach` 也是同樣的語意）。
+//! - [`GpuiSpawner`]：`spawn` 把 future 交給 `BackgroundExecutor::spawn`，回傳的 GPUI `Task` 放進
+//!   `DetachOnDrop` 守衛，守衛再被搬進 [`TaskHandle`] 的取消閉包。
+//!   - drop 把手：取消閉包被呼叫，先把 `Task` 從守衛取出再 drop = 取消工作。
+//!   - [`TaskHandle::detach`]：取消閉包**不被呼叫**就被 drop，這時守衛的 `Drop` 對 `Task` 呼叫
+//!     `Task::detach`，future 跑到完成。若直接把 `Task` 搬進閉包（`move || drop(task)`），`detach` 時閉包被 drop，
+//!     `Task` 跟著被 drop，工作反而被取消——這是守衛存在的原因（見 `TaskHandle::new` 的文件）。
 //!
 //! # 執行緒
 //!
@@ -209,12 +212,48 @@ mod tests {
         assert!(wait_until(|| ran.load(Ordering::SeqCst) == 1));
     }
 
+    /// 計數的 waker：被喚醒幾次（= 計時器的完成回呼是否真的跑了）。
+    struct CountingWaker(AtomicUsize);
+
+    impl std::task::Wake for CountingWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// 輪詢一次 `sleep`（把 waker 登記給計時器），回傳 future 與 waker 的喚醒計數。
+    fn polled_sleep(
+        clock: &GpuiClock,
+        d: Duration,
+    ) -> (BoxFuture<'static, ()>, Arc<CountingWaker>) {
+        use std::task::{Context, Poll, Waker};
+        let counter = Arc::new(CountingWaker(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut fut = clock.sleep(d);
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Pending));
+        (fut, counter)
+    }
+
     #[test]
-    fn dropping_a_sleep_cancels_it_without_running_anything() {
+    fn dropping_a_sleep_never_wakes_its_waker() {
         let clock = GpuiClock::new(executor());
-        let fut = clock.sleep(Duration::from_millis(20));
+        // 對照組：不 drop 的計時器到期時確實喚醒 waker（否則下面的斷言恆成立、沒有意義）。
+        let (live, live_counter) = polled_sleep(&clock, Duration::from_millis(20));
+        assert!(wait_until(|| live_counter.0.load(Ordering::SeqCst) >= 1));
+        drop(live);
+
+        // 被 drop 的計時器：drop 當下 GPUI 的 Task 會（同步）通知一次等待者，這不是計時器到期；
+        // 之後過了遠超過到期時間的 150 ms，喚醒次數不再增加，也就是到期的完成回呼沒有跑。
+        let (fut, counter) = polled_sleep(&clock, Duration::from_millis(20));
         drop(fut);
-        std::thread::sleep(Duration::from_millis(60));
+        let after_drop = counter.0.load(Ordering::SeqCst);
+        assert!(
+            after_drop <= 1,
+            "at most the cancellation notice: {after_drop}"
+        );
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(counter.0.load(Ordering::SeqCst), after_drop);
     }
 
     /// 最小的 block_on（不引入執行器 crate）：以執行緒 park/unpark 當 waker。
