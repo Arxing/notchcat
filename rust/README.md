@@ -68,6 +68,43 @@ cargo clean -p musicat-platform-macos
 
 再重新建置即可。
 
+## 設定
+
+設定檔是 TOML，位置：
+
+| 平台 | 路徑 |
+|---|---|
+| macOS | `~/Library/Application Support/MusiCat/musicat.toml` |
+| Windows | `%APPDATA%\MusiCat\musicat.toml` |
+| 其他 | `$XDG_CONFIG_HOME/musicat/musicat.toml`，沒有就用 `~/.config/musicat/musicat.toml` |
+
+檔案不存在時全部用預設值。完整範例（每個鍵都列出，值為預設值）：
+
+```toml
+mode = "notch"                 # 目前只有 "notch"
+screen = "1"                   # 選填：顯示在哪個螢幕（螢幕 id）；省略 = 自動
+lyric_strip_visible = true     # 瀏海下方的歌詞條
+
+[sources]                      # 歌詞來源開關；兩個都關 = 不查歌詞、不送任何請求
+lrclib = true
+netease = true
+
+[macos]
+perl_host = true               # false = 不借 /usr/bin/perl 讀現正播放，只剩視窗標題備援
+
+[notch]                        # 沒有實體瀏海的螢幕上畫的虛擬瀏海
+virtual_width = 200            # 40 到 2000
+virtual_height = 32            # 10 到 400
+```
+
+- **關閉歌詞來源**：把 `[sources]` 裡對應的鍵設成 `false`。
+- **關閉 perl 宿主**：`[macos] perl_host = false`。
+- **壞掉的檔案不會被悄悄覆蓋**：語法錯誤、不是 UTF-8、超過 1 MiB 的檔案一律以預設值啟動並在日誌印警告，程式不會因此結束。
+  第一次需要存檔時，原檔會先被改名為 `musicat.toml.bak`（蓋掉更舊的 `.bak`）再寫入新檔。
+- 未知的鍵與型別錯誤的值只會被警告並忽略（只有那個欄位退回預設值）；日誌只印鍵名，不印值。
+- 程式存設定時會把檔案重寫成標準格式：**手寫的註解與未知的鍵不會保留**。
+- `screen` 記下的螢幕 id 不會因為該螢幕暫時沒接（拔掉、闔上）而被清掉。
+
 ## 隱私
 
 查歌詞時，正在播放曲目的曲名與演出者（包含 YouTube 影片或頻道的任意標題）會送到 **lrclib.net** 與 **music.163.com**；除此之外不會傳送任何資料。請求的 User-Agent 固定為 `MusiCat`，不帶任何使用者資料。兩個歌詞來源可以個別關閉。
