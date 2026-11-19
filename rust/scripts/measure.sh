@@ -119,7 +119,7 @@ done
 # ---------------------------------------------------------------------------- 摘要
 
 awk -F, -v limit="$LIMIT_PCT" -v out="$OUT" '
-function trend(rss, n, label,    k, i, first, last, firstn, lastn, change) {
+function trend(rss, n, label,    k, i, first, last, second, change) {
     # rss[1..n]：該行程每個有值樣本的 RSS（KB）
     if (n < 2) {
         printf("%s RSS: %d 筆樣本，不足以判定趨勢\n", label, n)
@@ -132,6 +132,13 @@ function trend(rss, n, label,    k, i, first, last, firstn, lastn, change) {
     first /= k; last /= k
     change = (first > 0) ? (last - first) / first * 100 : 0
     printf("%s RSS: 前 %d 筆平均 %.0f KB -> 後 %d 筆平均 %.0f KB，變化 %+.1f%%\n", label, k, first, k, last, change)
+    if (n >= 20) {
+        # 僅供參考、不計入判定：跳過第一個十分之一（暖機，例如 helper 記憶體在前幾分鐘會爬升後進入平穩）。
+        second = 0
+        for (i = 1; i <= k; i++) second += rss[k + i]
+        second /= k
+        if (second > 0) printf("  （參考，不計入判定）第 2 個十分之一平均 %.0f KB -> 後 %d 筆，變化 %+.1f%%\n", second, k, (last - second) / second * 100)
+    }
     return (change <= limit) ? "PASS" : "FAIL"
 }
 function stats(label, sum, n, max) {
