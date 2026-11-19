@@ -264,7 +264,7 @@ pub fn mouse_location() -> Point {
 /// 前景 App 是否為全螢幕。**刻意尚未實作，固定回 `false`。**
 ///
 /// spec 第 5.3 節：若 macOS 本來就會在其他 App 的全螢幕空間裡隱藏我們的跨空間視窗，就以實測為準、
-/// 不要硬加偵測。這需要在作者的 Mac 上實測（`rust/docs/HANDOFF-rust.md` 的「GPUI 視窗驗證（Task 21）」）。
+/// 不要硬加偵測。這需要在作者的 Mac 上實測（`rust/docs/HANDOFF-rust.md` 的「附錄 A　Task 21 GPUI 視窗驗證」與「3. spec 第 12 節的額外檢查」）。
 /// 注意面板設了 `FullScreenAuxiliary`，它**可能**會出現在全螢幕空間裡，所以結果不能預設。
 ///
 /// 若實測發現面板會留在全螢幕 App 之上，計畫改為：以 `CGWindowListCopyWindowInfo`

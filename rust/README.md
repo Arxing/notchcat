@@ -96,6 +96,9 @@ cargo run --release -p musicat-app
 例如：`MUSICAT_LOG=1 MUSICAT_AUTO_QUIT_SECS=25 cargo run --release -p musicat-app`。
 也可以用 `sh rust/scripts/run.sh`（從任何目錄都行；先 `cargo build --release -p musicat-app` 再啟動，參數與環境變數照常傳給程式）。
 
+長時間量測 CPU 與記憶體：App 執行中另開終端機跑 `sh rust/scripts/measure.sh -d 3600`（CSV 與摘要；判準見 [`docs/HANDOFF-rust.md`](docs/HANDOFF-rust.md)）。
+驗收清單（給作者）也在那份文件。
+
 實際使用的設定檔路徑（以及它是否存在）在啟動時一律印到 stderr，不必開 `MUSICAT_LOG`：
 `musicat [+  0.000s] config <path> (missing: using defaults)`。
 
