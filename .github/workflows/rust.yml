@@ -61,3 +61,8 @@ jobs:
       - name: Test workspace
         if: runner.os == 'macOS'
         run: cargo test --workspace
+
+      # Swift → Rust 測試移植對照：Rust #[test] 數不得少於 Swift 案例數（無豁免時）。
+      - name: Swift/Rust test parity
+        if: runner.os == 'macOS'
+        run: sh scripts/parity.sh
