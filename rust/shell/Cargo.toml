@@ -24,6 +24,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 futures-channel = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
+[dev-dependencies]
+# runtime.rs 的測試以自寫的 GPUI 調度器建 `BackgroundExecutor`，需要 `async_task::Runnable` 這個型別。
+# 已在 Cargo.lock（gpui 的相依，Apache-2.0 OR MIT）。
+async-task = "4.7"
+
 # 面板繞路只在 macOS；shell 本身不碰 Objective-C，只呼叫 musicat_platform_macos::panel 的公開函式。
 [target.'cfg(target_os = "macos")'.dependencies]
 musicat-platform-macos = { path = "../platform-macos" }

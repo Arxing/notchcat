@@ -4,6 +4,7 @@
 //! - [`ShellWindow`]（僅 macOS）：固定大小的瀏海面板視窗，內含 hover 狀態機、0.28 秒的形狀動畫與點擊穿透。
 //! - [`MusicShellContent`]：音樂模組的 Preview／Expanded 畫面（Task 24），版面常數與純運算在 [`music_layout`]，
 //!   跑馬燈在 [`marquee`]，封面解碼與快取在 [`artwork`]。
+//! - [`GpuiClock`]／[`GpuiSpawner`]：core 的 `Clock`／`Spawner` 以 GPUI 背景執行器實作（[`runtime`]）。
 //!
 //! 外殼本身不碰 Objective-C：視窗繞路全部經 `musicat_platform_macos::panel` 的公開函式。
 
@@ -13,8 +14,10 @@ pub mod artwork;
 pub mod marquee;
 pub mod music_layout;
 mod music_views;
+pub mod runtime;
 
 pub use music_views::MusicShellContent;
+pub use runtime::{GpuiClock, GpuiSpawner};
 
 #[cfg(target_os = "macos")]
 mod window;
