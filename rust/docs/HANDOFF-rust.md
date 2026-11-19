@@ -136,9 +136,16 @@ cargo run --release -p musicat-shell --example music_demo -- --scene playing   #
 Expanded 的按鈕作用在腳本來源上：播放／暫停凍結或恢復位置（stdout 印 `control TogglePlayPause`），上一首／下一首在
 「夜航 Night Ferry」（有同步歌詞、紅色封面）與「晨光 Morning Light」（沒有歌詞、藍色封面）之間切換。
 
-**Task 24 建置時螢幕在睡眠且工作階段已鎖定（`CGDisplayIsAsleep=1`、`CGSSessionScreenIsLocked=1`），GPUI 不畫任何東西，
-所以以下目測項目全部未驗證**；自動驗證只有：純邏輯單元測試、六個場景都能啟動並在時間到時正常結束（exit 0）、
-螢幕睡眠時 playing 場景 15 秒 CPU 約 0.9%（none 場景約 0.5%；**不含繪製成本**，見下方 CPU 項）。
+Task 24 已自動驗證（2026-11-19，macOS 15.7 arm64，內建有瀏海 185 × 32，容器 583.5,0 345 × 180）：純邏輯單元測試；
+六個場景都能啟動並在時間到時正常結束（exit 0）；以 `screencapture` 只截瀏海區域、目視確認（截圖已刪除）：
+- `--scene playing` Preview：左翼封面置中裁切（沒有灰色條紋）、圓角；右翼四根音柱；瀏海下方 0.6 黑歌詞條，中文歌詞行正常。
+- `--scene playing` Expanded（以 `CGWarpMouseCursorPosition` 把游標移進長條 2.5 秒後還原，唯一一次移動游標）：♪ 切換列、
+  68 點封面、曲名／演出者（中文正常）、進度條、上一首／暫停／下一首與折疊箭頭的字形、歌詞區目前行加亮且其他行變暗。
+- `--scene longtitle` Preview 第 14 秒：超長歌詞行在歌詞條內往左捲動，左右被內距裁切。
+
+CPU（release、螢幕醒著、停在 Preview、15 秒 `ps -o time`）：音柱 15 fps 時約 4.5%，降到 12 fps 後約 3.6%（取樣 2.1／3.0／3.4%）；
+`longtitle` 歌詞條跑馬燈以顯示器頻率重繪時約 11%（取樣最高 18.6%），改由定時器以 30 fps 重繪後約 5.4%（取樣最高 7.6%）。
+（Task 23 外殼本身閒置約 0.9%。）沒有自動驗證的項目照下列清單人工確認；已目測的項目仍保留，請以真實觸控板與實機再看一次觀感。
 
 - [ ] **（HANDOFF 1）Preview 版面。** `--scene playing`：長條左翼是封面（24 × 24、圓角 6、離左端 8）、右翼是四根白色音柱
   （離右端 12，播放中上下起伏）、瀏海正下方是 24 點高的 0.6 黑色歌詞條（下方圓角 10，左右內距 12，白色 12 點中字）。
@@ -170,9 +177,9 @@ Expanded 的按鈕作用在腳本來源上：播放／暫停凍結或恢復位�
 - [ ] **純文字與沒有歌詞。** `--scene plain`：歌詞條顯示曲名；Expanded 歌詞區是置中的靜態全文（0.75），可以用觸控板捲動。
   `--scene nolyrics`：歌詞條顯示曲名；Expanded 沒有歌詞區、標頭垂直置中。
 - [ ] **（HANDOFF 6、16）捲動條。** GPUI 不畫捲動條：在「系統設定 → 外觀 → 顯示捲動條：永遠」下，`--scene plain` 的歌詞區也不應出現捲動條。
-- [ ] **（HANDOFF 13）CPU（含繪製）。** 螢幕醒著、`--scene playing` 停在 Preview（音柱 15 fps + 歌詞條）時，
-  `ps -o %cpu= -p <pid>` 每 5 秒量一次、共 15 秒（release）。超過約 3% 時把 `music_layout::EQ_FRAME_SECONDS` 調成 1/12 再量。
-  另外量 `--scene longtitle` 停在 Expanded（兩個跑馬燈以顯示器頻率重繪）的 CPU，記錄下來決定跑馬燈要不要限制在 30 fps。
+- [ ] **（HANDOFF 13）CPU 與平順度的取捨。** 目前音柱 12 fps（約 3.6%，略高於 3% 目標）、跑馬燈 30 fps（每格 1 點）。
+  請目視音柱與跑馬燈是否夠平順；若可接受更頓的音柱，把 `music_layout::EQ_FRAME_SECONDS` 調成 1/10 再量；
+  若跑馬燈太頓，`MARQUEE_FRAME_SECONDS` 可提高（CPU 會跟著增加）。在真實 App（Task 25）播放時再量一次。
 - [ ] **（HANDOFF 3）拖動進度。** 要真實來源（Task 25）：在播放器拖動進度後，Expanded 的進度條與目前歌詞行在 1 秒內跟上。
 - [ ] **字形。** 控制列的上一首／播放／暫停／下一首與折疊箭頭是以路徑畫的（GPUI 沒有 SF Symbols），對照 Swift 版確認大小與粗細可接受；
   ♪（U+266A，系統字型）在切換列與封面佔位是否清楚。
