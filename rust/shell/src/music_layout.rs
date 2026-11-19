@@ -49,9 +49,11 @@ pub const EQ_PEAKS: [f64; 4] = [1.0, 0.75, 0.9, 0.6];
 pub const EQ_RESTING_SCALE: f64 = 0.25;
 /// 音柱的白色不透明度（`Color.white.opacity(0.9)`）。
 pub const EQ_BAR_OPACITY: f64 = 0.9;
-/// 本版：播放中音柱的重繪頻率（Swift 由 Core Animation 以顯示器頻率畫）。15 fps 足以表現 0.38–0.62 秒的起伏，
-/// 又把整窗重繪的成本壓低（HANDOFF 第 13 項）。
-pub const EQ_FRAME_SECONDS: f64 = 1.0 / 15.0;
+/// 本版：播放中音柱的重繪頻率（Swift 由 Core Animation 以顯示器頻率畫）。12 fps 足以表現 0.38–0.62 秒的起伏。
+/// 實測（release、螢幕醒著、Preview 播放中 15 秒）15 fps 約 4.5% CPU，超過 HANDOFF 第 13 項的 3% 目標，所以降到 12。
+pub const EQ_FRAME_SECONDS: f64 = 1.0 / 12.0;
+/// 本版：跑馬燈捲動時的重繪頻率。以顯示器頻率（120 Hz）重繪實測約 11–18% CPU；30 fps 時每格前進 1 點。
+pub const MARQUEE_FRAME_SECONDS: f64 = 1.0 / 30.0;
 
 // ---------------------------------------------------------------- 歌詞條（LyricStripView.swift）
 
@@ -289,6 +291,8 @@ pub struct TickInputs {
     pub preview_playing: bool,
     /// Expanded：選取的是音樂頁、正在播放，且有隨時間變化的東西（進度條或跟隨中的歌詞）。
     pub expanded_live: bool,
+    /// 目前模式中有跑馬燈正在捲動（文字放不下）。
+    pub marquee_scrolling: bool,
 }
 
 /// 依可見性與模式決定定時重繪的週期（秒）。隱藏時一律不重繪。
@@ -296,11 +300,16 @@ pub fn tick_interval(i: TickInputs) -> Option<f64> {
     if !i.visible {
         return None;
     }
-    if i.expanded {
+    let base = if i.expanded {
         i.expanded_live.then_some(EXPANDED_TICK_SECONDS)
     } else {
-        // 音柱的 15 fps 已涵蓋歌詞條的 4 Hz。
+        // 音柱的 12 fps 已涵蓋歌詞條的 4 Hz。
         i.preview_playing.then_some(EQ_FRAME_SECONDS)
+    };
+    if i.marquee_scrolling {
+        Some(base.map_or(MARQUEE_FRAME_SECONDS, |b| b.min(MARQUEE_FRAME_SECONDS)))
+    } else {
+        base
     }
 }
 
@@ -592,8 +601,30 @@ mod tests {
             expanded: false,
             preview_playing: true,
             expanded_live: false,
+            marquee_scrolling: false,
         };
         assert_eq!(tick_interval(base), Some(EQ_FRAME_SECONDS));
+        // 跑馬燈捲動時改用較快的 30 fps（Preview 與 Expanded、播放與否都一樣），隱藏時仍不重繪。
+        let scrolling = TickInputs {
+            marquee_scrolling: true,
+            ..base
+        };
+        assert_eq!(tick_interval(scrolling), Some(MARQUEE_FRAME_SECONDS));
+        assert_eq!(
+            tick_interval(TickInputs {
+                expanded: true,
+                preview_playing: false,
+                ..scrolling
+            }),
+            Some(MARQUEE_FRAME_SECONDS)
+        );
+        assert_eq!(
+            tick_interval(TickInputs {
+                visible: false,
+                ..scrolling
+            }),
+            None
+        );
         assert_eq!(
             tick_interval(TickInputs {
                 visible: false,
@@ -621,6 +652,7 @@ mod tests {
             Some(EXPANDED_TICK_SECONDS)
         );
         const { assert!(EQ_FRAME_SECONDS <= STRIP_TICK_SECONDS) };
+        const { assert!(MARQUEE_FRAME_SECONDS <= EQ_FRAME_SECONDS) };
     }
 
     #[test]

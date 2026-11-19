@@ -5,11 +5,13 @@
 //!   每秒 30 點往左捲、畫兩份（中間隔 32 點）無縫循環。元素寬度就是父元素給的寬度（`w_full`），
 //!   從不要求更多，所以很長的曲名撐不開版面（同 Swift）。
 //!
-//! 重繪：只有在捲動時，元素在 paint 裡 `request_animation_frame()`（通知它所在的 view 下一格再畫）；
-//! 靜止的跑馬燈不請求任何畫格。外殼隱藏時 GPUI 不畫，請求也就自然停止。
+//! 重繪：元素本身不請求畫格，只在 paint 時把「是否正在捲動」記在 [`MarqueeState::is_scrolling`]；
+//! 擁有它的 view 以固定的較低頻率（音樂畫面為 30 fps，`music_layout::MARQUEE_FRAME_SECONDS`）重繪。
+//! 以顯示器頻率（120 Hz）每格重繪整個視窗實測約 11–18% CPU，所以不用 `request_animation_frame`。
+//! 位移依經過的時間計算，所以重繪頻率只影響平順度、不影響速度。
 //! 捲動的起點記在 [`MarqueeState`]：文字一改變就從頭開始（Swift 以 `.id(text|width)` 重建）。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -51,6 +53,7 @@ impl MarqueeLayout {
 #[derive(Clone, Default)]
 pub struct MarqueeState {
     inner: Rc<RefCell<Option<(SharedString, Instant)>>>,
+    scrolling: Rc<Cell<bool>>,
 }
 
 impl MarqueeState {
@@ -61,6 +64,18 @@ impl MarqueeState {
     /// 下次畫時從頭開始（例如畫面重新出現時，同 Swift 的 `onAppear`）。
     pub fn reset(&self) {
         self.inner.borrow_mut().take();
+        self.scrolling.set(false);
+    }
+
+    /// 清掉「正在捲動」：擁有它的 view 每次 render 開頭呼叫，只有這一格真的畫到、而且放不下的跑馬燈會再設回來
+    /// （不再出現的跑馬燈不會讓定時重繪一直跑）。
+    pub fn clear_scrolling(&self) {
+        self.scrolling.set(false);
+    }
+
+    /// 上一次畫的時候文字放不下、正在捲動（擁有者據此決定要不要定時重繪）。
+    pub fn is_scrolling(&self) -> bool {
+        self.scrolling.get()
     }
 
     /// `text` 已捲動的秒數；文字和上次不同時從 0 重新開始。
@@ -145,11 +160,11 @@ fn paint_marquee(
             let _ = line.paint(point(x, bounds.origin.y), line_height, window, cx);
             let x2 = x + px((text_width + MarqueeLayout::GAP) as f32);
             let _ = line.paint(point(x2, bounds.origin.y), line_height, window, cx);
-            // 只在捲動時要求下一格。
-            window.request_animation_frame();
+            state.scrolling.set(true);
         } else {
             // 放得下：置中、靜止；文字改變時仍記下起點，之後若變得放不下就從頭捲。
             let _ = state.elapsed(&text);
+            state.scrolling.set(false);
             let x = bounds.origin.x + px(((container - text_width) / 2.0).max(0.0) as f32);
             let _ = line.paint(point(x, bounds.origin.y), line_height, window, cx);
         }

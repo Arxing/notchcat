@@ -21,9 +21,9 @@
 //! render 一律重讀 `MusicController::state()` 等現值，不信任通知的順序。回呼只持有 channel 的送出端，
 //! 不持有任何 GPUI 物件，所以從不在外部執行緒碰 GPUI。
 //!
-//! 定時重繪（音柱 15 fps、歌詞條／進度／歌詞跟隨 4 Hz）由另一個主執行緒工作依
+//! 定時重繪（音柱 12 fps、跑馬燈捲動時 30 fps、歌詞條／進度／歌詞跟隨 4 Hz）由另一個主執行緒工作依
 //! [`tick_interval`](crate::music_layout::tick_interval) 決定：面板隱藏、Preview 沒在播、Expanded 沒有隨時間
-//! 變化的東西時不重繪，只每 0.5 秒重新判斷一次（不畫任何東西）。跑馬燈捲動與歌詞換行的捲動動畫則由元素自己
+//! 變化的東西時不重繪，只每 0.5 秒重新判斷一次（不畫任何東西）。只有歌詞換行的 0.3 秒捲動動畫由 render
 //! `request_animation_frame()`，只在進行中才要求。
 //!
 //! # 生命週期
@@ -112,6 +112,11 @@ impl Shared {
             expanded: self.mode.get() == ShellMode::Expanded,
             preview_playing: playing && self.music_is_active(),
             expanded_live,
+            marquee_scrolling: if self.mode.get() == ShellMode::Expanded {
+                self.title_marquee.is_scrolling() || self.artist_marquee.is_scrolling()
+            } else {
+                self.strip_marquee.is_scrolling()
+            },
         }
     }
 }
@@ -349,6 +354,14 @@ impl Render for MusicView {
         let released: Vec<_> = self.shared.released.borrow_mut().drain(..).collect();
         for image in released {
             let _ = window.drop_image(image);
+        }
+        // 只有這一格畫到的跑馬燈會把旗標設回來（見 MarqueeState::clear_scrolling）。
+        match self.kind {
+            ShellMode::Preview => self.shared.strip_marquee.clear_scrolling(),
+            ShellMode::Expanded => {
+                self.shared.title_marquee.clear_scrolling();
+                self.shared.artist_marquee.clear_scrolling();
+            }
         }
         match self.kind {
             ShellMode::Preview => self.render_preview(cx),
