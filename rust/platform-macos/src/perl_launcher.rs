@@ -8,6 +8,13 @@
 //! 只用 `std::process`，沒有 macOS 專屬 API，所以在所有目標上都編譯（Windows CI 的 `cargo check` 也包含它）；
 //! 只有「執行檔權限位元」與「被訊號殺死的結束碼」兩處以 `cfg(unix)` 區分。
 //!
+//! # 風險
+//!
+//! 這是借用 Apple 簽章宿主（`/usr/bin/perl` 載入我們自己的動態庫）的空隙，**不是正式開放的介面**：
+//! 任何一次 macOS 更新都可能讓它失效，`/usr/bin/perl` 日後也可能被移除。它不適合上架 Mac App Store，
+//! 只適合自用與自行側載式的發行。使用者可以從選單列選單或 TOML 的 `[macos] perl_host = false` 關閉；
+//! 這個宿主啟動失敗或失效時，App 退回只靠視窗標題的備援來源。
+//!
 //! # 行程所有權與執行緒
 //!
 //! - `Child` 放在 `Arc<Mutex<Child>>`，由 handle 與**一條**讀取執行緒共用。鎖只在 `try_wait`／`kill`
