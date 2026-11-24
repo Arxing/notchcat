@@ -4,6 +4,7 @@
 //! `build.rs` 只在目標為 macOS 時才編譯 `helper/helper.c`。
 
 pub mod helper_wire;
+pub mod links;
 pub mod mediaremote_control;
 #[cfg(target_os = "macos")]
 pub mod panel;
