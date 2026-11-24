@@ -1,8 +1,10 @@
 //! 在預設瀏覽器開啟歌詞來源網址（公開的 AppKit／Foundation API：`NSWorkspace.openURL:`、`NSURL`）。
 //!
 //! 網址來自歌詞提供者的回應（LRCLIB、NetEase），屬於不可信輸入，所以開啟之前一律先過 [`validate_open_url`]：
-//! 只放行小寫 `https://`，擋掉 `javascript:`、`file:`、`http:` 與自訂 scheme；主機名稱必須非空且不含 `@`
-//! （擋掉 `https://好站@壞站/` 這類使用者資訊的偽裝）；整串不含空白或控制字元（避免換行、NUL 夾帶）；長度上限 2048 位元組。
+//! 只放行小寫 `https://`，擋掉 `javascript:`、`file:`、`http:` 與自訂 scheme；主機不得含 `@`
+//! （擋掉 `https://好站@壞站/` 這類使用者資訊的偽裝）；主機名稱（第一個 `:` 之前的部分，所以埠號不算）不得為空
+//! （擋掉 `https://:8443/`）；整串不含空白、控制字元（避免換行、NUL 夾帶）與反斜線（瀏覽器把 `\` 當 `/` 讀，
+//! `https://evil.com\.good.com/` 的主機會與我們看到的不同）；長度上限 2048 位元組。
 //! 驗證不做修剪或正規化：有任何不合就整串拒絕。
 //!
 //! 驗證器是純函式，所有平台都編譯、都測試；ObjC 的部分（[`open_url`]）只在 macOS 編譯。
@@ -27,12 +29,19 @@ const HTTPS_PREFIX: &str = "https://";
 /// 檢查 `url` 能不能交給瀏覽器開啟：通過就回傳同一個字串，否則 `None`。規則見模組文件。
 pub fn validate_open_url(url: &str) -> Option<&str> {
     let rest = url.strip_prefix(HTTPS_PREFIX)?;
-    if url.len() > MAX_URL_BYTES || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+    if url.len() > MAX_URL_BYTES
+        || url
+            .chars()
+            .any(|c| c == '\\' || c.is_whitespace() || c.is_control())
+    {
         return None;
     }
+    // 「主機」是 `https://` 之後到第一個 `/`、`?`、`#` 為止；其中第一個 `:` 之前的主機名稱不得為空
+    // （擋掉 `https://:8443/`）。IPv6 字面值 `[::1]` 的第一段是 `[`，不受影響。
     let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let host = &rest[..host_end];
-    if host.is_empty() || host.contains('@') {
+    let hostname = host.split(':').next().unwrap_or("");
+    if hostname.is_empty() || host.contains('@') {
         return None;
     }
     Some(url)
@@ -101,8 +110,38 @@ mod tests {
         for url in ["https://", "https:///path", "https://?q=1", "https://#f"] {
             assert_eq!(validate_open_url(url), None, "{url}");
         }
-        // 主機部分是 `:8443`（非空）：驗證器不判斷埠號格式，留給 NSURL。
-        assert_eq!(validate_open_url("https://:8443/"), Some("https://:8443/"));
+    }
+
+    #[test]
+    fn rejects_empty_hostname_before_the_port() {
+        for url in [
+            "https://:8443/",
+            "https://:/",
+            "https://:80",
+            "https://:8443?q=1",
+        ] {
+            assert_eq!(validate_open_url(url), None, "{url}");
+        }
+        // IPv6 字面值的第一個字元是 `[`，仍可通過（NSURL 再判斷）。
+        assert_eq!(validate_open_url("https://[::1]/"), Some("https://[::1]/"));
+        assert_eq!(
+            validate_open_url("https://x.com:8443/"),
+            Some("https://x.com:8443/")
+        );
+    }
+
+    #[test]
+    fn rejects_backslashes_anywhere() {
+        for url in [
+            "https://evil.com\\.good.com/",
+            "https://good.com\\@evil.com/",
+            "https://x.com/a\\b",
+            "https://x.com/?q=a\\b",
+            "https://x.com/#a\\b",
+            "https://x.com\\",
+        ] {
+            assert_eq!(validate_open_url(url), None, "{url}");
+        }
     }
 
     #[test]
