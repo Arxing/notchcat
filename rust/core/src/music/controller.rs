@@ -27,16 +27,20 @@ use std::sync::{Arc, Mutex, Weak};
 
 use crate::lyrics::normalizer::identity_from;
 use crate::lyrics::repository::LyricsResolving;
-use crate::lyrics::Lyrics;
+use crate::lyrics::{Lyrics, LyricsHit};
 use crate::nowplaying::{NowPlayingMonitor, PlaybackCommand, PlaybackControl};
 use crate::runtime::{lock, Notifier, Spawner, Subscription, TaskHandle};
 use crate::types::TrackSnapshot;
 
-/// 音樂畫面讀取的狀態：目前快照，與（已查到的）該曲目歌詞。
+/// 音樂畫面讀取的狀態：目前快照、（已查到的）該曲目歌詞，與歌詞的來源網址。
+///
+/// `lyrics` 與 `lyrics_url` 永遠一起設定、一起清除：有歌詞才有網址，沒命中兩者皆為 `None`。
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct MusicState {
     pub snapshot: Option<TrackSnapshot>,
     pub lyrics: Option<Lyrics>,
+    /// 歌詞來源頁面（`https://` 開頭）；沒有歌詞時為 `None`。
+    pub lyrics_url: Option<String>,
 }
 
 #[derive(Default)]
@@ -135,6 +139,7 @@ impl MusicController {
                 core.generation += 1;
                 old_lookup = core.lookup.take();
                 core.state.lyrics = None;
+                core.state.lyrics_url = None;
             }
             (
                 core.state != before,
@@ -167,8 +172,7 @@ impl MusicController {
         let weak: Weak<Self> = Arc::downgrade(self);
         let task_key = key.clone();
         let handle = self.spawner.spawn(Box::pin(async move {
-            // 暫時只取歌詞、丟掉來源網址：Task 2 會一併保存網址。
-            let result = resolver.lyrics(identity).await.map(|hit| hit.lyrics);
+            let result = resolver.lyrics(identity).await;
             if let Some(controller) = weak.upgrade() {
                 controller.finish_lookup(&task_key, generation, result);
             }
@@ -187,16 +191,23 @@ impl MusicController {
     }
 
     /// 查詢完成：曲目可能在請求期間改變；key 或世代不同（含 A→B→A 的舊 A）就丟棄。
-    fn finish_lookup(&self, key: &str, generation: u64, result: Option<Lyrics>) {
+    /// 這裡是唯一拆開 [`LyricsHit`] 的地方：歌詞與網址在同一個鎖內一起寫入，
+    /// 歌詞或網址任一改變才通知（兩者都相同就不通知）。
+    fn finish_lookup(&self, key: &str, generation: u64, result: Option<LyricsHit>) {
+        let (lyrics, lyrics_url) = match result {
+            Some(hit) => (Some(hit.lyrics), Some(hit.url)),
+            None => (None, None),
+        };
         let state = {
             let mut core = lock(&self.core);
             if core.generation != generation
                 || core.current_key.as_deref() != Some(key)
-                || core.state.lyrics == result
+                || (core.state.lyrics == lyrics && core.state.lyrics_url == lyrics_url)
             {
                 return;
             }
-            core.state.lyrics = result;
+            core.state.lyrics = lyrics;
+            core.state.lyrics_url = lyrics_url;
             core.state.clone()
         };
         self.notifier.notify(&state);
@@ -259,6 +270,11 @@ mod tests {
         LyricsHit::new(lyrics, "https://test.example/0")
     }
 
+    /// 測試用命中：指定網址。
+    fn hit_at(lyrics: Option<Lyrics>, url: &str) -> Option<LyricsHit> {
+        lyrics.map(|l| LyricsHit::new(l, url))
+    }
+
     /// 一次查詢的閘門：test 呼叫 `answer` 之前，對應的 future 一直 Pending。
     #[derive(Default)]
     struct Gate {
@@ -272,10 +288,10 @@ mod tests {
     }
 
     impl Gate {
-        fn answer(&self, lyrics: Option<Lyrics>) {
+        fn answer(&self, hit: Option<LyricsHit>) {
             let waker = {
                 let mut slot = lock(&self.slot);
-                slot.answer = Some(lyrics.map(hit));
+                slot.answer = Some(hit);
                 slot.waker.take()
             };
             if let Some(w) = waker {
@@ -329,8 +345,12 @@ mod tests {
 
         /// 回答第 `index` 次查詢（依到達順序）。
         fn respond(&self, index: usize, lyrics: Option<Lyrics>) {
+            self.respond_hit(index, lyrics.map(hit));
+        }
+
+        fn respond_hit(&self, index: usize, hit: Option<LyricsHit>) {
             let gate = lock(&self.gates)[index].clone();
-            gate.answer(lyrics);
+            gate.answer(hit);
         }
     }
 
@@ -422,6 +442,11 @@ mod tests {
 
         fn respond(&self, index: usize, lyrics: Option<Lyrics>) {
             self.resolver.respond(index, lyrics);
+            self.spawner.run_until_stalled();
+        }
+
+        fn respond_hit(&self, index: usize, hit: Option<LyricsHit>) {
+            self.resolver.respond_hit(index, hit);
             self.spawner.run_until_stalled();
         }
     }
@@ -612,6 +637,189 @@ mod tests {
 
         assert_eq!(controller.state().snapshot, None);
         assert_eq!(controller.state().lyrics, None);
+    }
+
+    #[test]
+    fn hit_sets_lyrics_and_url_together() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+        assert_eq!(controller.state().lyrics_url, None);
+
+        fx.respond_hit(0, hit_at(plain("words"), "https://lrclib.net/api/get/7"));
+
+        let state = controller.state();
+        assert_eq!(state.lyrics, plain("words"));
+        assert_eq!(
+            state.lyrics_url.as_deref(),
+            Some("https://lrclib.net/api/get/7")
+        );
+
+        // 只有播放狀態改變：歌詞與網址都留著。
+        fx.emit(snapshot("Song A", Some("Artist"), false, None));
+        assert_eq!(controller.state().lyrics, plain("words"));
+        assert_eq!(
+            controller.state().lyrics_url.as_deref(),
+            Some("https://lrclib.net/api/get/7")
+        );
+    }
+
+    #[test]
+    fn a_miss_leaves_both_lyrics_and_url_empty() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+        fx.respond_hit(0, None);
+        assert_eq!(controller.state().lyrics, None);
+        assert_eq!(controller.state().lyrics_url, None);
+    }
+
+    #[test]
+    fn track_change_clears_lyrics_and_url_together() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+        fx.respond_hit(0, hit_at(plain("lyrics of A"), "https://a.example/1"));
+        assert!(controller.state().lyrics.is_some());
+        assert!(controller.state().lyrics_url.is_some());
+
+        fx.emit(song("Song B"));
+
+        assert_eq!(controller.state().lyrics, None);
+        assert_eq!(controller.state().lyrics_url, None);
+    }
+
+    #[test]
+    fn no_artist_or_no_snapshot_clears_the_url() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+        fx.respond_hit(0, hit_at(plain("lyrics of A"), "https://a.example/1"));
+        assert!(controller.state().lyrics_url.is_some());
+
+        fx.emit(snapshot("No Artist Song", None, true, None));
+        assert_eq!(controller.state().lyrics, None);
+        assert_eq!(controller.state().lyrics_url, None);
+
+        fx.emit(song("Song B"));
+        fx.respond_hit(1, hit_at(plain("lyrics of B"), "https://b.example/1"));
+        assert!(controller.state().lyrics_url.is_some());
+
+        fx.emit(None);
+        assert_eq!(controller.state().snapshot, None);
+        assert_eq!(controller.state().lyrics, None);
+        assert_eq!(controller.state().lyrics_url, None);
+    }
+
+    /// 上一首的查詢在換歌之後才回來：它的網址絕不能留在新曲目上（取消與不取消兩種執行器都一樣）。
+    #[test]
+    fn slow_lookup_for_the_previous_track_never_leaves_its_url_on_the_new_track() {
+        for detaching in [false, true] {
+            let fx = Fixture::new();
+            let spawner: Arc<dyn Spawner> = if detaching {
+                Arc::new(DetachingSpawner(fx.spawner.clone()))
+            } else {
+                Arc::new(fx.spawner.clone())
+            };
+            let controller =
+                MusicController::new(fx.monitor.clone(), fx.resolver.clone(), None, spawner);
+            fx.emit(song("Song A"));
+            fx.emit(song("Song B"));
+            assert_eq!(fx.resolver.requested().len(), 2);
+
+            // B 還在查：A 的晚到結果不得填入歌詞或網址。
+            fx.respond_hit(0, hit_at(plain("lyrics of A"), "https://a.example/1"));
+            assert_eq!(controller.state().lyrics, None);
+            assert_eq!(controller.state().lyrics_url, None);
+
+            fx.respond_hit(1, hit_at(plain("lyrics of B"), "https://b.example/1"));
+            assert_eq!(controller.state().lyrics, plain("lyrics of B"));
+            assert_eq!(
+                controller.state().lyrics_url.as_deref(),
+                Some("https://b.example/1")
+            );
+
+            // A 的查詢（若還活著）在 B 已完成之後才回來：網址仍是 B 的。
+            fx.respond_hit(0, hit_at(plain("lyrics of A"), "https://a.example/1"));
+            assert_eq!(controller.state().lyrics, plain("lyrics of B"));
+            assert_eq!(
+                controller.state().lyrics_url.as_deref(),
+                Some("https://b.example/1")
+            );
+        }
+    }
+
+    /// A→B→A：被取代的第一個 A 查詢（沒被取消）與第二個 A 的 key 相同，只靠世代擋下；網址也不得寫入。
+    #[test]
+    fn stale_generation_result_does_not_write_the_url() {
+        let fx = Fixture::new();
+        let controller = MusicController::new(
+            fx.monitor.clone(),
+            fx.resolver.clone(),
+            None,
+            Arc::new(DetachingSpawner(fx.spawner.clone())),
+        );
+        fx.emit(song("Song A"));
+        fx.emit(song("Song B"));
+        fx.emit(song("Song A"));
+
+        fx.respond_hit(0, hit_at(plain("first A"), "https://first-a.example/1"));
+        assert_eq!(controller.state().lyrics, None);
+        assert_eq!(controller.state().lyrics_url, None);
+
+        fx.respond_hit(2, hit_at(plain("second A"), "https://second-a.example/1"));
+        assert_eq!(controller.state().lyrics, plain("second A"));
+        assert_eq!(
+            controller.state().lyrics_url.as_deref(),
+            Some("https://second-a.example/1")
+        );
+
+        // 被取代的查詢之後才回來也一樣擋下。
+        fx.respond_hit(1, hit_at(plain("lyrics of B"), "https://b.example/1"));
+        assert_eq!(
+            controller.state().lyrics_url.as_deref(),
+            Some("https://second-a.example/1")
+        );
+    }
+
+    /// 同一份歌詞、不同網址也算變化（通知一次）；完全相同的重複結果不通知。
+    /// 正常流程一次查詢只完成一次，所以這裡直接以同一個 key／世代再呼叫 `finish_lookup`。
+    #[test]
+    fn subscribers_are_notified_when_only_the_url_changes() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+        fx.respond_hit(0, hit_at(plain("words"), "https://one.example/1"));
+
+        let seen: Arc<Mutex<Vec<MusicState>>> = Arc::default();
+        let s = seen.clone();
+        let _sub = controller.subscribe(Box::new(move |state| lock(&s).push(state.clone())));
+
+        let (key, generation) = {
+            let core = lock(&controller.core);
+            (core.current_key.clone().unwrap(), core.generation)
+        };
+        let again = |url: &str| {
+            controller.finish_lookup(&key, generation, hit_at(plain("words"), url));
+        };
+
+        again("https://one.example/1"); // 完全相同
+        assert_eq!(lock(&seen).len(), 0);
+
+        again("https://two.example/2"); // 只有網址不同
+        assert_eq!(lock(&seen).len(), 1);
+        assert_eq!(lock(&seen)[0].lyrics, plain("words"));
+        assert_eq!(
+            lock(&seen)[0].lyrics_url.as_deref(),
+            Some("https://two.example/2")
+        );
+        assert_eq!(
+            controller.state().lyrics_url.as_deref(),
+            Some("https://two.example/2")
+        );
+
+        again("https://two.example/2"); // 重複
+        assert_eq!(lock(&seen).len(), 1);
     }
 
     #[test]
