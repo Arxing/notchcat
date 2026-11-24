@@ -80,6 +80,7 @@ cargo run --release -p musicat-app
 
 - 讀取系統現正播放需要 helper 動態庫 `libmusicat_mediaremote_helper.dylib` 放在**可執行檔旁邊**（建置時自動產生在
   `target/<profile>/`）。找不到時印一行 `system now-playing unavailable` 並只用視窗標題備援，程式照常執行。
+- 有歌詞時，Expanded 畫面控制列左側會顯示一個小的歌詞來源標籤（例如 `lrclib.net ↗`），點擊會用預設瀏覽器開啟該歌詞的來源網站（只開 `https://` 網址）。
 - 選單列圖示很多時，macOS 會把放不下的圖示藏起來（有瀏海的螢幕特別明顯）；看不到「♪」時請按住 ⌘ 拖曳其他圖示騰出位置。
 - **結束與 helper**：從選單「結束」，以及登出、關機與 `NSRunningApplication.terminate()` 這些經由 AppKit 結束通知的路徑，都會先停掉 perl helper 再結束。
   Activity Monitor 的強制結束（`kill -9`）與 `SIGINT`／`SIGTERM`（Ctrl-C、`kill`）會直接殺掉行程，**不會**呼叫停止來源的程式；
@@ -151,6 +152,8 @@ virtual_height = 32            # 10 到 400
 - **music.163.com**（網易雲）：先以「曲名 演出者」搜尋，再用搜尋結果裡找到的歌曲 id 取歌詞。
 
 標準的 HTTP 請求本身會讓對方看到你的 IP 位址與 User-Agent（固定為 `MusiCat`），網易雲的請求另帶固定的 Referer 標頭（`https://music.163.com/`）；這些之外不帶任何其他使用者資料。兩個歌詞來源可以個別在選單或 TOML 設定檔中關閉。
+
+點擊 Expanded 畫面的歌詞來源標籤時，是你的預設瀏覽器自己連線到該網站（與你在瀏覽器裡開那個網址相同）；MusiCat 只把網址交給系統，不會為此另外送出任何請求或資料。
 
 ## macOS 風險
 

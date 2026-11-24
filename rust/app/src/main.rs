@@ -490,6 +490,10 @@ mod macos {
                     st.module_state.clone(),
                     st.modules.clone(),
                     st.clock.clone(),
+                    // 歌詞來源標籤：只開 https 網址（`open_url` 自己再驗證一次），在主執行緒呼叫。
+                    Arc::new(|url: &str| {
+                        musicat_platform_macos::links::open_url(url);
+                    }),
                 );
                 if st.detailed_log {
                     content = content.with_event_hook(|event| log!("shell: {event:?}"));

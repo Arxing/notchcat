@@ -14,7 +14,8 @@
 5. [待重跑：Task 23 的 hover 驗證](#5-待重跑task-23-的-hover-驗證)
 6. [量測：CPU 與記憶體（measure.sh）](#6-量測cpu-與記憶體measuresh)
 7. [移除 Swift 版的關卡與待決事項](#7-移除-swift-版的關卡與待決事項)
-8. 附錄 A–E：Task 21 視窗、Task 22 選單列、Task 23 外殼、Task 24 音樂畫面、Task 25 真正的 App
+8. [歌詞來源連結](#8-歌詞來源連結)
+9. 附錄 A–E：Task 21 視窗、Task 22 選單列、Task 23 外殼、Task 24 音樂畫面、Task 25 真正的 App
 
 ## 1. 怎麼執行
 
@@ -184,6 +185,24 @@ sh rust/scripts/measure.sh -d 3600 -i 10 -o ~/musicat-measure.csv     # 終端�
 **不在這一輪**：`docs/HANDOFF.md` 的「下一輪設計的輸入」（本地歌詞來源排第一、可編輯覆寫、±offset 與黑名單、行級準確度、準確度優先、
 本地歌詞資料夾給 AI agent 寫、公開 GitHub repo 分享、git 版控、版權）是 **R5**，R2 不做。
 Swift 的「已知風險」（perl 宿主脆弱、僅供個人使用、不可對外發布；歌詞命中率樣本太少等）在 Rust 版同樣成立，見 `rust/README.md`「macOS 風險」。
+
+## 8. 歌詞來源連結
+
+有歌詞時，Expanded 控制列左側的空位顯示一個小而低對比的來源標籤（網址的主機名稱加 `↗`，例如 `lrclib.net ↗`、`music.163.com ↗`），
+點擊後用系統預設瀏覽器開啟該歌詞的來源網址（只接受 `https://`，`platform-macos` 的 `links::open_url` 再驗證一次）。
+標籤文字由 `music_layout::source_label` 產生（有單元測試）；字級、不透明度與最大字元數是同一檔案的 `SOURCE_LABEL_*` 常數。
+示範程式（`music_demo`）不開瀏覽器，只印出 `open <網址>`。以下請用真正的 App（`cargo run --release -p musicat-app`）
+與示範程式（`cargo run --release -p musicat-shell --example music_demo -- --scene <場景>`）確認：
+
+- [ ] **(a) 有命中時標籤顯示、點擊開瀏覽器、面板不搶焦點。** 播放一首查得到歌詞的歌，展開面板 → 控制列左側出現來源標籤，
+  游標移上去是手形；點一下 → 預設瀏覽器開啟該網址，面板不搶走目前 App 的焦點（點擊前的前景 App 仍是前景，除了瀏覽器本身被系統帶到前面）。
+- [ ] **(b) 沒命中時沒有標籤、版面不變。** `music_demo --scene none`、`--scene nolyrics`（以及真實 App 裡查不到歌詞的歌）→ 沒有標籤，
+  控制列的高度、三顆按鈕與右側折疊箭頭的位置與有標籤時完全相同。
+- [ ] **(c) 純文字歌詞也有標籤。** `music_demo --scene plain`（以及真實 App 裡只有純文字歌詞的歌）→ 標籤照樣出現、可點。
+- [ ] **(d) 標籤不蓋到按鈕。** 超長歌名（`--scene longtitle`）或窄螢幕（沒有瀏海的螢幕用 200 點虛擬瀏海；瀏海較窄的機型）→
+  標籤被截斷（主機名稱以 `…` 結尾，`↗` 保留），不會與「上一首」按鈕重疊，也不會把按鈕擠離中央。
+- [ ] **(e) LRCLIB 沒有有效 id 時開的是請求位址。** LRCLIB 的回應沒有可用的 `id` 時，連結退用當時的請求位址（`/api/get?...` 或 `/api/search?...`），
+  瀏覽器會顯示 JSON 或搜尋結果清單——這是預期行為，不是錯誤。
 
 ---
 

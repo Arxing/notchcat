@@ -89,6 +89,8 @@ struct Shared {
     module_state: Arc<MusicModuleState>,
     modules: Arc<ModuleManager>,
     clock: Arc<dyn Clock>,
+    /// 開啟歌詞來源網址（app 注入平台的 `open_url`；示範只印出來）。
+    open_url: Arc<dyn Fn(&str) + Send + Sync>,
     geometry: Cell<NotchGeometry>,
     /// 外殼目前的模式（`on_shell_event` 與 `preview()`／`expanded()` 更新）。
     mode: Cell<ShellMode>,
@@ -203,6 +205,8 @@ impl MusicShellContent {
     ///
     /// - `module_state` 應已註冊進 `modules`（外殼以 `modules.active_module_id()` 判斷音樂是否 active）。
     /// - `clock` 給播放位置推算用（Unix 秒），應與控制器的快照同一時間基準。
+    /// - `open_url` 在使用者點 Expanded 控制列左側的歌詞來源標籤時呼叫，參數是點擊當下狀態裡的
+    ///   `lyrics_url`（一律 `https://`）。在主執行緒呼叫；外殼不另做驗證，由注入的實作負責。
     pub fn new(
         cx: &mut App,
         geometry: NotchGeometry,
@@ -210,6 +214,7 @@ impl MusicShellContent {
         module_state: Arc<MusicModuleState>,
         modules: Arc<ModuleManager>,
         clock: Arc<dyn Clock>,
+        open_url: Arc<dyn Fn(&str) + Send + Sync>,
     ) -> Self {
         // 定時器的喚醒 channel：送出端在 Shared 裡（主執行緒），Shared drop 時定時器工作隨之結束。
         let (kick_tx, mut kick_rx) = mpsc::unbounded::<()>();
@@ -218,6 +223,7 @@ impl MusicShellContent {
             module_state,
             modules,
             clock,
+            open_url,
             geometry: Cell::new(geometry),
             mode: Cell::new(ShellMode::Preview),
             visible: Cell::new(true),
@@ -793,7 +799,8 @@ impl MusicView {
         col.child(self.controls(snapshot, cx)).into_any_element()
     }
 
-    /// 上一首／播放暫停／下一首（置中），右側是歌詞條折疊開關，左側等寬空白讓按鈕維持置中。
+    /// 上一首／播放暫停／下一首（置中），右側是歌詞條折疊開關，左側等寬的區域放歌詞來源標籤（沒有網址時空白），
+    /// 讓按鈕維持置中。
     fn controls(&self, snapshot: &TrackSnapshot, cx: &mut Context<Self>) -> AnyElement {
         let s = &self.shared;
         let enabled = s.controller.has_control();
@@ -873,7 +880,52 @@ impl MusicView {
                 cx.notify();
             }));
 
-        let square = || div().size(px(CONTROL_ROW_HEIGHT as f32)).flex_none();
+        // 左側區域取代原本的「24 方塊 + flex_1」：flex_1 但基準寬 24，所以寬度仍等於右側的
+        // 「flex_1 + 24 折疊開關」（見 `control_side_widths`），按鈕群位置不變。`min_w_0` + 裁切讓標籤
+        // 再長也只會被截斷，不會撐寬這一側去推擠按鈕。
+        let mut source = div()
+            .flex_1()
+            .flex_basis(px(CONTROL_ROW_HEIGHT as f32))
+            .min_w_0()
+            .h(px(CONTROL_ROW_HEIGHT as f32))
+            .overflow_hidden()
+            .flex()
+            .flex_row()
+            .items_center();
+        if let Some(label) = s.state().lyrics_url.as_deref().and_then(source_label) {
+            let host = label
+                .strip_suffix(SOURCE_LABEL_SUFFIX)
+                .unwrap_or(&label)
+                .to_string();
+            source = source.child(
+                div()
+                    .id("music-source-link")
+                    .min_w_0()
+                    .max_w_full()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_size(px(SOURCE_LABEL_FONT_SIZE as f32))
+                    .line_height(px(SOURCE_LABEL_LINE_HEIGHT as f32))
+                    .text_color(white_a(SOURCE_LABEL_OPACITY))
+                    // 主機名稱可被省略號截斷；箭頭固定保留。
+                    .child(div().min_w_0().truncate().child(host))
+                    .child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .child(SOURCE_LABEL_SUFFIX),
+                    )
+                    .on_click(cx.listener(|view, _, _, _| {
+                        // 讀點擊當下的狀態，不用 render 時的舊值（換曲後網址可能已變或清空）。
+                        let url = view.shared.state().lyrics_url.clone();
+                        if let Some(url) = url {
+                            (view.shared.open_url)(&url);
+                        }
+                    })),
+            );
+        }
         div()
             .w_full()
             .h(px(CONTROL_ROW_HEIGHT as f32))
@@ -881,8 +933,7 @@ impl MusicView {
             .flex()
             .flex_row()
             .items_center()
-            .child(square())
-            .child(div().flex_1())
+            .child(source)
             .child(buttons)
             .child(div().flex_1())
             .child(fold)
