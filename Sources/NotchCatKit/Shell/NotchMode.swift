@@ -1,0 +1,93 @@
+import CoreGraphics
+
+/// The two panel modes. See docs/superpowers/specs/2026-09-23-module-interface-design.md.
+enum NotchMode: Equatable {
+    case preview
+    case expanded
+}
+
+extension NotchMode {
+    /// How much wider than the physical notch the bar sits, so it reads as a
+    /// deliberate bar hugging the notch rather than exactly tracing its
+    /// cutout (the boring.notch-style look). Both modes share this same
+    /// width — only the height grows downward — matching boring.notch, where
+    /// opening the shell doesn't change its width at all.
+    private static let widthPadding: CGFloat = 160
+
+    /// The most extra height a module may ask for below the notch in Preview.
+    static let maxPreviewExtraHeight: CGFloat = 28
+
+    /// Clamps a module-requested extra Preview height to
+    /// `0...maxPreviewExtraHeight`.
+    static func clampedPreviewExtra(_ value: CGFloat) -> CGFloat {
+        min(max(value, 0), maxPreviewExtraHeight)
+    }
+
+    /// Preview's size (the shell's resting state) and Expanded's size
+    /// (hover-triggered, holds the module-switcher AppBar plus content).
+    /// `previewExtraHeight` (clamped) is added below the notch in Preview
+    /// only; width and Expanded are unaffected.
+    func size(for geometry: NotchGeometry, previewExtraHeight: CGFloat = 0) -> CGSize {
+        let width = geometry.notchSize.width + Self.widthPadding
+        switch self {
+        case .preview:
+            let extra = Self.clampedPreviewExtra(previewExtraHeight)
+            return CGSize(width: width, height: geometry.notchSize.height + extra)
+        case .expanded:
+            return CGSize(width: width, height: 180)
+        }
+    }
+
+    /// Frame for this mode, anchored to the notch's top-center so every mode
+    /// grows/shrinks around the same fixed point.
+    func frame(for geometry: NotchGeometry) -> CGRect {
+        let size = size(for: geometry)
+        return CGRect(x: geometry.centerX - size.width / 2,
+                       y: geometry.topY - size.height,
+                       width: size.width,
+                       height: size.height)
+    }
+
+    /// The panel's own frame never changes at runtime — see
+    /// `NotchShellController`. It's sized to fit every mode's footprint so
+    /// the hover hit-test area is always the same stable, generous size:
+    /// a hit-test area that shrinks/grows in sync with the mode-change
+    /// animation is only as forgiving as its smallest transient size, and
+    /// Preview's is a ~32pt-tall sliver — thin enough that ordinary cursor
+    /// jitter while "holding still" crosses its edge and causes the shell to
+    /// flicker open/closed. Only the drawn content animates its size within
+    /// this fixed container. It fits Preview at its maximum extra height as
+    /// well as Expanded.
+    static func containerSize(for geometry: NotchGeometry) -> CGSize {
+        let sizes = [
+            NotchMode.preview.size(for: geometry, previewExtraHeight: maxPreviewExtraHeight),
+            NotchMode.expanded.size(for: geometry),
+        ]
+        return CGSize(width: sizes.map(\.width).max() ?? 0,
+                       height: sizes.map(\.height).max() ?? 0)
+    }
+
+    static func containerFrame(for geometry: NotchGeometry) -> CGRect {
+        let size = containerSize(for: geometry)
+        return CGRect(x: geometry.centerX - size.width / 2,
+                       y: geometry.topY - size.height,
+                       width: size.width,
+                       height: size.height)
+    }
+
+    /// This mode's hover hit-test rect, in the fixed container's own
+    /// top-anchored local coordinate space (see `containerFrame`). Used to
+    /// require a precise hover over the visible Preview pill to *open* the
+    /// shell, while `NotchShellController` widens the active hit-test rect
+    /// to the whole container the instant it opens, so staying open is
+    /// forgiving. NSHostingView is flipped (origin top-left), matching the
+    /// top-anchored layout in NotchContentView.
+    func localRect(for geometry: NotchGeometry, previewExtraHeight: CGFloat = 0) -> CGRect {
+        let container = NotchMode.containerSize(for: geometry)
+        let size = size(for: geometry, previewExtraHeight: previewExtraHeight)
+        return CGRect(x: (container.width - size.width) / 2,
+                       y: 0,
+                       width: size.width,
+                       height: size.height)
+    }
+}

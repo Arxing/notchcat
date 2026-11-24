@@ -1,0 +1,425 @@
+# MusiCat Rust 版：給作者的驗收文件
+
+最後更新：2026-11-20（Task 26）。這份文件是 Rust 版 R2 的**唯一**驗收文件：自動化做不到、必須由作者在自己的 Mac 上確認的項目都在這裡。
+確認後把結果寫回 spec（`docs/superpowers/specs/2026-11-06-cross-platform-rust-design.md`）第 7.2 節的表格與第 12 節，
+並在這裡把該項打勾、附上日期與觀察。各任務的詳細步驟在文末的附錄 A–E（每個附錄對應一個任務，內容是當時寫下的待辦，沒有刪減）；
+前面的章節是索引與總表，不重複附錄的步驟。
+
+## 目錄
+
+1. [怎麼執行](#1-怎麼執行)
+2. [Rust 版驗收清單（對應 Swift HANDOFF 的 20 項）](#2-rust-版驗收清單對應-swift-handoff-的-20-項)
+3. [spec 第 12 節的額外檢查](#3-spec-第-12-節的額外檢查)
+4. [Task 21–25 新增的檢查（索引）](#4-task-2125-新增的檢查索引)
+5. [待重跑：Task 23 的 hover 驗證](#5-待重跑task-23-的-hover-驗證)
+6. [量測：CPU 與記憶體（measure.sh）](#6-量測cpu-與記憶體measuresh)
+7. [移除 Swift 版的關卡與待決事項](#7-移除-swift-版的關卡與待決事項)
+8. 附錄 A–E：Task 21 視窗、Task 22 選單列、Task 23 外殼、Task 24 音樂畫面、Task 25 真正的 App
+
+## 1. 怎麼執行
+
+```sh
+sh rust/scripts/run.sh          # 從任何目錄都行；等同 Swift 版的 scripts/run.sh
+```
+
+`run.sh` 先 `cargo build --release -p musicat-app`（一律 release：spike 的 GPUI 透明度以 release 驗證）再 `exec target/release/musicat "$@"`。
+建置失敗且訊息提到 Metal 時會說明本專案用 `runtime_shaders` 建置（不需要 Metal Toolchain，見 `rust/README.md`）；
+建置後找不到 helper 動態庫時會印 `cargo clean -p musicat-platform-macos` 的提示。第一次建置要編 GPUI，需要好幾分鐘。
+
+開發與驗收用的環境變數（日誌都寫到 stderr）：
+
+| 變數 | 作用 |
+|---|---|
+| `MUSICAT_LOG=1` | 印出現正播放（**含曲名與演出者**）、歌詞狀態、外殼狀態與選單列狀態。 |
+| `MUSICAT_AUTO_QUIT_SECS=<n>` | n 秒後走與選單「結束」相同的路徑結束。 |
+| `MUSICAT_CONFIG=<path>` | 改用這個設定檔，避免動到真正的設定檔（`~/Library/Application Support/MusiCat/musicat.toml`）。 |
+
+啟動時一定會在 stderr 印出實際使用的設定檔路徑。驗收時建議：`MUSICAT_LOG=1 sh rust/scripts/run.sh`。
+動態庫（helper）放在可執行檔旁邊（`rust/target/release/libmusicat_mediaremote_helper.dylib`），找不到時只剩視窗標題備援。
+煙霧／示範範例（`panel_smoke`、`tray_smoke`、`shell_demo`、`music_demo`、`wake_smoke`）的用法在各附錄。
+
+## 2. Rust 版驗收清單（對應 Swift HANDOFF 的 20 項）
+
+這 20 項照抄 `docs/HANDOFF.md`「尚未驗證」，**項目內容與判定標準不變**，只改名稱與指令
+（`pkill -f NotchCatMediaRemoteHelper` → `pkill -f musicat_helper_main`；`scripts/run.sh` → `rust/scripts/run.sh`；
+`swift build` → `cargo build`；`.scrollIndicators(.hidden)` → GPUI 歌詞捲動區；AppBar／版面預算 → Rust 常數）。
+Rust helper 的實際命令列（`ps` 實測，Task 26，App 執行中）是
+`/usr/bin/perl -e <含 "musicat_helper_main" 的腳本> <…/target/release/libmusicat_mediaremote_helper.dylib>`，父行程是 `musicat`，
+所以 `pkill -f musicat_helper_main` 與 `pgrep -f musicat_helper_main` 都能對到它。
+
+狀態欄：**agent-verified** = 代理人已實測、證據寫在旁邊；**partly** = 一部分已驗證（寫明哪一部分）、其餘仍待作者；
+**needs author** = 代理人沒有驗證。證據只引用各任務與附錄實際做過的事（任務報告不在 repo 內，這裡寫的就是證據紀錄）。最右欄的 ☐ 由作者驗收後打勾。
+
+| # | 項目（Swift 原文；僅改名稱與指令） | 狀態 | 證據與作者要做的事 | 作者 |
+|---|---|---|---|---|
+| 1 | YouTube Music、YouTube、Spotify 各播一首：Preview 出現封面、音柱與歌詞條；Expanded 顯示曲名、演出者、進度條、封面。**Spotify 完全未驗證**（開發機沒安裝）。 | partly | 已驗證：`music_demo --scene playing`（腳本來源）的 Preview 與 Expanded 版面，以 `screencapture` 只截瀏海區域目視確認（附錄 D 開頭）；真實 helper 在 App 內送來現正播放（暫停中的曲目，來源 `mediaremote`，位置與封面都有；附錄 E 開頭）。**作者要做**：三個播放器各播一首看真實畫面（尤其 Spotify）。步驟見附錄 D「Preview 版面」「Expanded 版面」。 | ☐ |
+| 2 | 暫停時 helper 輸出的形狀（Preview 是否正確回到空黑條）。 | partly | 已驗證：真實 helper 對一首已暫停的曲目送出暫停快照（日誌 `paused … [mediaremote; position known; artwork=true]`），Preview 是空黑條（Task 25b 的瀏海截圖，附錄 E 開頭）。**作者要做**：播放中按暫停，Preview 回到空黑條、歌詞條收起；Expanded 顯示說明文字（附錄 D「暫停回到空黑條」）。 | ☐ |
+| 3 | 拖動進度時 helper 是否會輸出新的一行（畫面是否跟上）。 | needs author | 要真實來源：在播放器拖動進度後，Expanded 的進度條與目前歌詞行在 1 秒內跟上（附錄 D「拖動進度」）。 | ☐ |
+| 4 | 視窗標題備援的格式：YouTube Music PWA 以外的情境，以及備援是否需要「螢幕錄製」權限（很可能需要，見 `docs/HANDOFF.md` 的實測發現）。 | needs author | 標題解析有單元測試（Swift 案例逐案移植），但沒有對真實播放器驗證過。`perl_host = false` 時只用視窗標題備援（Task 25b 驗證了沒有 helper 行程，沒有看標題內容）。 | ☐ |
+| 5 | hover 不閃爍：Preview 加高後重新驗收（這是 Shell 先前最難的問題）；特別留意歌詞條出現或折疊使 Preview 高度改變時，游標靜止不動是否會產生多餘的展開（Swift 版以 `mouseEntered` 判斷；Rust 版輪詢游標位置，沒有 tracking area）。**差異請一併判斷**：Rust 版在游標靜止、Preview 因歌詞條出現而長高、游標剛好落進新範圍時，會在下一次取樣展開（Swift 沒收到 enter 就不展開）。 | partly | 已驗證：Task 23 以腳本驅動真實游標的 13 步 hover 情境全部符合期望（不在 Preview 下方的容器內不展開、抖動不收合、離開 150 ms 後收合、快速進出只展開一次、跨長條下緣抖動只展開一次），動畫 284／285 ms；但那是修正輪**之前**、佔位內容的結果，修正輪後尚未重跑（見第 5 節）。**作者要做**：第 5 節的重跑，再用真實觸控板看歌詞條出現／折疊時游標靜止的行為（附錄 C「游標靜止在長條邊緣不閃爍」）。 | ☐ |
+| 6 | GPUI 歌詞捲動區不顯示捲軸（Expanded 的歌詞區與 `--scene plain` 的靜態全文區）。 | needs author | 附錄 D 的說明是 GPUI 不畫捲軸，但 Task 24 沒有目視確認。與第 16 項一起檢查（附錄 D「捲動條」）。 | ☐ |
+| 7 | 歌詞條底色透明度 0.6、高度 24pt 的觀感（`LYRIC_STRIP_OPACITY`、`LYRIC_STRIP_HEIGHT`，在 `core/src/music/module.rs`）；展開／折疊動畫與折疊後的 hover 範圍。 | partly | 已驗證：`music_demo --scene playing` Preview 瀏海下方的 0.6 黑色歌詞條、圓角與中文歌詞行（Task 24 截圖）。**未驗證**：折疊箭頭的點擊、展開／折疊動畫手感、歌詞條出現時的半透明過渡（附錄 C「Preview 歌詞條的黑底與半透明」、附錄 D「歌詞條觀感與折疊」）。調整結果寫回 spec 與兩個常數。 | ☐ |
+| 8 | 上一首／播放暫停／下一首（尤其 `next`、`previous`）真的控制得動。 | needs author | 示範程式的按鈕作用在腳本來源，且點擊在非啟用面板上的行為沒有驗證過；真實播放器要在 App 內驗（附錄 D「按鈕可點、不搶焦點」、附錄 E「真實播放器的控制與 CPU」）。 | ☐ |
+| 9 | 殺掉 perl 行程（`pkill -f musicat_helper_main`）後自動恢復；暫時改名動態庫（`target/release/libmusicat_mediaremote_helper.dylib`）後 App 不崩潰並退到視窗標題備援（已知會在 stderr 印一行 `system now-playing unavailable`，只印一次）。 | needs author | 監管者的重啟與退避有單元測試（假的啟動器）；沒有對真實 helper 殺過一次。附錄 E「helper 被殺掉後恢復」。 | ☐ |
+| 10 | 無網路時歌詞靜默消失、曲目顯示不受影響。 | needs author | 提供者「失敗」與「乾淨地沒有」的區分有單元測試；真實斷網沒有試過（附錄 E「LRCLIB／網易雲開關與離線」）。 | ☐ |
+| 11 | 視窗標題備援只顯示曲名（沒有演出者，不查歌詞）。 | needs author | 單元測試涵蓋；真實情境見附錄 E「視窗標題備援」。 | ☐ |
+| 12 | helper 的 CPU 與記憶體在長時間執行下的表現。 | partly | 已驗證（短時間）：App 閒置 15 秒約 1.3% CPU、RSS 約 42 MB；helper 約 0.3%、13 MB（Task 25b）。`measure.sh -d 40 -i 5` 對真實 App 與 helper 跑過，RSS 變化 +1.4%／+2.2%（Task 26）。**作者要做**：第 6 節的 1 小時量測。 | ☐ |
+| 13 | 音柱（Equalizer）動畫的 CPU 成本。 | partly | 已量測：release、停在 Preview 的示範程式，音柱 12 fps 約 3.6%（目標約 3%，略高）；跑馬燈 30 fps 約 5.4%（Task 24）。**作者要做**：目視平順度、決定是否把 `music_layout::EQ_FRAME_SECONDS` 調成 1/10；在真實播放時再量一次（附錄 D「CPU 與平順度的取捨」）。 | ☐ |
+| 14 | Expanded 的模組切換列（AppBar）實際高度為 15pt（`music_layout::APP_BAR_HEIGHT`），版面預算是 149pt（`MUSIC_PAGE_HEIGHT` = `EXPANDED_CONTENT_HEIGHT` 172 − 15 − 8）而非 144pt，請目視確認沒有擠壓或裁切。常數都在 `rust/shell/src/music_layout.rs`；Expanded 高 180（`EXPANDED_HEIGHT`，`rust/core/src/shell_logic/geometry.rs`）、上方內距 8（`EXPANDED_TOP_PADDING`，`rust/shell/src/lib.rs`）。 | partly | 已驗證：預算由常數推導並有單元測試（內容角點在 24 pt 圓角內）；Task 24 的 Expanded 截圖沒有看到擠壓，下方圓角外沒有露出內容。**作者要做**：用真實內容再看一次（附錄 D「版面預算」）。 | ☐ |
+| 15 | 歌詞條額外高度的 0.28 秒動畫期間，Preview 的封面是從零尺寸長出來的，請確認觀感可接受。（Rust 版的實作不同：內容槽固定為目標大小、由外形裁切，封面**不會**從零長出來，歌詞條是被「揭開」。請確認新的觀感可接受。） | needs author | 附錄 D「歌詞條出現的動畫」。 | ☐ |
+| 16 | GPUI 歌詞捲動區不顯示捲軸，包含「系統設定 > 外觀 > 顯示捲動條：永遠」的情況下。 | needs author | 與第 6 項一起檢查（附錄 D「捲動條」）。 | ☐ |
+| 17 | 睡眠／喚醒：播放音樂時讓 Mac 睡眠再喚醒，helper 是否恢復、資料是否是新的。 | partly | 已驗證：`wake_smoke` 以程式發出 `NSWorkspaceDidWakeNotification`（**沒有**讓機器睡眠），回呼在主執行緒被呼叫、取消登記後不再被呼叫（Task 25b）。**作者要做**：真的睡眠再喚醒（附錄 E「睡眠與喚醒」，日誌 `system woke from sleep`、helper 換成新 pid）。 | ☐ |
+| 18 | 從選單列 Quit，以及對 App 下 `kill -9`，之後 `pgrep -f musicat_helper_main`（或 `pgrep perl`）都不應留下 helper 行程。 | partly | `kill -9` App：0.05 秒內 helper 消失（Task 25b）；`MUSICAT_AUTO_QUIT_SECS`（與選單「結束」同一條程式路徑）後 `exit=0`、沒有 helper（Task 25b）；Task 26 另驗證 `SIGTERM`、`SIGINT`、系統式結束（`NSRunningApplication.terminate()`，同登出的 Apple Event）都不留 helper。未做：用滑鼠真的點選單「結束」（附錄 E「結束不留 helper」，路徑相同、風險低）。 | ☐ |
+| 19 | App 執行中重新 `cargo build --release -p musicat-app`（動態庫被重新連結）後，確認 helper 能恢復。**注意**：cargo 只在 `rust/platform-macos/helper/` 或 `build.rs` 有變更時才重跑 build script、重新連結動態庫，所以要先 `touch rust/platform-macos/helper/helper.c` 才會真的換掉動態庫（build.rs 先刪再複製，新檔案是新的 inode）。只手動刪掉 `target/release/` 裡的那份複本不會被補回，要 `cargo clean -p musicat-platform-macos`（`run.sh` 會提示）。 | needs author | 附錄 E「重新建置後恢復」。 | ☐ |
+| 20 | 視窗標題備援在有／沒有「螢幕錄製」權限下的行為（沒有權限時預期什麼都不顯示）。 | needs author | 附錄 E「視窗標題備援」。 | ☐ |
+
+驗收後把歌詞條透明度與高度的調整結果寫回 Music spec 與計畫的 Global Constraints（與 Swift 版相同的要求）。
+
+## 3. spec 第 12 節的額外檢查
+
+spec 第 12 節除了上面的 20 項（第 1 點），還有兩項 Rust 版必須實機確認（第 4 點 Windows 屬於 R3，不在這一輪）：
+
+- **第 2 點：GPUI spike 沒能自動驗證的三項**——點擊穿透、跨空間與全螢幕空間、點擊不搶焦點。
+  Task 21 起都做成煙霧範例的待辦（附錄 A：「點擊穿透（面板外）」「點擊長條不搶焦點、不啟動 App」「跨空間」「其他 App 的全螢幕空間」）；
+  Task 23 的外殼上再驗收一次（附錄 C：「收合時點擊穿透」「展開時接收點擊、不搶焦點」）。狀態：**needs author**。
+- **第 3 點：全螢幕時面板在 macOS 上的實際行為**（spec 第 5.3 節）。附錄 A「其他 App 的全螢幕空間」、附錄 C「全螢幕 App 之上的行為」。
+  在作者回報之前，`foreground_is_fullscreen()`（`rust/platform-macos/src/panel.rs`）**固定回 `false`，不要動它**：
+  若面板在全螢幕空間裡被系統自然隱藏就維持 `false` 並把實測結果寫進它的文件註解；若仍顯示在全螢幕 App 之上，
+  才照註解裡的計畫另開任務實作。狀態：**needs author**。
+
+## 4. Task 21–25 新增的檢查（索引）
+
+下列檢查是 Task 21–25 加進來的（Swift 版沒有，或 Swift 版的 20 項沒有涵蓋）。已去重：與第 2 節某一項相同的只標項目編號，不再重複描述；
+步驟都在對應附錄。
+
+**面板與視窗行為**（附錄 A、C）
+- 目測長條與瀏海對齊（容器 x 583.5 落在 583，可能偏 0.5 點；aux 區高 32 對選單列視窗高 37）——附錄 A。
+- 點擊穿透（面板外、收合時的透明區域）、點擊／展開後點擊不搶焦點、跨空間（Stationary）、其他 App 的全螢幕空間——附錄 A、C；第 3 節。
+- 隱藏／再顯示（`MUSICAT_DEMO_BLINK=1`）、內容裁切（GPUI 0.2.2 只能矩形裁切，下方圓角外不得露出內容；第 14 項）——附錄 C。
+- 動畫手感（0.28 秒、圓角 10→24、中途反向不跳）、觸控板游標靜止在長條邊緣不閃爍（第 5 項）——附錄 C。
+
+**選單列圖示**（附錄 B、E）
+- 圖示看得見、淺色／深色外觀下可讀、多螢幕時出現在哪個螢幕——附錄 B。
+- **圖示被藏起來**：瀏海本身會擋住右側圖示，選單列太擠時 macOS 也會把圖示移到畫面外；用 ⌘ 拖曳其他圖示騰出位置（開發機上 21 個圖示有 17 個被移走，包括 MusiCat）——附錄 B、E。
+- 點圖示開選單、項目順序與勾選、點選後勾選翻轉、選單開著時面板的 hover 輪詢照常、結束可用、沒有 Dock 圖示且不搶焦點、圖示與面板重疊時誰蓋住誰——附錄 B（滑鼠操作的版本在附錄 E「選單用滑鼠操作」）。
+
+**畫面與互動**（附錄 D）
+- 按鈕／折疊箭頭／模組切換列的點擊（非啟用面板上；第 8 項）、字形（路徑繪製的控制鍵與 ♪）、跑馬燈平順度、中文字——附錄 D。
+- 場景：`paused`（第 2 項）、`none`、`plain`、`nolyrics`、`longtitle`；封面置中裁切與圓角；模組切換列選取每次新展開重設——附錄 D。
+- 音柱與跑馬燈的 CPU 取捨（第 13 項）——附錄 D。
+
+**多螢幕、設定與來源**（附錄 E）
+- 換螢幕（外接螢幕選擇、拔掉、接回、闔上筆電、「自動」）、設定檔只在值改變時寫入、歌詞條折疊的記憶（含 2 秒內被 `kill -9` 會遺失）——附錄 E。
+- 從選單切換 perl 宿主（含啟動時關閉後第一次勾選才建立 helper；第 9 項）、歌詞來源開關只影響下一首（第 10 項）、真實播放器的控制與 CPU——附錄 E。
+
+**建置**（附錄 A）
+- 作者的 Mac 若有 Metal Toolchain，拿掉 `runtime_shaders` 試一次預先編譯 shader 的路徑——附錄 A 最後一項。
+
+## 5. 待重跑：Task 23 的 hover 驗證
+
+Task 23 的修正輪（`247c40b`：歌詞條半透明區域、隱藏時 Animator 閒置、drop 即關閉）之後，**代理人沒能重跑** hover 腳本與動畫量測：
+當時作者的 Mac 鎖定且螢幕睡眠（`CGDisplayIsAsleep=1`、`CGSSessionScreenIsLocked=1`，`screencapture` 失敗），GPUI 在那個狀態不畫東西，
+動畫無法量測、歌詞條看不到。Task 26 也沒有重跑（hover 腳本要移動作者的真實游標約 20 秒），一併留給作者。
+`HoverMachine`、輸入接線與到期喚醒在修正輪沒有改；改的是繪製與關閉行為，所以需要確認的是：
+
+1. 一次 `shell_demo` ＋ `hover 756 32`，確認 13 步情境的期望仍全部成立（`756` 是 1512 點寬螢幕的瀏海中心 x，`32` 是瀏海高；別的螢幕請換成自己的值）。
+   執行期間**不要碰滑鼠**（腳本會把游標移動約 20 秒再還原）：
+
+   ```sh
+   cd rust
+   MUSICAT_DEMO_SECS=90 cargo run --release -p musicat-shell --example shell_demo > /tmp/shell_demo.log &
+   sleep 3 && ../spikes/gpui-notch/tools/hover 756 32      # 每一步印 STEP；log 裡每次轉移印 expand／collapse
+   # 對照 /tmp/shell_demo.log 與 STEP 的時間戳：每個 STEP 的名稱就寫著期望（expect NO expand、expect 1 exit …）；摘要見附錄 C 開頭
+   ```
+
+2. 一次動畫量測：`MUSICAT_SHELL_TRACE=1`，量展開與收合各約 0.28 秒（上次 284／285 ms）：
+
+   ```sh
+   cd rust
+   MUSICAT_SHELL_TRACE=1 MUSICAT_DEMO_SECS=30 cargo run --release -p musicat-shell --example shell_demo > /tmp/shell_anim.log &
+   sleep 3 && ../spikes/gpui-notch/tools/anim 756 32       # 進入長條、停 1.2 秒、離開
+   grep shell-frame /tmp/shell_anim.log | head -80         # 高度 32→180、圓角 10→24，約 0.28 秒
+   ```
+
+3. 用眼睛看歌詞條切換：`shell_demo` 每 6 秒切換一次 24 點高的佔位歌詞條（`MUSICAT_DEMO_TOGGLE_SECS`、`MUSICAT_DEMO_EXTRA` 可改）。
+   出現時瀏海高度那一段仍是純黑、下方兩角從圓角平順變成直角、下面長出 0.6 黑色帶；消失時反過來，黑底高度不跳（附錄 C「Preview 歌詞條的黑底與半透明」）。
+
+（`hover`、`anim` 是 `spikes/gpui-notch/tools/` 裡已編好的小工具；沒有的話 `swiftc -O hover.swift -o hover`、`swiftc -O anim.swift -o anim`。）
+
+## 6. 量測：CPU 與記憶體（measure.sh）
+
+驗收清單第 12、13 項與 spec 第 10 節「記憶體與 CPU」。**播放音樂時**量 1 小時：
+
+```sh
+sh rust/scripts/run.sh                                   # 終端機 1（保持執行，放音樂）
+sh rust/scripts/measure.sh -d 3600 -i 10 -o ~/musicat-measure.csv     # 終端機 2
+```
+
+`measure.sh [-d 秒數=3600] [-i 秒數=10] [-o 檔案=musicat-measure.csv] [-p PID]`：以 `pgrep -x musicat`（或 `-p`）找到 App，
+每個間隔用 `ps -o %cpu=,rss= -p` 記一行 CSV：`elapsed_s, musicat_cpu_pct, musicat_rss_kb, helper_cpu_pct, helper_rss_kb`
+（helper = App 的子行程中命令列含 `musicat_helper_main` 的 perl；沒有時兩欄留空）。App 結束時腳本跟著結束並印摘要。
+只寫 `-o` 指定的檔案（預設在目前目錄），不連網。
+
+**成功判準**
+- RSS：App 與 helper 各自，**最後十分之一樣本的平均相對於最前十分之一樣本平均的成長 ≤ 10%**（腳本印 `PASS`／`FAIL`；結束碼 1 = FAIL）。
+  1 小時內沒有持續上升的趨勢。注意 helper 的 RSS 前幾分鐘會爬升再進入平穩（Swift 實測在約 416 個來源處，MediaRemote 內部約 400 秒的逾時）；
+  若 helper 因此 `FAIL`，看摘要裡「參考，不計入判定」那一行（第 2 個十分之一對最後十分之一）與 CSV 曲線：爬升後平穩就是正常，持續上升才是問題。
+- CPU：腳本只印平均與最大值，由你判斷：閒置時要與 spike 的 1.4% 同一個量級。參考值：App 閒置 1.3%（Task 25b，15 秒）、
+  播放中音柱約 3.6%（Task 24）；helper 閒置約 0.3%。helper 的 CPU 與 RSS 也請一起看。
+- 把摘要貼回 spec 第 12 節；CSV 留著。
+
+## 7. 移除 Swift 版的關卡與待決事項
+
+**關卡：你完成這份清單之後，再告訴代理人「移除 Swift 版」，那會是一個獨立的提交；在那之前什麼都不會被移除**
+（Swift 原始碼、`Package.swift`、`scripts/run.sh`、`docs/HANDOFF.md` 都原封不動；代理人不會自己刪）。
+清單中有 **needs author** 或 **partly** 而你判斷可以接受的項目，請在移除前一併註明。
+
+待決事項（需要你決定，不影響這一輪的驗收）：
+- `foreground_is_fullscreen()` 要不要實作（取決於第 3 節的全螢幕實測）。
+- 歌詞條透明度 0.6、高度 24、音柱 12 fps、跑馬燈 30 fps 要不要調（第 7、13 項）。
+- 有 Metal Toolchain 時要不要拿掉 `runtime_shaders`（附錄 A 最後一項）。
+- 與 Swift 版 `docs/HANDOFF.md`「待決事項」相同的兩項：v1 要不要做「模組開關」的使用者可見設定 UI（目前寫死啟用清單）、多模組搶 Preview 的排序體驗。
+- Windows 全部（R3，未在實機驗證）。
+
+**不在這一輪**：`docs/HANDOFF.md` 的「下一輪設計的輸入」（本地歌詞來源排第一、可編輯覆寫、±offset 與黑名單、行級準確度、準確度優先、
+本地歌詞資料夾給 AI agent 寫、公開 GitHub repo 分享、git 版控、版權）是 **R5**，R2 不做。
+Swift 的「已知風險」（perl 宿主脆弱、僅供個人使用、不可對外發布；歌詞命中率樣本太少等）在 Rust 版同樣成立，見 `rust/README.md`「macOS 風險」。
+
+---
+
+## 附錄 A　Task 21 GPUI 視窗驗證
+
+對應 GPUI 0.2.2 與 `rust/platform-macos/src/panel.rs` 的繞路。以下都用煙霧範例：
+
+```sh
+cd rust
+MUSICAT_SMOKE_SECS=120 cargo run -p musicat-shell --example panel_smoke
+```
+
+它會在有瀏海的螢幕（沒有就用主螢幕與 200 × 32 的虛擬瀏海）頂端顯示黑色 Preview 長條，左翼 `MusiCat`、右翼 `現正播放`，
+`MUSICAT_SMOKE_SECS` 秒後自動結束（預設 8 秒）。游標移進／移出長條時 stdout 會印 `click-through=OFF/ON`。
+
+Task 21 已自動驗證（2026-11-18，macOS 15.7 arm64，主螢幕為有瀏海的內建 1512 × 982，另接兩台外接螢幕），
+由外部工具（`spikes/gpui-notch/tools/winfo.swift`、`lsappinfo`、System Events）量測：
+
+- 層級與外框：CGWindowList `layer=25`（選單列 24）、`bounds X=583 Y=0 345×180`，與 core 的 `container_frame` 一致。
+- `describe_panel`：`class=GPUIPanel level=25 styleMask=128（Borderless|NonactivatingPanel）key=false main=false
+  canBecomeKey=false canBecomeMain=false behavior=337（CanJoinAllSpaces|Stationary|IgnoresCycle|FullScreenAuxiliary）`。
+- 不出現在 Dock／Cmd-Tab：`lsappinfo` 的 `ApplicationType="UIElement"`；System Events 的非 background-only 行程中沒有它。
+- 不搶焦點（啟動時）：前景 App 在執行前、執行中、結束後都是同一個（Slack）。
+- 座標：`list_screens()` 的外接螢幕外框與 CGWindowList 中各螢幕選單列視窗的 bounds 相同；`mouse_location()` 與 `CGEvent` 位置一致。
+
+下列項目**尚未**驗證：
+
+- [ ] **目測長條與瀏海是否對齊。** 容器 x 為 583.5，AppKit 落在 583，所以在這台 Mac 上長條可能比瀏海中心偏 0.5 點；
+  另外 aux 區回報的瀏海高 32，而內建螢幕的選單列視窗高 37，確認長條高度看起來是否貼合瀏海。
+
+- [ ] **點擊穿透（面板外）。** 開一個 Finder 視窗，把它拖到面板正下方、與面板的固定容器（Preview 長條下方約 180 點高、
+  與長條同寬的透明區域）重疊。執行煙霧範例，點容器內、長條以外的透明處 → 應該點到 Finder 視窗（例如選取檔案），
+  stdout 維持 `click-through=ON`。
+- [ ] **點擊長條不搶焦點、不啟動 App。** 先讓 TextEdit 在前景並把游標放在文件裡打字。執行煙霧範例，用滑鼠點一下黑色長條，
+  再繼續打字 → 字應該仍輸入到 TextEdit；選單列左上角的 App 名稱仍是 TextEdit；Dock 與 Cmd-Tab 都沒有 `panel_smoke`。
+  可在另一個終端機確認：
+  `osascript -e 'tell application "System Events" to get name of first process whose frontmost is true'`。
+- [ ] **跨空間。** 開兩個桌面空間（Mission Control 右上角 +）。執行煙霧範例後用 Ctrl-→／Ctrl-← 切換空間 →
+  長條在每個空間都在同一位置、切換時不跟著滑動（Stationary）、不出現在 Mission Control 的視窗縮圖中。
+- [ ] **其他 App 的全螢幕空間（決定 `foreground_is_fullscreen()` 要不要實作，spec 第 5.3 節）。**
+  讓 Safari 進入全螢幕（綠色按鈕或 Ctrl-Cmd-F），再執行煙霧範例（`MUSICAT_SMOKE_SECS=60`），並在範例執行中切進、切出全螢幕空間。
+  記錄：長條在全螢幕空間裡**看得見還是被系統隱藏**？選單列自動隱藏時它是否仍在？
+  - 若被系統自然隱藏：`foreground_is_fullscreen()` 維持回 `false`，把實測結果寫進它的文件註解，結案。
+  - 若仍顯示在全螢幕 App 之上：照 `foreground_is_fullscreen()` 註解裡的計畫，以 `CGWindowListCopyWindowInfo`
+    判斷前景 App 是否有覆蓋整個螢幕的第 0 層視窗，另開任務實作。
+  - 另外記錄：把 `FullScreenAuxiliary` 拿掉是否改變結果（只是資訊，不必改程式）。
+- [ ] **有 Metal Toolchain 時不用 `runtime_shaders` 的建置方式。** 若作者的 Mac 裝了 Metal Toolchain（`xcrun -sdk macosx metal --version` 成功），
+  把 `rust/shell/Cargo.toml` 的 `features = ["runtime_shaders"]` 暫時拿掉跑一次煙霧範例，確認預先編譯 shader 的路徑也能開視窗，
+  結果寫回 `rust/README.md` 的建置說明。Task 21 的建置機器沒有 Metal Toolchain：拿掉 feature 時 gpui 的 build script 確實失敗（`cannot execute tool 'metal' due to missing Metal Toolchain`），所以只驗證了 `runtime_shaders` 這條路。
+
+## 附錄 B　Task 22 選單列
+
+對應 `rust/platform-macos/src/tray.rs` 與 `rust/docs/adr-0002-menu-bar-item.md`。用煙霧範例（同時顯示面板與選單列圖示）：
+
+```sh
+cd rust
+MUSICAT_SMOKE_SECS=120 cargo run -p musicat-shell --example tray_smoke
+# PNG（template）圖示：MUSICAT_TRAY_ICON=/path/to/icon.png MUSICAT_SMOKE_SECS=120 cargo run -p musicat-shell --example tray_smoke
+```
+
+範例會在第 2、3 秒以程式點選「LRCLIB」與「自動」、第 4 秒自己打開選單 1.5 秒，最後一秒以程式點選「結束」。
+手動測試時請在第 6 秒之後再操作（避免和自動步驟搶），結束前都可以自己點。stdout 會印出每個 `MenuEvent` 與 `tray after set_model:`。
+
+Task 22 已自動驗證（2026-11-18，macOS 15.7 arm64）：圖示建立後 `visible=true`、程式觸發的三個項目都送出正確的 `MenuEvent`
+（回呼在主執行緒）、`set_model` 後勾選翻轉、程式打開的選單 `menuOpen=true` 且選單開著時面板輪詢照常（1.5 秒 85–89 次）、
+面板 `level=25 canBecomeKey=false`、`ApplicationType="UIElement"`、結束時圖示移除且行程 `exit=0`。
+System Events 沒有輔助使用權限，無法以 UI scripting 點擊，以下需要肉眼與滑鼠確認：
+
+- [ ] **圖示看得見、外觀正確。** 選單列右側出現「♪」。切換「系統設定 → 外觀」淺色／深色（以及桌面底色讓選單列變淺／變深）時，
+  文字與 PNG（`MUSICAT_TRAY_ICON`）圖示都跟著變成黑／白、清楚可讀、垂直置中。多螢幕時確認出現在哪個螢幕的選單列上。
+- [ ] **瀏海不會把圖示藏起來。** 內建有瀏海的螢幕上，若右側圖示很多，確認「♪」沒有被擠到瀏海後面；
+  若被藏起來，記錄下來（系統行為，之後在 README 說明以 ⌘ 拖曳調整順序）。
+- [ ] **點一下圖示會開選單。** 用滑鼠點「♪」→ 選單出現，項目依序為：瀏海式（勾）、分隔線、自動與各螢幕（只有一個勾）、分隔線、
+  LRCLIB／網易雲／macOS perl 宿主／顯示歌詞條（勾選依狀態）、分隔線、結束 MusiCat（⌘Q）。再點一下或按 Esc 會關閉。
+- [ ] **勾選會翻轉。** 點「網易雲」→ stdout 印 `MenuEvent received: Toggled("lyrics.netease", false)`；再打開選單，「網易雲」的勾消失。
+  點某個螢幕 → 該螢幕打勾、「自動」的勾消失。
+- [ ] **選單開著時面板照常。** 打開選單後把游標移到瀏海的 Preview 長條上 → stdout 仍會印 `click-through=OFF/ON`（hover 輪詢沒有停）。
+  關閉選單後 hover 長條也正常。
+- [ ] **結束可用。** 點「結束 MusiCat」→ 圖示消失、面板消失、行程結束（stdout 有 `quitting (status item removed=true)`）。
+- [ ] **沒有 Dock 圖示、不搶焦點。** 範例執行中 Dock 與 Cmd-Tab 都沒有 `tray_smoke`；打開選單、點項目後，左上角的前景 App 名稱不變
+  （`osascript -e 'tell application "System Events" to get name of first process whose frontmost is true'`）。
+- [ ] **圖示與面板不重疊。** 若「♪」剛好落在瀏海旁的 Preview 長條範圍內（兩者都在 25 層），記錄誰蓋住誰。
+
+## 附錄 C　Task 23 外殼視窗、固定容器與動畫
+
+對應 `rust/shell/src/window.rs`（`ShellWindow`）與 core 的 `shell_logic::{animation, driver}`。用示範程式（佔位內容，真的 hover／動畫機制）：
+
+```sh
+cd rust
+cargo run -p musicat-shell --example shell_demo            # 60 秒後自動結束（MUSICAT_DEMO_SECS 可改）
+# 每 6 秒切換一次 24 點高的佔位歌詞條（MUSICAT_DEMO_TOGGLE_SECS、MUSICAT_DEMO_EXTRA 可改）；MUSICAT_DEMO_BLINK=1：第 3 秒隱藏、第 4 秒再顯示
+# MUSICAT_SHELL_TRACE=1：每畫一格印 shell-frame（高度、圓角），以及待收合／轉移時的游標位置
+```
+
+stdout 每次轉移印一行 `expand`／`collapse`／`visible=..`（epoch 時間戳 + 啟動後毫秒）。
+
+Task 23 已自動驗證（2026-11-18，macOS 15.7 arm64，內建 1512 × 982 有瀏海 185 × 32）：
+以 `spikes/gpui-notch/tools/hover.swift` 的 13 步腳本驅動真實游標，每一步的期望都成立
+（不在 Preview 下方的容器內展開、進長條展開一次、抖動不收合、離開 150 ms 後收合、100 ms 內出去又回來不收合、
+快速進出 ×6 與跨長條下緣抖動都只展開一次、收合時停在長條下方不展開）；`anim.swift` 加 `MUSICAT_SHELL_TRACE` 量到展開 284 ms、
+收合 285 ms（約 120 fps）；CGWindowList 外框 `X=583 Y=0 345×180`、`layer=25`，`set_visible(false)` 後 `onscreen` 消失、再顯示後回來；
+閒置 CPU（release，15 秒）約 0.9%。以下需要人工：
+
+- [ ] **動畫手感。** hover 長條展開、移開收合：大小與下方圓角（10 → 24）一起平順變化約 0.28 秒，沒有跳格、閃爍或內容重新排版；
+  動畫中途反向（剛展開就離開）從當下的樣子接著縮回，不會跳。對照 Swift 版的感覺。
+- [ ] **游標靜止在長條邊緣不閃爍（真實觸控板）。** 用觸控板（不是腳本）把游標慢慢移到 Preview 長條下緣附近停住、手指輕放在觸控板上
+  → 不會開開關關；展開後在容器內小幅晃動不收合；離開後約 150 ms 才收合。
+- [ ] **收合時點擊穿透（透明區域）。** 開一個 Finder 視窗拖到面板正下方，讓它與固定容器（長條下方、同寬、約 180 點高的透明區域）重疊。
+  收合時點容器內、長條以外的透明處 → 點到 Finder（例如選取檔案）。也點一下長條本身旁邊的選單列項目（如果被容器蓋到）→ 照常作用。
+- [ ] **展開時接收點擊、不搶焦點。** 讓 TextEdit 在前景打字，hover 展開後點一下展開的黑色區域，再繼續打字 → 字仍輸入到 TextEdit、
+  前景 App 不變（Task 24 有按鈕後再驗一次按鈕可點）。
+- [ ] **全螢幕 App 之上的行為。** `foreground_is_fullscreen()` 仍固定回 `false`（見 Task 21 的同名待辦）；在 Safari 全螢幕空間裡
+  hover 面板位置，記錄面板是否出現、是否會展開。
+- [ ] **內容裁切。** GPUI 0.2.2 只能矩形裁切：佔位內容刻意不碰下方兩角。Task 24 的真實內容上線後，看下方圓角外是否露出內容。
+- [ ] **隱藏／再顯示。** `MUSICAT_DEMO_BLINK=1` 時第 3 秒面板消失（系統會有很短的淡出）、第 4 秒回來，位置大小不變。
+- [ ] **Preview 歌詞條的黑底與半透明。** 示範每 6 秒切換歌詞條（stdout 印 `extra=24`／`extra=0`）。出現時：瀏海高度那一段仍是純黑、
+  下方兩角從圓角平順變成直角，下面長出一條看得到桌面／視窗透出來的 0.6 黑色帶；消失時反過來，黑底高度不跳。
+  展開與收合（有歌詞條時）黑底從瀏海高度平順長到 180、圓角 0 → 24，反之亦然。
+- [ ] **drop 即關閉。** 示範結束前 drop `ShellWindow`：面板立刻消失，stdout `poll after drop: ... stopped=true`（自動檢查，記錄即可）。
+
+## 附錄 D　Task 24 音樂畫面（Preview 與 Expanded）
+
+對應 `rust/shell/src/{music_views.rs, music_layout.rs, marquee.rs, artwork.rs}`。用示範程式（離線、腳本來源、自寫歌詞、
+程式產生的封面；控制器、模組狀態、模組管理器、外殼視窗與 hover 機制都是真的）：
+
+```sh
+cd rust
+cargo run --release -p musicat-shell --example music_demo -- --scene playing   # 60 秒後自動結束（MUSICAT_DEMO_SECS 可改）
+# --scene playing|paused|none|plain|nolyrics|longtitle
+# MUSICAT_DEMO_NO_CONTROL=1：沒有播放控制（按鈕停用樣式）；MUSICAT_DEMO_STRIP=0：歌詞條一開始是收起的
+```
+
+Expanded 的按鈕作用在腳本來源上：播放／暫停凍結或恢復位置（stdout 印 `control TogglePlayPause`），上一首／下一首在
+「夜航 Night Ferry」（有同步歌詞、紅色封面）與「晨光 Morning Light」（沒有歌詞、藍色封面）之間切換。
+
+Task 24 已自動驗證（2026-11-19，macOS 15.7 arm64，內建有瀏海 185 × 32，容器 583.5,0 345 × 180）：純邏輯單元測試；
+六個場景都能啟動並在時間到時正常結束（exit 0）；以 `screencapture` 只截瀏海區域、目視確認（截圖已刪除）：
+- `--scene playing` Preview：左翼封面置中裁切（沒有灰色條紋）、圓角；右翼四根音柱；瀏海下方 0.6 黑歌詞條，中文歌詞行正常。
+- `--scene playing` Expanded（以 `CGWarpMouseCursorPosition` 把游標移進長條 2.5 秒後還原，唯一一次移動游標）：♪ 切換列、
+  68 點封面、曲名／演出者（中文正常）、進度條、上一首／暫停／下一首與折疊箭頭的字形、歌詞區目前行加亮且其他行變暗。
+- `--scene longtitle` Preview 第 14 秒：超長歌詞行在歌詞條內往左捲動，左右被內距裁切。
+
+CPU（release、螢幕醒著、停在 Preview、15 秒 `ps -o time`）：音柱 15 fps 時約 4.5%，降到 12 fps 後約 3.6%（取樣 2.1／3.0／3.4%）；
+`longtitle` 歌詞條跑馬燈以顯示器頻率重繪時約 11%（取樣最高 18.6%），改由定時器以 30 fps 重繪後約 5.4%（取樣最高 7.6%）。
+（Task 23 外殼本身閒置約 0.9%。）沒有自動驗證的項目照下列清單人工確認；已目測的項目仍保留，請以真實觸控板與實機再看一次觀感。
+
+- [ ] **（HANDOFF 1）Preview 版面。** `--scene playing`：長條左翼是封面（24 × 24、圓角 6、離左端 8）、右翼是四根白色音柱
+  （離右端 12，播放中上下起伏）、瀏海正下方是 24 點高的 0.6 黑色歌詞條（下方圓角 10，左右內距 12，白色 12 點中字）。
+  真瀏海遮住的中央沒有任何內容。開頭 4 秒歌詞條顯示曲名（較淡 0.7），之後每 8 秒換一行歌詞（較亮 0.95）。
+- [ ] **封面置中裁切與圓角。** 示範封面是 480 × 300：中央紅色方塊加白色圓環，左右兩側是灰色條紋。畫面上只能看到紅色與白環，
+  **不可**出現灰色條紋；四角是圓角（Preview 與 Expanded 都看）。切到第二首（下一首）應變成藍色封面。
+- [ ] **（HANDOFF 2）暫停回到空黑條。** `--scene paused`：Preview 只剩黑色長條（沒有封面、音柱、歌詞條；同 Swift，暫停時音樂不是 active 模組）。
+  playing 場景中在 Expanded 按暫停 → 收合後 Preview 也回到空黑條、歌詞條收起（0.28 秒動畫）；再按播放回來。
+- [ ] **（HANDOFF 1）Expanded 版面。** hover 展開：最上方置中一個 ♪（模組切換列，高約 15，選取時全白），下方左側 68 × 68 封面，
+  右側曲名（13 點粗）、演出者（11 點、0.65）、進度條（3 點高，隨時間前進）、控制列（上一首／播放暫停／下一首置中，最右側是
+  折疊箭頭）；下方是歌詞區，目前行較亮且粗、其他行 0.45，換行時以 0.3 秒平順捲動讓目前行置中。
+- [ ] **（HANDOFF 14）版面預算。** 切換列 15 + 間距 8 + 音樂頁 149（下方內距 8、標頭 68、間距 6、歌詞 67）= 172。
+  確認沒有擠壓或裁切：曲名不被切頭、控制列完整、歌詞區最後一行不貼到外形底部；**下方 24 點圓角外沒有露出任何內容**
+  （GPUI 只能矩形裁切；內容左右縮 16、底部縮 8，單元測試已確認內容角點在圓角內）。
+- [ ] **中文字。** 曲名、歌詞、「目前沒有播放」、說明文字都是正常的中文字形（不是方框）。
+- [ ] **跑馬燈。** `--scene longtitle`：Expanded 的曲名與演出者放不下，以每秒 30 點往左捲、尾端隔 32 點接著下一份，無縫循環；
+  放得下的文字置中靜止。Preview 歌詞條在第 12–20 秒（第二行是超長行）也要捲動。捲動是否夠平順（跑馬燈由定時器以 30 fps 重繪、每格 1 點；音柱 12 fps）。
+- [ ] **（HANDOFF 7）歌詞條觀感與折疊。** 0.6 不透明、24 點高的觀感；在 Expanded 點最右側的箭頭（向上 = 展開中）→ 箭頭變向下，
+  收合後 Preview 沒有歌詞條（長條只有瀏海高）；再點一次恢復。折疊後 hover 範圍跟著變小（只有黑色長條會觸發展開）。
+- [ ] **（HANDOFF 15）歌詞條出現的動畫。** Rust 版內容槽固定為目標大小、由外形裁切，所以 0.28 秒動畫期間封面**不會**從零長出來
+  （Swift 會）；確認歌詞條是從長條下方「被揭開」、看起來自然。
+- [ ] **（HANDOFF 8）按鈕可點、不搶焦點。** 讓 TextEdit 在前景打字，hover 展開後點播放／暫停 → stdout 印 `control TogglePlayPause`、
+  圖示在 ▶ 與 ❚❚ 間切換、進度凍結／恢復；上一首／下一首換曲（封面變色、第二首沒有歌詞所以歌詞區消失、標頭置中）；
+  點完繼續打字仍輸入到 TextEdit。`MUSICAT_DEMO_NO_CONTROL=1`：三個按鈕變暗（0.3）且點了沒有反應。
+  真實播放器（YouTube Music、Spotify）的控制要等 Task 25 接上 app 後再驗。
+- [ ] **模組切換列。** `--scene paused` 展開：選取被重設為「無」（暫停時沒有 active 模組），顯示「沒有進行中的內容，點上方圖示開啟模組」、
+  ♪ 是 0.4 的暗色；點 ♪ → 變全白並顯示音樂頁（停用的暫停圖示是 ▶）。收合再展開 → 又回到說明文字（每次新展開重設選取，spec 5.3）。
+- [ ] **沒有曲目。** `--scene none`：Preview 只有黑色長條；Expanded 是說明文字；點 ♪ 後是一行置中的「目前沒有播放」。
+- [ ] **純文字與沒有歌詞。** `--scene plain`：歌詞條顯示曲名；Expanded 歌詞區是置中的靜態全文（0.75），可以用觸控板捲動。
+  `--scene nolyrics`：歌詞條顯示曲名；Expanded 沒有歌詞區、標頭垂直置中。
+- [ ] **（HANDOFF 6、16）捲動條。** GPUI 不畫捲動條：在「系統設定 → 外觀 → 顯示捲動條：永遠」下，`--scene plain` 的歌詞區也不應出現捲動條。
+- [ ] **（HANDOFF 13）CPU 與平順度的取捨。** 目前音柱 12 fps（約 3.6%，略高於 3% 目標）、跑馬燈 30 fps（每格 1 點）。
+  請目視音柱與跑馬燈是否夠平順；若可接受更頓的音柱，把 `music_layout::EQ_FRAME_SECONDS` 調成 1/10 再量；
+  若跑馬燈太頓，`MARQUEE_FRAME_SECONDS` 可提高（CPU 會跟著增加）。在真實 App（Task 25）播放時再量一次。
+- [ ] **（HANDOFF 3）拖動進度。** 要真實來源（Task 25）：在播放器拖動進度後，Expanded 的進度條與目前歌詞行在 1 秒內跟上。
+- [ ] **字形。** 控制列的上一首／播放／暫停／下一首與折疊箭頭是以路徑畫的（GPUI 沒有 SF Symbols），對照 Swift 版確認大小與粗細可接受；
+  ♪（U+266A，系統字型）在切換列與封面佔位是否清楚。
+
+## 附錄 E　Task 25 真正的 App（組裝、選單、螢幕、喚醒）
+
+對應 `rust/app/src/{main.rs, composition.rs, gated_source.rs}`、`rust/shell/src/runtime.rs`、`rust/platform-macos/src/power.rs`。
+執行方式見 `rust/README.md` 的「執行（macOS）」：
+
+```sh
+cd rust
+MUSICAT_LOG=1 cargo run --release -p musicat-app     # MUSICAT_LOG=1 會在 stderr 印曲名與演出者，自己看就好
+```
+
+Task 25b 已自動驗證（2026-11-20，macOS 15.7 arm64，只接內建有瀏海的螢幕，顯示器醒著且未鎖定）：
+- `MUSICAT_LOG=1 MUSICAT_AUTO_QUIT_SECS=25`：面板 `layer=25 bounds 583,0 345×180`（CGWindowList）；選單列圖示的視窗
+  `Item-0`（layer 25、27 × 37）存在，`MenuBar::describe` 為 `visible=true` 且選單項目正確——但這台機器選單列圖示太多，
+  21 個圖示裡有 17 個（包括 MusiCat）被系統移到畫面外；perl helper 在啟動 0.08 秒內出現（`pgrep -f musicat_helper_main`），
+  日誌有現正播放的更新（當時是暫停中的曲目，來源 `mediaremote`）；25 秒時自己結束、`exit=0`、helper 已不在。
+- `kill -9` App：0.05 秒內 `pgrep -f musicat_helper_main` 為空（helper 在 stdin 關閉時自行結束）。
+- 損毀的設定檔（以 `MUSICAT_CONFIG` 指到暫存檔）：印出警告、以預設值啟動（perl 宿主照預設開啟），檔案的 SHA-1 前後相同、沒有 `.bak`。
+  `perl_host = false`：沒有 helper 行程，只用視窗標題備援。
+- 閒置（曲目暫停、Preview 空黑條）15 秒：App CPU 0.19 秒 ≈ 1.3%，RSS 約 42 MB；helper 0.04 秒 ≈ 0.3%，RSS 約 13 MB。
+- 喚醒通知：`cargo run -p musicat-shell --example wake_smoke` 以程式發出 `NSWorkspaceDidWakeNotification`（**沒有**讓機器睡眠），
+  回呼在主執行緒上被呼叫 2 次、取消登記後不再被呼叫，`PASS`。
+
+以下需要滑鼠、外接螢幕或真的睡眠，請人工確認（括號內是對應的 Swift `docs/HANDOFF.md` 項目編號）：
+
+- [ ] **選單用滑鼠操作。** 點「♪」打開選單（看不到圖示時先按住 ⌘ 把其他圖示拖開）。項目：自動、各螢幕、分隔線、
+  歌詞來源：LRCLIB、歌詞來源：網易雲音樂、顯示歌詞條、使用 perl 宿主讀取現正播放（macOS）、分隔線、結束 MusiCat（⌘Q）。
+  每點一次，勾選立刻翻轉，`MUSICAT_LOG=1` 時 stderr 有對應的一行；設定檔（`~/Library/Application Support/MusiCat/musicat.toml`）
+  只在值真的改變時被寫入。
+- [ ] **換螢幕（接外接螢幕）。** 選單選外接螢幕 → 面板 2 秒內移到外接螢幕頂端（沒有瀏海時是 200 × 32 的虛擬瀏海），重新啟動後仍在那裡。
+  拔掉外接螢幕 → 面板移回內建螢幕、程式不結束、選單裡外接螢幕的項目消失且「自動」**不**打勾（設定仍記著外接螢幕）；
+  接回來 → 面板移回外接螢幕。選「自動」→ 回到有瀏海的內建螢幕。闔上筆電只用外接螢幕時面板在外接螢幕上。
+- [ ] **（9）從選單關閉 perl 宿主。** 播放 YouTube Music 時取消勾選「使用 perl 宿主」→ `pgrep -f musicat_helper_main` 變空，
+  畫面改由視窗標題備援顯示（只有曲名，見下一項）；再勾回來 → helper 回來、資料恢復完整。啟動時就是 `perl_host = false` 的話，
+  勾選後才第一次建立 helper（不需要重新啟動）。
+- [ ] **（9）helper 被殺掉後恢復。** `pkill -f musicat_helper_main` → 1 秒左右 helper 自動重啟、畫面恢復。
+  暫時把 `target/release/libmusicat_mediaremote_helper.dylib` 改名後啟動 → 不崩潰，stderr 印一次 `system now-playing unavailable`，
+  只剩視窗標題備援；（改回名字後要重新啟動才會用 helper。）
+- [ ] **（11、20）視窗標題備援。** 關掉 perl 宿主後只顯示曲名（沒有演出者、不查歌詞）；在有／沒有「螢幕錄製」權限下各看一次
+  （沒有權限時預期什麼都不顯示）。
+- [ ] **（10）LRCLIB／網易雲開關與離線。** 兩個都關 → 下一首起沒有歌詞、不發任何請求；只開一個 → 只查那一個。
+  切換只影響**下一首**（目前曲目已顯示的歌詞保留到換曲）。斷網時歌詞靜默消失、曲目顯示不受影響。
+- [ ] **歌詞條折疊的記憶。** 在 Expanded 點右下角箭頭把歌詞條收起 → 2 秒內設定檔的 `lyric_strip_visible` 變成 `false`、
+  選單的「顯示歌詞條」勾選跟著消失；結束再啟動仍是收起的。從選單切換也一樣，且 Expanded 的箭頭方向跟著變。
+- [ ] **（17）睡眠與喚醒。** 播放音樂時讓 Mac 睡眠再喚醒 → `MUSICAT_LOG=1` 時 stderr 有 `system woke from sleep`，
+  helper 被換成新的行程（pid 改變），幾秒內畫面上的曲目與進度是新的。
+- [ ] **（18）結束不留 helper。** 從選單「結束 MusiCat」→ 圖示與面板消失、`pgrep -f musicat_helper_main` 為空；
+  對 App 下 `kill -9` 也一樣（已自動驗證，請在實際使用中再看一次）。
+- [ ] **（19）重新建置後恢復。** App 執行中重新 `cargo build --release -p musicat-app`（動態庫被重新連結）→ `pkill -f musicat_helper_main`
+  之後 helper 能以新的動態庫重啟。
+- [ ] **真實播放器的控制與 CPU。** YouTube Music、Spotify 各播一首：Preview／Expanded 正常、按鈕控制得動（Task 24 的 HANDOFF 8 待辦）、
+  播放中（音柱動畫）App 的 CPU 量一次（`ps -o time` 15 秒）。
+
+選單列圖示看不到有兩個原因：選單列太擠（macOS 會把放不下的圖示移到畫面外；Task 25b 的開發機上 21 個圖示有 17 個被移走，包括 MusiCat），以及有瀏海的螢幕上**瀏海本身**也會把右側的圖示擋住（README 有同樣的說明）。兩者的處理方式相同：按住 ⌘ 拖曳其他圖示騰出位置。
+
+已知限制：沒有「螢幕參數變更」的即時通知，螢幕增減最多 2 秒後才反映；Expanded 箭頭造成的歌詞條變更最多 2 秒後才寫回設定檔
+（2 秒內被 `kill -9` 會遺失）。

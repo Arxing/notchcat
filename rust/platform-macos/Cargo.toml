@@ -1,0 +1,41 @@
+[package]
+name = "musicat-platform-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+musicat-core = { path = "../core" }
+# helper 線上格式的逐欄位解析（與 musicat-core 同一組 feature）。不用 serde derive：缺值與型別錯誤要自己判。
+serde_json = { version = "1", default-features = false, features = ["std"] }
+# artworkData 的 base64 解碼。純 Rust、MIT OR Apache-2.0；關掉預設的 simd-unsafe 以免引入 unsafe 加速路徑。
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
+
+# 載入私有 MediaRemote 框架（只在 macOS 才相依；動態載入的 unsafe 由它封裝）。ISC 授權，無其他相依。
+[target.'cfg(target_os = "macos")'.dependencies]
+libloading = "0.8"
+# 視窗列舉（CGWindowListCopyWindowInfo，公開的 CoreGraphics API）。core-graphics 0.25／core-foundation 0.10 皆為
+# MIT OR Apache-2.0；相依只有 core-graphics-types、foreign-types、bitflags、libc 與 core-foundation(-sys)，
+# 純 Rust 綁定、沒有 build script。不用 objc2-core-graphics：它帶進 objc2 家族（Task 21 之前先不引入），
+# 而且 panel.rs 以外不得出現 objc2 繞路。
+core-graphics = "0.25"
+core-foundation = "0.10"
+# 面板視窗繞路（panel.rs）、NSScreen 列舉（screens.rs）、系統喚醒通知（power.rs，公開 API：NSWorkspace）與選單列圖示（tray.rs，公開 API：NSStatusItem／NSMenu；
+# 見 docs/adr-0002-menu-bar-item.md）。objc2 家族皆為 MIT；只在 macOS 才相依，
+# 關掉預設的「全部框架」feature，只開用到的類別。版本與 GPUI spike（spikes/gpui-notch）相同。
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString", "NSArray", "NSEnumerator", "NSDictionary", "NSValue", "NSData", "NSNotification", "NSOperation", "block2"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen", "NSWindow", "NSResponder", "NSView", "NSEvent", "NSApplication", "NSRunningApplication", "NSGraphics", "NSColor", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSMenu", "NSMenuItem", "NSCell", "NSImage", "NSWorkspace", "objc2-core-foundation"] }
+# 系統喚醒通知（power.rs：`addObserverForName:object:queue:usingBlock:` 的 block）。objc2 家族，MIT；已在 Cargo.lock。
+block2 = "0.6"
+
+[dev-dependencies]
+# 測試替身（FakeClock、LocalSpawner）。
+musicat-core = { path = "../core", features = ["testing"] }
+
+# build.rs 只在目標為 macOS 時才動用 C 編譯器；其他目標它什麼也不做，
+# crate 編成只有兩個字串常數的空 crate。
+[build-dependencies]
+cc = "1"

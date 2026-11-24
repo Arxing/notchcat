@@ -1,0 +1,55 @@
+[1794539722.639] notch: width=185 height=32 centerX=755.5 topY=982
+[1794539722.686] window: windowNumber=42314 level=25 frame=(583, 802, 345x180) styleMask=NSWindowStyleMask(128) opaque=false shadow=false key=false main=false canBecomeKey=false behavior=NSWindowCollectionBehavior(337)
+[1794539722.686 +      0ms] start            mode=Preview enters=0 exits=0 transitions=0
+[1794539722.722 +     35ms] click-through=ON mode=Preview enters=0 exits=0 transitions=0
+[1794539726.580 +   3894ms] hover-enter      mode=Preview enters=1 exits=0 transitions=0
+[1794539726.581 +   3894ms] TRANSITION       mode=Expanded enters=1 exits=0 transitions=1
+[1794539726.581 +   3894ms] click-through=OFF mode=Expanded enters=1 exits=0 transitions=1
+[1794539727.721] window: windowNumber=42314 level=25 frame=(583, 802, 345x180) styleMask=NSWindowStyleMask(128) opaque=false shadow=false key=false main=false canBecomeKey=false behavior=NSWindowCollectionBehavior(337)
+[1794539729.433 +   6746ms] hover-exit       mode=Expanded enters=1 exits=1 transitions=1
+[1794539729.434 +   6748ms] click-through=ON mode=Expanded enters=1 exits=1 transitions=1
+[1794539729.585 +   6898ms] TRANSITION       mode=Preview enters=1 exits=1 transitions=2
+[1794539730.603 +   7917ms] hover-enter      mode=Preview enters=2 exits=1 transitions=2
+[1794539730.603 +   7917ms] TRANSITION       mode=Expanded enters=2 exits=1 transitions=3
+[1794539730.604 +   7917ms] click-through=OFF mode=Expanded enters=2 exits=1 transitions=3
+[1794539731.339 +   8652ms] hover-exit       mode=Expanded enters=2 exits=2 transitions=3
+[1794539731.339 +   8653ms] click-through=ON mode=Expanded enters=2 exits=2 transitions=3
+[1794539731.423 +   8736ms] hover-enter      mode=Expanded enters=3 exits=2 transitions=3
+[1794539731.423 +   8736ms] click-through=OFF mode=Expanded enters=3 exits=2 transitions=3
+[1794539731.940 +   9253ms] hover-exit       mode=Expanded enters=3 exits=3 transitions=3
+[1794539731.940 +   9253ms] click-through=ON mode=Expanded enters=3 exits=3 transitions=3
+[1794539732.106 +   9419ms] TRANSITION       mode=Preview enters=3 exits=3 transitions=4
+[1794539732.710 +  10023ms] hover-enter      mode=Preview enters=4 exits=3 transitions=4
+[1794539732.710 +  10023ms] TRANSITION       mode=Expanded enters=4 exits=3 transitions=5
+[1794539732.710 +  10023ms] click-through=OFF mode=Expanded enters=4 exits=3 transitions=5
+[1794539732.726] window: windowNumber=42314 level=25 frame=(583, 802, 345x180) styleMask=NSWindowStyleMask(128) opaque=false shadow=false key=false main=false canBecomeKey=false behavior=NSWindowCollectionBehavior(337)
+[1794539732.826 +  10139ms] hover-exit       mode=Expanded enters=4 exits=4 transitions=5
+[1794539732.827 +  10140ms] click-through=ON mode=Expanded enters=4 exits=4 transitions=5
+[1794539732.943 +  10256ms] hover-enter      mode=Expanded enters=5 exits=4 transitions=5
+[1794539732.943 +  10256ms] click-through=OFF mode=Expanded enters=5 exits=4 transitions=5
+[1794539733.076 +  10389ms] hover-exit       mode=Expanded enters=5 exits=5 transitions=5
+[1794539733.076 +  10390ms] click-through=ON mode=Expanded enters=5 exits=5 transitions=5
+[1794539733.210 +  10523ms] hover-enter      mode=Expanded enters=6 exits=5 transitions=5
+[1794539733.210 +  10523ms] click-through=OFF mode=Expanded enters=6 exits=5 transitions=5
+[1794539733.326 +  10639ms] hover-exit       mode=Expanded enters=6 exits=6 transitions=5
+[1794539733.326 +  10640ms] click-through=ON mode=Expanded enters=6 exits=6 transitions=5
+[1794539733.460 +  10773ms] hover-enter      mode=Expanded enters=7 exits=6 transitions=5
+[1794539733.460 +  10773ms] click-through=OFF mode=Expanded enters=7 exits=6 transitions=5
+[1794539733.593 +  10906ms] hover-exit       mode=Expanded enters=7 exits=7 transitions=5
+[1794539733.593 +  10906ms] click-through=ON mode=Expanded enters=7 exits=7 transitions=5
+[1794539733.726 +  11039ms] hover-enter      mode=Expanded enters=8 exits=7 transitions=5
+[1794539733.726 +  11040ms] click-through=OFF mode=Expanded enters=8 exits=7 transitions=5
+[1794539733.843 +  11156ms] hover-exit       mode=Expanded enters=8 exits=8 transitions=5
+[1794539733.843 +  11156ms] click-through=ON mode=Expanded enters=8 exits=8 transitions=5
+[1794539733.976 +  11289ms] hover-enter      mode=Expanded enters=9 exits=8 transitions=5
+[1794539733.976 +  11290ms] click-through=OFF mode=Expanded enters=9 exits=8 transitions=5
+[1794539734.110 +  11423ms] hover-exit       mode=Expanded enters=9 exits=9 transitions=5
+[1794539734.110 +  11423ms] click-through=ON mode=Expanded enters=9 exits=9 transitions=5
+[1794539734.276 +  11589ms] TRANSITION       mode=Preview enters=9 exits=9 transitions=6
+[1794539734.776 +  12089ms] hover-enter      mode=Preview enters=10 exits=9 transitions=6
+[1794539734.777 +  12090ms] TRANSITION       mode=Expanded enters=10 exits=9 transitions=7
+[1794539734.777 +  12090ms] click-through=OFF mode=Expanded enters=10 exits=9 transitions=7
+[1794539736.593 +  13906ms] hover-exit       mode=Expanded enters=10 exits=10 transitions=7
+[1794539736.593 +  13906ms] click-through=ON mode=Expanded enters=10 exits=10 transitions=7
+[1794539736.760 +  14073ms] TRANSITION       mode=Preview enters=10 exits=10 transitions=8
+[1794539737.731] window: windowNumber=42314 level=25 frame=(583, 802, 345x180) styleMask=NSWindowStyleMask(128) opaque=false shadow=false key=false main=false canBecomeKey=false behavior=NSWindowCollectionBehavior(337)

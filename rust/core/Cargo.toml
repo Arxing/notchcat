@@ -1,0 +1,25 @@
+[package]
+name = "musicat-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# 公開 `testing` 模組（FakeClock、FakeHttp、LocalSpawner）給其他 crate 的測試使用。
+# 本 crate 自己的單元測試（cfg(test)）不需要開這個 feature 也能用到該模組。
+testing = []
+
+[dependencies]
+# 只用組合子（select、Shared、Abortable、FuturesUnordered），不帶任何執行器或 runtime（ADR-0001）。
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# 曲目比對（lyrics::identity／normalizer）。三者皆為純 Rust、無 async／網路依賴。
+# 正規表達式：Unicode 的 \b、\s 與 (?i) 需要 unicode-perl、unicode-case；不需要 perf 特性。
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+# NFKC（全半形）與 NFD（去重音符號）。
+unicode-normalization = { version = "0.1", default-features = false, features = ["std"] }
+# 繁→簡折疊。不選 zhconv：它是 GPL-2.0-or-later，與本專案 MIT OR Apache-2.0 不相容（詳見 identity.rs 註解）。
+ferrous-opencc = { version = "0.4", default-features = false, features = ["t2s-conversion"] }
+# 提供者回應的 JSON 解碼（lyrics::lrclib／netease）。兩者皆為純 Rust；serde 的 derive 只在編譯期展開。
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }

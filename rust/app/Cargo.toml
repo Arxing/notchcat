@@ -1,0 +1,40 @@
+[package]
+name = "musicat-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "musicat_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "musicat"
+path = "src/main.rs"
+
+[dependencies]
+musicat-core = { path = "../core" }
+# 真實的 HTTP 實作（app 可用，core 不可）。預設特性 = rustls（純 Rust TLS，不需要系統 OpenSSL）+ gzip。
+ureq = "3"
+# 只用 oneshot：把背景執行緒的結果交回 future，不綁任何執行器。
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
+# 設定檔（TOML）。只用 parse（讀）與 display（寫字串值時的跳脫）；不用 serde 衍生，欄位以寬鬆的手動擷取讀出，
+# 好讓單一欄位的型別錯誤只影響該欄位。純 Rust，MIT OR Apache-2.0。
+toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+
+[dev-dependencies]
+# FakeHttp／FakeClock（switchable 的測試用）。
+musicat-core = { path = "../core", features = ["testing"] }
+# 只給測試與範例的 block_on 用；app 的函式庫本體不依賴任何執行器。
+futures-executor = { version = "0.3", default-features = false, features = ["std"] }
+
+# 可執行檔 `musicat` 的組裝（src/main.rs）只在 macOS：GPUI 外殼、macOS 平台層與 GPUI 本身。
+# 函式庫（src/lib.rs）不依賴它們，所以在其他平台仍可編譯與測試。gpui 與 shell 同樣鎖死在 =0.2.2 並開 runtime_shaders
+# （理由見 rust/shell/Cargo.toml）。futures-util 只用 StreamExt（在主執行緒的前景工作裡等選單事件 channel）；
+# 以上都已在 Cargo.lock，授權皆為 MIT 或 MIT OR Apache-2.0。
+[target.'cfg(target_os = "macos")'.dependencies]
+musicat-shell = { path = "../shell" }
+musicat-platform-macos = { path = "../platform-macos" }
+gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }

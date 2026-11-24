@@ -1,0 +1,162 @@
+import AppKit
+import Combine
+import Foundation
+
+/// A running helper process.
+protocol HelperProcessHandle {
+    func terminate()
+}
+
+/// Starts the now-playing helper process. `onLine` receives each complete
+/// output line; `onExit` receives the exit status. Throws when the process
+/// cannot be started at all.
+protocol HelperProcessLaunching {
+    func launch(onLine: @escaping (String) -> Void, onExit: @escaping (Int32) -> Void) throws -> HelperProcessHandle
+}
+
+/// System now-playing, read by a helper process (see `PerlHelperLauncher`)
+/// and decoded with `HelperMessageParser`.
+///
+/// An unexpected exit restarts the helper after the next entry of
+/// `retryDelays`; any line received resets that sequence. Once the delays are
+/// used up the source publishes nil and stays down; a fresh attempt, with the
+/// counters reset, is scheduled after `giveUpRetryInterval`, and `start()` or
+/// a wake from sleep also starts one right away. A launch that throws counts
+/// as a failure too.
+///
+/// On wake from sleep a running helper is replaced with a new one, since the
+/// old process may be stale. After `stop()` neither the retry nor a wake does
+/// anything.
+///
+/// Not thread-safe: call it, and deliver the launcher's callbacks and the
+/// scheduled work, on one queue (the main queue by default).
+final class MediaRemoteSource: NowPlayingSource {
+    let id = HelperMessageParser.sourceID
+
+    var snapshots: AnyPublisher<NowPlayingSnapshot?, Never> { subject.eraseToAnyPublisher() }
+
+    private let launcher: HelperProcessLaunching
+    private let retryDelays: [TimeInterval]
+    private let giveUpRetryInterval: TimeInterval
+    private let schedule: (TimeInterval, @escaping () -> Void) -> Void
+    private let subject = CurrentValueSubject<NowPlayingSnapshot?, Never>(nil)
+
+    private var isRunning = false
+    /// True from the moment the retry delays run out until the next launch or
+    /// `stop()`.
+    private var hasGivenUp = false
+    private var wakeSubscription: AnyCancellable?
+    private var failureCount = 0
+    private var handle: HelperProcessHandle?
+    /// Bumped on every launch and on `stop()`, so callbacks and scheduled
+    /// restarts that belong to an earlier process are ignored.
+    private var generation = 0
+
+    init(launcher: HelperProcessLaunching,
+         retryDelays: [TimeInterval] = [1, 2, 4, 8, 16, 30],
+         giveUpRetryInterval: TimeInterval = 300,
+         schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void = {
+             DispatchQueue.main.asyncAfter(deadline: .now() + $0, execute: $1)
+         },
+         wakeNotifications: AnyPublisher<Void, Never> = NSWorkspace.shared.notificationCenter
+             .publisher(for: NSWorkspace.didWakeNotification)
+             .map { _ in () }
+             .receive(on: DispatchQueue.main)
+             .eraseToAnyPublisher()) {
+        self.launcher = launcher
+        self.retryDelays = retryDelays
+        self.giveUpRetryInterval = giveUpRetryInterval
+        self.schedule = schedule
+        wakeSubscription = wakeNotifications.sink { [weak self] in self?.systemDidWake() }
+    }
+
+    func start() {
+        guard !isRunning else { return }
+        isRunning = true
+        failureCount = 0
+        launch()
+    }
+
+    /// Terminates the helper and publishes nil, so a later `start()` does not
+    /// replay this session's last snapshot.
+    func stop() {
+        isRunning = false
+        hasGivenUp = false
+        generation += 1
+        handle?.terminate()
+        handle = nil
+        subject.send(nil)
+    }
+
+    /// The helper may be stale after sleep: replace a running one, and start
+    /// again when the source had given up. A stopped source stays stopped.
+    private func systemDidWake() {
+        guard isRunning || hasGivenUp else { return }
+        handle?.terminate()
+        handle = nil
+        isRunning = true
+        hasGivenUp = false
+        failureCount = 0
+        launch()
+    }
+
+    private func launch() {
+        generation += 1
+        let current = generation
+        do {
+            handle = try launcher.launch(
+                onLine: { [weak self] line in self?.receive(line, from: current) },
+                onExit: { [weak self] _ in self?.processExited(current) })
+        } catch {
+            handle = nil
+            fail()
+        }
+    }
+
+    private func receive(_ line: String, from launchGeneration: Int) {
+        guard isRunning, launchGeneration == generation else { return }
+        failureCount = 0
+        switch HelperMessageParser.parse(line: line) {
+        case .track(let snapshot)?: subject.send(snapshot)
+        case .none?: subject.send(nil)
+        case nil: break
+        }
+    }
+
+    private func processExited(_ launchGeneration: Int) {
+        guard isRunning, launchGeneration == generation else { return }
+        // Output still buffered from the dead process must not be published or
+        // reset the failure count, which would defeat the give-up limit.
+        generation += 1
+        handle = nil
+        fail()
+    }
+
+    private func fail() {
+        guard failureCount < retryDelays.count else {
+            isRunning = false
+            hasGivenUp = true
+            subject.send(nil)
+            scheduleGiveUpRetry()
+            return
+        }
+        let delay = retryDelays[failureCount]
+        failureCount += 1
+        let current = generation
+        schedule(delay) { [weak self] in
+            guard let self, self.isRunning, current == self.generation else { return }
+            self.launch()
+        }
+    }
+
+    private func scheduleGiveUpRetry() {
+        let current = generation
+        schedule(giveUpRetryInterval) { [weak self] in
+            guard let self, self.hasGivenUp, current == self.generation else { return }
+            self.hasGivenUp = false
+            self.isRunning = true
+            self.failureCount = 0
+            self.launch()
+        }
+    }
+}

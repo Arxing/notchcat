@@ -1,0 +1,4 @@
+[1794539671.086] notch: width=185 height=32 centerX=755.5 topY=982
+[1794539671.456] window: windowNumber=42306 level=25 frame=(583, 802, 345x180) styleMask=NSWindowStyleMask(128) opaque=false shadow=false key=false main=false canBecomeKey=false behavior=NSWindowCollectionBehavior(337)
+[1794539671.456 +      0ms] start            mode=Preview enters=0 exits=0 transitions=0
+[1794539676.493] window: windowNumber=42306 level=25 frame=(583, 802, 345x180) styleMask=NSWindowStyleMask(128) opaque=false shadow=false key=false main=false canBecomeKey=false behavior=NSWindowCollectionBehavior(337)

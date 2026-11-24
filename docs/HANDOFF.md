@@ -1,58 +1,92 @@
-# 轉交文件（web session → 本機 Claude Code）
+# 轉交文件
 
-寫於 2026-09-22，接手前請先讀這份，再讀 `docs/PLANNING.md`（完整架構規劃）。
-
-## 這個 session 是在什麼環境下做的
-
-之前的工作是在**雲端 Linux sandbox** 裡做的，**沒有 Swift 工具鏈、沒有 Xcode**，AppKit/SwiftUI/`NSScreen`/`NSPanel` 這些 API 本來就只存在 macOS。
-
-**結論：`Sources/NotchCat/` 底下所有程式碼從來沒有被編譯或執行過一次。** 這是接手後第一件事——在真的 Mac（有實體瀏海的機種）上跑起來，抓編譯錯誤跟實際行為落差。
-
-> **更新（2026-09-22，本機 Claude Code）：** 已在真機上編譯 + 執行過，`swift build`/`swift run` 都過。真機測出 hover 動畫閃爍的 bug 並修正，細節見下方「已知風險」第 2 點。
+最後更新：2026-11-04。接手前先讀這份，再讀 `docs/PLANNING.md`（整體架構）。
 
 ## 目前狀態
 
-- Branch：`claude/lucid-archimedes-nntl9p`，已 push 到 `origin`。
-- 兩個 commit：
-  1. `8aff9ab` — `docs/PLANNING.md`，完整架構規劃（三種模式定義、狀態機、Module 介面草案、技術選型、分階段路線圖）。
-  2. `b0d939a` — Phase 0 骨架程式碼。
-- 專案型態：Swift Package（`Package.swift`），非 `.xcodeproj`。macOS 14+，可以直接用 Xcode 開資料夾，或 `swift run`。
+- Branch：`feature/music-module`。Shell（Preview／Expanded 兩個模式）、模組系統與 Music 模組都已實作，Music 模組已在 `AppDelegate` 安裝，`swift build`、`swift test` 通過，啟動煙霧測試正常（App 啟動不崩潰、結束後沒有殘留的 perl 行程）。
+- **等待使用者在有瀏海的 Mac 上做實機驗收**，清單見下方「尚未驗證」。驗收時請在實機上實際播放音樂；發現的問題一項一個小提交。
+- 專案型態：Swift Package，macOS 14+。執行方式見 `README.md`：務必 `swift build` 之後才執行，`scripts/run.sh` 已包好（`swift run` 單獨不會建出 helper 動態庫）。
 
-## 檔案地圖
+## 架構與文件指標
+
+- 整體架構：`docs/PLANNING.md`。
+- Shell 與模組介面：`docs/superpowers/specs/2026-09-23-module-interface-design.md`、`docs/superpowers/plans/2026-09-30-module-interface.md`。
+- Music 模組：`docs/superpowers/specs/2026-10-14-music-module-design.md`（spec，含實測依據）、`docs/superpowers/plans/2026-11-04-music-module.md`（實作計畫）。
 
 ```
-Package.swift                              # SPM manifest, macOS 14+, 單一 executable target
-README.md                                  # 執行方式 + 「尚未實機驗證」警語
-docs/PLANNING.md                           # 完整架構規劃（先讀這個）
-docs/HANDOFF.md                            # 本文件
-Sources/NotchCat/
-  main.swift                               # AppDelegate、accessory activation policy、選單列 Quit 圖示
-  Shell/
-    NotchGeometry.swift                    # 瀏海幾何偵測：用 auxiliaryTopLeftArea/RightArea 反推瀏海矩形
-    NotchMode.swift                        # Hidden/Expanded/Preview enum + 各自的 size/frame 計算
-    NotchPanel.swift                       # NSPanel 子類：borderless、non-activating、跨 Space、不進 Dock
-    NotchHostingView.swift                 # NSHostingView 子類，把 hover 轉成 closure
-    NotchShellController.swift             # 狀態機本體：hover 進出觸發 transition，NSAnimationContext 做 frame 動畫
-  UI/
-    NotchContentView.swift                 # 假內容（SwiftUI），純粹驗證三種形狀/動畫用
+Sources/NotchCat/main.swift             # 三行進入點
+Sources/NotchCatKit/
+  AppDelegate.swift                     # 偵測瀏海、建立 ModuleManager、註冊 MusicModule、建立 Shell、選單列 Quit
+  Shell/                                # NotchGeometry、NotchMode（Preview/Expanded）、NotchPanel、NotchHostingView、NotchShellController
+  ModuleKit/                            # NotchModule protocol、ModuleManager
+  UI/                                   # Shell 的 SwiftUI 內容與 AppBar
+  Modules/Music/
+    NowPlaying/                         # 來源（MediaRemoteSource＋perl 宿主、WindowTitleSource）、NowPlayingMonitor、MediaRemoteControl
+    Lyrics/                             # TrackIdentity／TrackNormalizer、LyricsRepository、LRCLIB 與網易雲 provider
+    Views/                              # Preview（兩翼＋歌詞條）、Expanded、音柱、封面
+Sources/NotchCatMediaRemoteHelper/      # C，編成動態庫，只在 perl 行程內執行
+scripts/run.sh                          # swift build && 執行 .build/debug/NotchCat
 ```
 
-## 已知風險 / 沒把握的地方（優先驗證清單）
+私有 API 只准出現在兩處：`MediaRemoteControl.swift`（只送控制指令）與 `NotchCatMediaRemoteHelper`（讀取，只在 perl 行程內）。
 
-1. **瀏海幾何算法**（`NotchGeometry.swift`）：用 `screen.frame.width - left.width - right.width` 算瀏海寬度、用 `left.height` 當瀏海高度。這是社群常見手法，但沒有在真機上量過，實際瀏海形狀（圓角、精確 padding）跟算出來的矩形可能有落差，需要拿真機數字校正。
-2. ~~**Hidden 狀態的 hover 觸發區域**就是瀏海本身大小（很小）~~ — 已在真機驗證並修正（2026-09-22）。原本的作法是面板本身的 frame 隨動畫縮放、同時兼任 hover 判定範圍，真機測出兩個問題：(a) 動畫進行中滑鼠移動速度一旦超過畫面還沒長到的邊界就會誤判離開，造成展開/收合狂閃；(b) Hidden 狀態只有 ~32pt 高，滑鼠「靜止不動」時的自然晃動就足以跨出邊界，造成靜止時仍會閃爍。修法：面板固定成所有模式中最大的尺寸（`NotchMode.containerFrame`），永遠不再隨動畫 resize；hover 判定範圍改由 `NotchHostingView.hoverRect` 手動控制——進入 Hidden 小膠囊才觸發展開（維持精準），一展開就立刻放大成整個固定範圍（避免抖動誤判離開）。視覺動畫則改用 SwiftUI 的 `@ObservedObject`/`.animation(value:)` 驅動（見 `NotchShellState`），不再由 AppKit 端手動 resize 視窗或覆寫 `rootView`——後者會讓 `withAnimation` 失效。細節見 `Sources/NotchCat/Shell/NotchShellController.swift` 和 `NotchMode.swift` 的註解。
-3. `NSMenuItem` 的 target 有手動設成 `self`（`main.swift`），照理沒問題，但沒跑過。
-4. 沒有處理「機種沒有瀏海」以外的 fallback（目前直接 `NSApp.terminate`），也沒有處理外接螢幕/多螢幕情境的邊界情況（目前假設瀏海永遠在內建螢幕，邏輯上抓第一個有 `auxiliaryTopLeftArea` 的 screen，多螢幕下沒特別測試過）。
+## 實測發現（macOS 15.7，精簡版；完整表格見 Music spec 第 3 節）
 
-## 接手後的建議順序
+- MediaRemote 的 now-playing **讀取**對第三方簽章的主程序封閉：ad-hoc、Apple Development、Apple Distribution 簽章的執行檔與 .app 都只拿到空字典；Apple 簽章的直譯器則讀得到。擋的是簽章授權，不是打包方式。
+- 以 Apple 簽章的 `/usr/bin/perl` 當宿主、載入 ad-hoc 簽章的 C 動態庫，可以讀到完整資料（曲名、演出者、總長度、位置、速率、封面）。這是 Apple 簽章宿主的空隙，不是正式介面，系統更新隨時可能關掉；關掉時退到視窗標題備援。
+- 播放**控制**（`MRMediaRemoteSendCommand`）不受讀取封閉影響，實測可用。
+- helper 行程的記憶體會成長，但上限受 MediaRemote 內部約 400 秒的逾時所限制，實測在約 416 個來源處進入平穩，不是無限成長。
+- `ElapsedTime` 只是 `Timestamp` 那一刻的快照，目前位置要用 `elapsed + (now − timestamp) × rate` 算；封面位元組不是每次都附，要以識別碼為鍵自行快取。
+- 視窗標題在開發機上讀得到（YouTube Music PWA 為 `YouTube Music - 曲名 | YouTube Music 🔊` 形式），但沒有進度、長度與封面。macOS 10.15 起其他 App 的視窗標題通常要有「螢幕錄製」權限才讀得到，開發機的量測環境（例如終端機）可能已經有該權限，所以「不需要權限」這點未經確認；沒有權限時備援讀不到標題，什麼都不顯示。備援沒有演出者，因此只顯示曲名，不查歌詞。
 
-1. `swift run`（或 Xcode 開起來跑），先看能不能編譯過，抓 Swift/API 用法上的錯誤。
-2. 跑起來後對照真實瀏海，校正 `NotchGeometry` 的計算。
-3. 手動測試 hover 進出的展開/收合動畫，調整觸發區域大小、動畫時長/曲線的手感。
-4. Phase 0 驗收過關後，照 `docs/PLANNING.md` 的 Phase 1 開始：`NotchModule` protocol + `ModuleManager`，先用一個「時鐘模組」驗證安裝機制（見 PLANNING.md 第 4、8 節）。
+## 尚未驗證（請使用者在實機上逐項確認）
 
-## 待決事項（PLANNING.md 裡列過，還沒有答案）
+1. YouTube Music、YouTube、Spotify 各播一首：Preview 出現封面、音柱與歌詞條；Expanded 顯示曲名、演出者、進度條、封面。**Spotify 完全未驗證**（開發機沒安裝）。
+2. 暫停時 helper 輸出的形狀（Preview 是否正確回到空黑條）。
+3. 拖動進度時 helper 是否會輸出新的一行（畫面是否跟上）。
+4. 視窗標題備援的格式：YouTube Music PWA 以外的情境，以及備援是否需要「螢幕錄製」權限（很可能需要，見上方實測發現）。
+5. hover 不閃爍：Preview 加高後重新驗收（這是 Shell 先前最難的問題）；特別留意歌詞條出現或折疊使 Preview 高度改變時，游標靜止不動是否會產生多餘的 `mouseEntered`。
+6. `.scrollIndicators(.hidden)` 在實際 App 裡是否生效。
+7. 歌詞條底色透明度 0.6、高度 24pt 的觀感；展開／折疊動畫與折疊後的 hover 範圍。
+8. 上一首／播放暫停／下一首（尤其 `next`、`previous`）真的控制得動。
+9. 殺掉 perl 行程（`pkill -f NotchCatMediaRemoteHelper`）後自動恢復；暫時改名動態庫後 App 不崩潰並退到視窗標題備援（已知會在 log 印一行 dylib not found，只印一次）。
+10. 無網路時歌詞靜默消失、曲目顯示不受影響。
+11. 視窗標題備援只顯示曲名（沒有演出者，不查歌詞）。
+12. helper 的 CPU 與記憶體在長時間執行下的表現。
+13. 音柱（Equalizer）動畫的 CPU 成本。
+14. Expanded 的 AppBar 實際高度約 15pt（`MusicExpandedView` 的註解寫約 20pt），版面預算是 149pt 而非 144pt，請目視確認沒有擠壓或裁切。
+15. 歌詞條額外高度的 0.28 秒動畫期間，Preview 的封面是從零尺寸長出來的，請確認觀感可接受。
+16. `.scrollIndicators(.hidden)` 也要在「系統設定 > 外觀 > 顯示捲動條：永遠」下檢查。
+17. 睡眠／喚醒：播放音樂時讓 Mac 睡眠再喚醒，helper 是否恢復、資料是否是新的。
+18. 從選單列 Quit，以及對 App 下 `kill -9`，之後 `pgrep perl` 都不應留下 helper 行程。
+19. App 執行中重新 `swift build`（動態庫被重新連結）後，確認 helper 能恢復。
+20. 視窗標題備援在有／沒有「螢幕錄製」權限下的行為（沒有權限時預期什麼都不顯示）。
 
-- 最低支援的 macOS 版本（目前程式碼寫死 14，PLANNING.md 討論過 13 vs 14 的取捨）。
-- v1 要不要一開始就做「模組開關」的使用者可見設定 UI，還是先寫死啟用清單。
-- Music 模組的歌詞來源怎麼拿（純顯示系統提供的資訊，或額外串接歌詞服務）——這個要到 Phase 2 才會遇到，但可以先想。
+驗收後把歌詞條透明度與高度的調整結果寫回 Music spec 與計畫的 Global Constraints。
+
+## 已知風險
+
+- perl 宿主的做法脆弱、僅供個人使用，不可當成可對外發布的方案。
+- 瀏海幾何算法（`NotchGeometry.swift`）用 `screen.frame.width − left.width − right.width` 算寬度；已在真機上跑過，但沒有針對不同機型量測。
+- 沒有瀏海的 Mac 與多螢幕情境沒有 fallback（目前沒偵測到瀏海就結束）。
+- 歌詞命中率只測過同一位演出者的兩首曲目，不足以代表整體。
+
+## 下一輪設計的輸入（歌詞可信度與本地來源）
+
+以下是使用者對下一個階段的決定，尚未動工：
+
+- **本地歌詞來源排在 provider 清單的第一位**，先於 LRCLIB 與網易雲。
+- **可編輯第三方結果來覆寫**：編輯後它就變成一筆本地條目。
+- 每首歌可調 **±offset 微調**，並有「這份歌詞是錯的」**黑名單**。
+- 準確度只要求**行級**（目前是哪一行），不做逐字。
+- **準確度優先**：寧可不顯示，也不顯示不準的。
+- **AI agent 整合**：用一個本地歌詞資料夾——放 `.lrc` 檔，加上一份「缺少可信同步歌詞的曲目」待辦清單；任何 agent 都能寫檔，App 監看這個資料夾。
+- **遠端分享**：透過一個公開的 GitHub repo。
+- 本地歌詞庫用 **git 做版本控管**。
+- 公開分享前要留意**版權**問題（歌詞內容屬原權利人）。
+
+## 待決事項
+
+- v1 要不要做「模組開關」的使用者可見設定 UI，還是先寫死啟用清單（目前寫死）。
+- 多模組搶 Preview 的排序體驗（Phase 3）。

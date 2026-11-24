@@ -1,0 +1,34 @@
+[package]
+name = "musicat-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+musicat-core = { path = "../core" }
+# GPUI 以確切版本鎖死（spec 第 7.2 節）；升級是獨立任務，升級後要重驗 platform-macos/src/panel.rs 的每個繞路。
+#
+# 繞路 4（對應 GPUI 0.2.2）：`runtime_shaders`。GPUI 預設在建置時用 Xcode 的 Metal Toolchain（`xcrun metal`）
+# 把 shader 預先編好；沒有安裝 Metal Toolchain 的機器會在 gpui 的 build script 失敗。開啟這個 feature 後
+# shader 改在執行時（第一次開視窗時）由系統的 Metal 編譯，不需要 Metal Toolchain。
+# 已裝 Metal Toolchain 的開發者可以拿掉它（建置說明見 rust/README.md）；在 Windows 上這個 feature 沒有作用。
+gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+# 取得 GPUI 視窗的原生把手（macOS 為 NSView），交給 platform-macos 的面板繞路。
+raw-window-handle = "0.6"
+# 封面解碼（偵測格式後裁成正方形縮圖再交給 GPUI，見 src/artwork.rs）。與 gpui 0.2.2 依賴的是同一個 crate
+# （Cargo.lock 已有 0.25.x，授權 MIT OR Apache-2.0），只列出要用的格式。
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff", "bmp"] }
+# 把任意執行緒上的狀態變動通知帶回 GPUI 主執行緒（src/music_views.rs）：無界 channel 與 StreamExt。
+# 都已在 Cargo.lock（MIT OR Apache-2.0），不帶任何執行器。
+futures-channel = { version = "0.3", default-features = false, features = ["std"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# runtime.rs 的測試以自寫的 GPUI 調度器建 `BackgroundExecutor`，需要 `async_task::Runnable` 這個型別。
+# 已在 Cargo.lock（gpui 的相依，Apache-2.0 OR MIT）。
+async-task = "4.7"
+
+# 面板繞路只在 macOS；shell 本身不碰 Objective-C，只呼叫 musicat_platform_macos::panel 的公開函式。
+[target.'cfg(target_os = "macos")'.dependencies]
+musicat-platform-macos = { path = "../platform-macos" }
