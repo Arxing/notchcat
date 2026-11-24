@@ -39,15 +39,16 @@ MSG
     exit "$status"
 fi
 
+# 缺動態庫只警告、不中止：App 自己會退到視窗標題備援，驗收（HANDOFF 第 9 項）也要靠改名動態庫來測這條路。
 if [ ! -f target/release/libmusicat_mediaremote_helper.dylib ]; then
     cat >&2 <<'MSG'
 
 musicat: 找不到 target/release/libmusicat_mediaremote_helper.dylib（現正播放 helper 動態庫）。
   build script 只在 helper/ 或 build.rs 變更時重跑，所以手動刪掉動態庫後 cargo 不會自己重建。
   請執行：  cd rust && cargo clean -p musicat-platform-macos
-  然後重新執行這個腳本。沒有它程式仍會啟動，但只剩視窗標題備援。
+  然後重新執行這個腳本。沒有它程式仍會啟動（下面照常啟動），但只剩視窗標題備援。
+  （這也是驗收清單第 9 項「改名動態庫後不崩潰」的測試路徑，所以只警告、不中止。）
 MSG
-    exit 1
 fi
 
 # exec 之後 trap 不會執行，先自己清掉暫存。
