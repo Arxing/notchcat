@@ -81,6 +81,9 @@ cargo run --release -p musicat-app
 - 讀取系統現正播放需要 helper 動態庫 `libmusicat_mediaremote_helper.dylib` 放在**可執行檔旁邊**（建置時自動產生在
   `target/<profile>/`）。找不到時印一行 `system now-playing unavailable` 並只用視窗標題備援，程式照常執行。
 - 有歌詞時，Expanded 畫面控制列左側會顯示一個小的歌詞來源標籤（例如 `lrclib.net ↗`），點擊會用預設瀏覽器開啟該歌詞的來源網站（只開 `https://` 網址）。
+- **同一時間只能執行一個 MusiCat**：第二次啟動會在 stderr 印一行「已在執行中」並以狀態碼 1 結束，不會開任何視窗或選單列圖示。
+  做法是在設定檔旁取一把檔案鎖 `musicat.lock`（用 `MUSICAT_CONFIG` 指到別處的測試執行個體鎖在它自己的設定檔旁，不會與真正的執行個體衝突）；
+  App 結束或崩潰（含 `kill -9`）時作業系統會自動釋放鎖，不會留下過期的鎖。若鎖檔無法建立（唯讀、檔案系統不支援），只印一行警告並照常啟動。
 - 選單列圖示很多時，macOS 會把放不下的圖示藏起來（有瀏海的螢幕特別明顯）；看不到「♪」時請按住 ⌘ 拖曳其他圖示騰出位置。
 - **結束與 helper**：從選單「結束」，以及登出、關機與 `NSRunningApplication.terminate()` 這些經由 AppKit 結束通知的路徑，都會先停掉 perl helper 再結束。
   Activity Monitor 的強制結束（`kill -9`）與 `SIGINT`／`SIGTERM`（Ctrl-C、`kill`）會直接殺掉行程，**不會**呼叫停止來源的程式；

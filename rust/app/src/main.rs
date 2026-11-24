@@ -91,6 +91,7 @@ mod macos {
     use musicat_app::gated_source::GatedSource;
     use musicat_app::http_ureq::UreqHttp;
     use musicat_app::menu::{build_menu, Effect, MenuPlatform};
+    use musicat_app::single_instance::{self, Acquire};
     use musicat_app::switchable::{build_repository, SwitchableResolver};
     use musicat_core::artwork_cache::ArtworkCache;
     use musicat_core::http::HttpClient;
@@ -174,6 +175,26 @@ mod macos {
             );
             std::process::exit(1);
         };
+
+        // 單一執行個體：在建立任何東西（設定檔、視窗、選單列圖示、helper、GPUI）之前先取鎖。
+        // 鎖檔在設定檔旁，所以用另一個 `MUSICAT_CONFIG` 的測試執行個體不會與真正的那個互相衝突。
+        // 這個守衛必須活到行程結束：放在 `run` 的區域變數（比 `Application::run` 長命）；
+        // GPUI 的結束路徑不跑解構函式也沒關係，行程結束時作業系統會釋放鎖。
+        let _instance_lock = match single_instance::acquire(&single_instance::lock_path_for(&path))
+        {
+            Acquire::Acquired(lock) => Some(lock),
+            Acquire::AlreadyRunning => {
+                eprintln!("MusiCat 已在執行中，結束。／MusiCat is already running; exiting.");
+                std::process::exit(1);
+            }
+            Acquire::Skipped(reason) => {
+                eprintln!(
+                    "MusiCat: single-instance guard unavailable ({reason}); starting anyway."
+                );
+                None
+            }
+        };
+
         let (store, warnings) = ConfigStore::open(&path);
         log!(
             "config {} ({})",

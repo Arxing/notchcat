@@ -442,6 +442,9 @@ Task 25b 已自動驗證（2026-11-20，macOS 15.7 arm64，只接內建有瀏海
   helper 被換成新的行程（pid 改變），幾秒內畫面上的曲目與進度是新的。
 - [ ] **（18）結束不留 helper。** 從選單「結束 MusiCat」→ 圖示與面板消失、`pgrep -f musicat_helper_main` 為空；
   對 App 下 `kill -9` 也一樣（已自動驗證，請在實際使用中再看一次）。
+- [ ] **單一執行個體。** 啟動 App 兩次：第二個在 stderr 印出「MusiCat 已在執行中，結束。／MusiCat is already running; exiting.」並以非 0 狀態碼（1）結束，
+  第一個照常執行、`pgrep -x musicat` 只有一個、`pgrep -fc musicat_helper_main` 只有一個。結束第一個之後（從選單「結束 MusiCat」與 `kill -9` 各試一次）
+  馬上再啟動能正常起來（沒有過期的鎖）。用別的 `MUSICAT_CONFIG` 啟動的執行個體不受影響（鎖檔 `musicat.lock` 在各自的設定檔旁）。
 - [ ] **（19）重新建置後恢復。** App 執行中重新 `cargo build --release -p musicat-app`（動態庫被重新連結）→ `pkill -f musicat_helper_main`
   之後 helper 能以新的動態庫重啟。
 - [ ] **真實播放器的控制與 CPU。** YouTube Music、Spotify 各播一首：Preview／Expanded 正常、按鈕控制得動（Task 24 的 HANDOFF 8 待辦）、
