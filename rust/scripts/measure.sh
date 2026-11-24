@@ -18,6 +18,8 @@
 #
 # 結束碼：0 = 完成（含無法判定）、1 = RSS 成長超標（FAIL）、2 = 用法或環境錯誤。
 set -u
+# 固定 C locale：小數逗號的地區設定會讓 ps 的輸出與 awk 的算術壞掉（CSV 與摘要都會錯）。
+export LC_ALL=C
 
 DURATION=3600
 INTERVAL=10
