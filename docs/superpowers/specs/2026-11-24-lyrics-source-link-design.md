@@ -21,7 +21,7 @@
 **反目標**
 - 把特定來源的細節（LRCLIB 或網易雲的 id）放進 `Lyrics`，或讓控制器與畫面認得它們。
 - 開啟非 https 的位址，或開啟不是我們自己的提供者組出來的位址。
-- 讓來源標籤被下方圓角切到或擠壞 Expanded 版面。
+- 讓來源標籤蓋住歌詞、被下方圓角切到，或擠壞 Expanded 版面。
 
 ## 3. 做法（Approaches）
 
@@ -54,7 +54,7 @@ pub struct LyricsHit {
 - **`SwitchableResolver`** 轉手，簽章跟著改。
 - **`MusicController`／`MusicState`**：`MusicState.lyrics: Option<Lyrics>` **保持不變**，新增 `MusicState.lyrics_url: Option<String>`（沒命中 `None`）。控制器是唯一拆開 `LyricsHit` 的地方；換曲清空、過期結果丟棄、世代防護的規則對兩個欄位一起套用（永遠一起設定、一起清除）。
 - **開啟連結**：新增 `rust/platform-macos/src/links.rs`（唯一的新 ObjC 檔）：`pub fn open_url(url: &str) -> bool`，只接受 `https://` 且可解析、有主機名稱、不含空白或控制字元、長度合理的位址，其餘回傳 false 並不開啟；用 `NSWorkspace.sharedWorkspace().openURL`；僅限主執行緒（`MainThreadMarker`）。
-- **畫面（`shell`）**：`MusicShellContent::new` 多一個注入的 `open_url: Arc<dyn Fn(&str) + Send + Sync>`（app 傳入 `platform_macos::open_url`），shell 不碰 ObjC。Expanded 的歌詞區右下角（落在下方圓角 24 pt 淨空之內）顯示小標籤「<主機名稱> ↗」（例如 `lrclib.net ↗`、`music.163.com ↗`）：`lyrics_url` 為 `Some` 才顯示，點擊呼叫注入的 `open_url`；`None` 完全不顯示。字小、低對比。純文字歌詞同樣顯示。
+- **畫面（`shell`）**：`MusicShellContent::new` 多一個注入的 `open_url: Arc<dyn Fn(&str) + Send + Sync>`（app 傳入 `platform_macos::open_url`），shell 不碰 ObjC。Expanded 的**控制列左側空位**（現在是 `square()` 加左側 `flex_1` 的空白；放在歌詞區右下角會蓋到長歌詞行，所以改放這裡）顯示小標籤「<主機名稱> ↗」（例如 `lrclib.net ↗`、`music.163.com ↗`）：`lyrics_url` 為 `Some` 才顯示，點擊呼叫注入的 `open_url`；`None` 完全不顯示。字小、低對比，列高與按鈕位置不變。純文字歌詞同樣顯示。
 
 ### 4.3 隱私與安全
 
@@ -80,7 +80,7 @@ pub struct LyricsHit {
 
 - 命中一定有網址：LRCLIB 沒有有效 id 時退用「我們剛發出去的請求位址」。點開會是該請求回應的 JSON（精確查詢）或一份搜尋結果清單（搜尋備援），不是漂亮的頁面。
 - LRCLIB 有 id 時用 `https://lrclib.net/api/get/<id>`（確定可用，點開是 JSON），而不是 `https://lrclib.net/db/<id>`：我實測後者對不存在的 id 也回傳 200 的通用外殼，無法確認它會顯示該筆曲目。若使用者確認 `/db/<id>` 在瀏覽器中確實顯示該筆，只需改提供者裡的一個函式。
-- 不另存來源名稱，標籤用網址的主機名稱；位置在歌詞區右下角；Preview 不顯示；只開 https。
+- 不另存來源名稱，標籤用網址的主機名稱；位置在控制列左側空位（不蓋歌詞）、小字低對比；Preview 不顯示；只開 https。
 - `MusicState` 新增並列欄位 `lyrics_url`，而非改 `lyrics` 的型別，讓既有的畫面與呈現邏輯零改動。
 
 ## 6. 留給實作者
