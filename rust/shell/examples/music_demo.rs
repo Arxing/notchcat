@@ -47,7 +47,7 @@ mod demo {
     use image::{ImageEncoder, Rgba, RgbaImage};
     use musicat_core::artwork_cache::ArtworkCache;
     use musicat_core::lyrics::repository::LyricsResolving;
-    use musicat_core::lyrics::{LyricLine, Lyrics, TrackIdentity};
+    use musicat_core::lyrics::{LyricLine, Lyrics, LyricsHit, TrackIdentity};
     use musicat_core::modules::{ModuleManager, ModuleState};
     use musicat_core::music::controller::MusicController;
     use musicat_core::music::module::MusicModuleState;
@@ -349,7 +349,7 @@ mod demo {
     }
 
     impl LyricsResolving for DemoLyrics {
-        fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<Lyrics>> {
+        fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
             let lyrics = match self.scene {
                 Scene::Plain => Some(plain_lyrics()),
                 Scene::NoLyrics => None,
@@ -357,7 +357,8 @@ mod demo {
                 _ if track.title.contains("Morning") || track.title.contains("晨光") => None,
                 scene => Some(synced_lyrics(scene == Scene::LongTitle)),
             };
-            Box::pin(std::future::ready(lyrics))
+            let hit = lyrics.map(|l| LyricsHit::new(l, "https://lrclib.net/api/get/1"));
+            Box::pin(std::future::ready(hit))
         }
     }
 

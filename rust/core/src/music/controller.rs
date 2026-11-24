@@ -167,7 +167,8 @@ impl MusicController {
         let weak: Weak<Self> = Arc::downgrade(self);
         let task_key = key.clone();
         let handle = self.spawner.spawn(Box::pin(async move {
-            let result = resolver.lyrics(identity).await;
+            // 暫時只取歌詞、丟掉來源網址：Task 2 會一併保存網址。
+            let result = resolver.lyrics(identity).await.map(|hit| hit.lyrics);
             if let Some(controller) = weak.upgrade() {
                 controller.finish_lookup(&task_key, generation, result);
             }
@@ -207,6 +208,7 @@ mod tests {
     use super::*;
     use crate::artwork_cache::ArtworkCache;
     use crate::lyrics::identity::TrackIdentity;
+    use crate::lyrics::LyricsHit;
     use crate::nowplaying::{NowPlayingSource, SharedSnapshotCallback, SnapshotCallback};
     use crate::runtime::{BoxFuture, Notifier};
     use crate::testing::LocalSpawner;
@@ -252,6 +254,11 @@ mod tests {
         }
     }
 
+    /// 測試用命中：網址固定。
+    fn hit(lyrics: Lyrics) -> LyricsHit {
+        LyricsHit::new(lyrics, "https://test.example/0")
+    }
+
     /// 一次查詢的閘門：test 呼叫 `answer` 之前，對應的 future 一直 Pending。
     #[derive(Default)]
     struct Gate {
@@ -260,7 +267,7 @@ mod tests {
 
     #[derive(Default)]
     struct GateSlot {
-        answer: Option<Option<Lyrics>>,
+        answer: Option<Option<LyricsHit>>,
         waker: Option<Waker>,
     }
 
@@ -268,7 +275,7 @@ mod tests {
         fn answer(&self, lyrics: Option<Lyrics>) {
             let waker = {
                 let mut slot = lock(&self.slot);
-                slot.answer = Some(lyrics);
+                slot.answer = Some(lyrics.map(hit));
                 slot.waker.take()
             };
             if let Some(w) = waker {
@@ -284,7 +291,7 @@ mod tests {
     }
 
     impl Future for GatedLookup {
-        type Output = Option<Lyrics>;
+        type Output = Option<LyricsHit>;
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             let mut slot = lock(&self.gate.slot);
             match slot.answer.take() {
@@ -328,7 +335,7 @@ mod tests {
     }
 
     impl LyricsResolving for GatedResolver {
-        fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<Lyrics>> {
+        fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
             let gate = Arc::new(Gate::default());
             lock(&self.tracks).push(track);
             lock(&self.gates).push(gate.clone());

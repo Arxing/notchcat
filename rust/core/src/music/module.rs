@@ -169,7 +169,7 @@ mod tests {
     use crate::artwork_cache::ArtworkCache;
     use crate::lyrics::identity::TrackIdentity;
     use crate::lyrics::repository::LyricsResolving;
-    use crate::lyrics::Lyrics;
+    use crate::lyrics::LyricsHit;
     use crate::nowplaying::{NowPlayingMonitor, SharedSnapshotCallback, SnapshotCallback};
     use crate::runtime::BoxFuture;
     use crate::testing::LocalSpawner;
@@ -224,7 +224,7 @@ mod tests {
     struct NoLyrics;
 
     impl LyricsResolving for NoLyrics {
-        fn lyrics(&self, _track: TrackIdentity) -> BoxFuture<'_, Option<Lyrics>> {
+        fn lyrics(&self, _track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
             Box::pin(std::future::ready(None))
         }
     }

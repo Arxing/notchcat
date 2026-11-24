@@ -21,7 +21,7 @@ use musicat_core::lyrics::lrclib::LrclibProvider;
 use musicat_core::lyrics::netease::NetEaseProvider;
 use musicat_core::lyrics::provider::LyricsProvider;
 use musicat_core::lyrics::repository::{LyricsRepository, LyricsResolving, RepositoryConfig};
-use musicat_core::lyrics::{Lyrics, TrackIdentity};
+use musicat_core::lyrics::{LyricsHit, TrackIdentity};
 use musicat_core::runtime::{BoxFuture, Clock};
 
 use crate::config::Sources;
@@ -52,7 +52,7 @@ impl SwitchableResolver {
 }
 
 impl LyricsResolving for SwitchableResolver {
-    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<Lyrics>> {
+    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
         let resolver = lock(&self.current).clone();
         // future 自己擁有那一份 Arc：之後被 swap 掉也不影響它。
         Box::pin(async move { resolver.lyrics(track).await })
@@ -84,6 +84,7 @@ pub fn build_repository(
 mod tests {
     use super::*;
     use futures_channel::oneshot;
+    use musicat_core::lyrics::Lyrics;
     use musicat_core::testing::{FakeClock, FakeHttp};
     use std::task::{Context, Poll, Waker};
 
@@ -112,8 +113,12 @@ mod tests {
             .collect()
     }
 
-    fn lookup(resolver: &dyn LyricsResolving) -> Option<Lyrics> {
+    fn lookup_hit(resolver: &dyn LyricsResolving) -> Option<LyricsHit> {
         futures_executor::block_on(resolver.lyrics(track()))
+    }
+
+    fn lookup(resolver: &dyn LyricsResolving) -> Option<Lyrics> {
+        lookup_hit(resolver).map(|hit| hit.lyrics)
     }
 
     fn repo(sources: Sources, http: &Arc<FakeHttp>) -> Arc<dyn LyricsResolving> {
@@ -145,14 +150,17 @@ mod tests {
     }
 
     impl LyricsResolving for Stub {
-        fn lyrics(&self, _track: TrackIdentity) -> BoxFuture<'_, Option<Lyrics>> {
+        fn lyrics(&self, _track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
             let gate = lock(&self.gate).take();
             let label = self.label;
             Box::pin(async move {
                 if let Some(rx) = gate {
                     let _ = rx.await;
                 }
-                Some(Lyrics::Plain(label.into()))
+                Some(LyricsHit::new(
+                    Lyrics::Plain(label.into()),
+                    format!("https://test.example/{label}"),
+                ))
             })
         }
     }
@@ -227,6 +235,19 @@ mod tests {
     }
 
     #[test]
+    fn swap_changes_the_url_source_for_later_lookups() {
+        let sw = SwitchableResolver::new(Stub::fixed("old"));
+        assert_eq!(
+            lookup_hit(&sw).map(|h| h.url),
+            Some("https://test.example/old".to_string())
+        );
+        sw.swap(Stub::fixed("new"));
+        let hit = lookup_hit(&sw).expect("a hit from the new resolver");
+        assert_eq!(hit.url, "https://test.example/new");
+        assert_eq!(hit.lyrics, Lyrics::Plain("new".into()));
+    }
+
+    #[test]
     fn an_in_flight_lookup_completes_with_the_old_resolver() {
         let (old, release) = Stub::gated("old");
         let sw = SwitchableResolver::new(old);
@@ -238,7 +259,10 @@ mod tests {
         sw.swap(Stub::fixed("new"));
         release.send(()).unwrap();
 
-        assert_eq!(futures_executor::block_on(in_flight), plain("old"));
+        assert_eq!(
+            futures_executor::block_on(in_flight).map(|h| h.lyrics),
+            plain("old")
+        );
         assert_eq!(lookup(&sw), plain("new"));
     }
 
@@ -247,7 +271,10 @@ mod tests {
         let sw = SwitchableResolver::new(Stub::fixed("old"));
         let not_yet_polled = sw.lyrics(track());
         sw.swap(Stub::fixed("new"));
-        assert_eq!(futures_executor::block_on(not_yet_polled), plain("old"));
+        assert_eq!(
+            futures_executor::block_on(not_yet_polled).map(|h| h.lyrics),
+            plain("old")
+        );
     }
 
     #[test]

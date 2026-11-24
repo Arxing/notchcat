@@ -26,6 +26,24 @@ pub enum Lyrics {
     Plain(String),
 }
 
+/// 一次命中：歌詞，加上它的來源網址（讓使用者能開啟來源頁面）。
+///
+/// `url` 一律是 `https://` 開頭：提供者只會組出自己服務的 https 位址。
+/// 它與 `Lyrics` 並排而不是放進 `Lyrics`，所以歌詞的比對與呈現邏輯完全不受影響。
+#[derive(Clone, PartialEq, Debug)]
+pub struct LyricsHit {
+    pub lyrics: Lyrics,
+    pub url: String,
+}
+
+impl LyricsHit {
+    pub fn new(lyrics: Lyrics, url: impl Into<String>) -> Self {
+        let url = url.into();
+        debug_assert!(url.starts_with("https://"), "非 https 網址：{url}");
+        Self { lyrics, url }
+    }
+}
+
 impl Lyrics {
     /// 最後一個時間行可以比曲長晚多少秒。
     pub const DURATION_TOLERANCE: f64 = 5.0;
@@ -274,6 +292,13 @@ mod tests {
                 panic!("expected synced lyrics for {head:?}, got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn lyrics_hit_pairs_lyrics_with_its_https_url() {
+        let hit = LyricsHit::new(Lyrics::Plain("words".into()), "https://x.example/1");
+        assert_eq!(hit.lyrics, Lyrics::Plain("words".into()));
+        assert_eq!(hit.url, "https://x.example/1");
     }
 
     fn texts(lines: &[LyricLine]) -> Vec<&str> {
