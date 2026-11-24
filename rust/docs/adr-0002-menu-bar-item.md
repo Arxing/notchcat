@@ -34,7 +34,7 @@ spec 第 3 節規定設定入口是選單列（macOS）／系統匣（Windows）
 
 ### 3. 驗收（同一個行程：accessory 模式 + `patch_gpui_panel_class` + GPUI PopUp 面板 + 選單列圖示）
 
-以 `cargo run -p musicat-shell --example tray_smoke` 實測（完整輸出見 Task 22 報告）。結果：
+以 `cargo run -p musicat-shell --example tray_smoke` 實測（輸出不在 repo 內）。結果：
 
 | 項目 | 結果 | 證據 |
 | --- | --- | --- |

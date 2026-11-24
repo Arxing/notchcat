@@ -42,9 +42,10 @@
 //!
 //! 其他結束路徑：
 //!
-//! - **經由 AppKit 的 terminate**（Dock 選單的結束、⌘Q、登出、關機）：GPUI 在 `applicationWillTerminate`
+//! - **經由 AppKit 的 terminate**（登出、關機、`NSRunningApplication.terminate()`；MusiCat 是沒有 Dock 圖示與主選單的
+//!   accessory app、不會成為前景，所以沒有 Dock 結束與全域 ⌘Q，選單項目上的「⌘Q」就是選單路徑本身）：GPUI 在 `applicationWillTerminate`
 //!   呼叫 `cx.on_app_quit` 的觀察者，這裡在觀察者裡也停止所有來源（`stop_sources` 只做一次，與選單路徑不會重複）。
-//!   已驗證：對執行中的 App 呼叫 `NSRunningApplication.terminate()`（送出與登出、Dock 結束相同的結束 Apple Event）→
+//!   已驗證：對執行中的 App 呼叫 `NSRunningApplication.terminate()`（送出與登出相同的結束 Apple Event）→
 //!   日誌出現 `app quit notification`、行程與 helper 都消失。
 //! - **不經過 terminate**：`kill -9`（Activity Monitor 的強制結束）、`SIGINT`／`SIGTERM`（Ctrl-C、`kill`）
 //!   直接殺行程，GPUI 與這裡都沒有機會清理，**`stop_sources` 不會被呼叫**。helper 在 stdin 的 pipe 關閉
@@ -213,7 +214,7 @@ mod macos {
                 }
             }
 
-            // 選單「結束」以外、經由 AppKit 的 terminate 結束的路徑（Dock 選單的結束、⌘Q、登出、關機）：
+            // 選單「結束」以外、經由 AppKit 的 terminate 結束的路徑（登出、關機、`NSRunningApplication.terminate()`；沒有 Dock 結束與全域 ⌘Q）：
             // GPUI 在 applicationWillTerminate 呼叫這個觀察者，在這裡也停掉來源，不必靠 helper 的 stdin 關閉。
             // 借用失敗（不該發生：結束通知在主執行緒的事件迴圈裡，不在任何借用之內）時略過，helper 仍會自行結束。
             cx.on_app_quit({

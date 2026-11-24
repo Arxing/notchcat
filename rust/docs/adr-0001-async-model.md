@@ -23,7 +23,7 @@ core 不得依賴任何 async runtime（tokio、async-std、smol…），也不�
 | 逾時 | `with_timeout(clock, limit, fut)` 以 `futures_util::future::select` 讓 `fut` 與 `clock.sleep(limit)` 賽跑，輸家被 drop | Rust 的 drop 就是取消，不需要被包的 future 配合，對應 Swift「不等不理會取消的來源」。同一輪都就緒時 `fut` 優先，快的來源不會被切掉。 |
 | 併發合併 | `Coalescer<K, V>`：內部 future 包成 `futures_util::future::Shared`，表中只存 `WeakShared`；每個呼叫者拿到一個持有強參考的等待 future | 表不持有強參考，所以最後一個等待者被 drop 時內部 future 自然被 drop（取消），不需要額外的取消通道；內部 future 完成時自己移除表項，之後同 key 重新執行。 |
 | 取消不入快取 | 快取寫入寫在被合併的 future **內部**、位於結果算完之後 | future 沒跑完就被 drop，寫入那一行根本不會執行，所以取消自然不會被快取成「查無」，不需要特別判斷。 |
-| 背景工作 | `Spawner::spawn(BoxFuture<'static, ()>) -> TaskHandle`，`TaskHandle` drop 即取消，`detach()` 讓它跑完 | 與 GPUI 的 `Task` 語意一致，外殼只要把 GPUI 的 task move 進 `TaskHandle::new` 即可；沒有原生取消的執行器用 `runtime::abortable_task` 包一層。 |
+| 背景工作 | `Spawner::spawn(BoxFuture<'static, ()>) -> TaskHandle`，`TaskHandle` drop 即取消，`detach()` 讓它跑完 | 與 GPUI 的 `Task` 語意一致，外殼把 GPUI 的 `Task` 放進「drop 時呼叫 `Task::detach`」的 `DetachOnDrop` 守衛，守衛再搬進 `TaskHandle::new` 的取消閉包：取消閉包被呼叫時先取出 `Task` 再 drop（取消），`detach()` 則是不呼叫閉包就把它 drop，守衛的 `Drop` 讓工作跑完。**不能**直接把 `Task` move 進閉包（`move || drop(task)`），那會讓 `detach()` 變成取消；見 `shell/src/runtime.rs`。沒有原生取消的執行器用 `runtime::abortable_task` 包一層。 |
 | 同步通知 | `Notifier<T>`：`Mutex<Vec<(id, Arc<dyn Fn>)>>`，`Subscription` drop 即取消訂閱；通知時先複製出訂閱者快照、鎖外呼叫 | 回呼內可再訂閱、取消或通知而不死結。 |
 | HTTP | `HttpClient::get(HttpRequest) -> BoxFuture<Result<HttpResponse, HttpError>>`；`HttpError` 只有 `Transport(String)` 與 `TooLarge` | 實作（ureq 等）留在外殼；回傳的 future drop 即放棄請求，與逾時、合併的取消語意一致。 |
 | 依賴 | 只用 `futures-util`（`default-features = false, features = ["std"]`） | 只有組合子、沒有執行器或 runtime，通過 `check-core-purity.sh`。 |

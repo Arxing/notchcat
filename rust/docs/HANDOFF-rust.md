@@ -48,7 +48,7 @@ Rust helper 的實際命令列（`ps` 實測，Task 26，App 執行中）是
 所以 `pkill -f musicat_helper_main` 與 `pgrep -f musicat_helper_main` 都能對到它。
 
 狀態欄：**agent-verified** = 代理人已實測、證據寫在旁邊；**partly** = 一部分已驗證（寫明哪一部分）、其餘仍待作者；
-**needs author** = 代理人沒有驗證。證據只引用各任務報告與附錄實際做過的事。最右欄的 ☐ 由作者驗收後打勾。
+**needs author** = 代理人沒有驗證。證據只引用各任務與附錄實際做過的事（任務報告不在 repo 內，這裡寫的就是證據紀錄）。最右欄的 ☐ 由作者驗收後打勾。
 
 | # | 項目（Swift 原文；僅改名稱與指令） | 狀態 | 證據與作者要做的事 | 作者 |
 |---|---|---|---|---|
@@ -63,13 +63,13 @@ Rust helper 的實際命令列（`ps` 實測，Task 26，App 執行中）是
 | 9 | 殺掉 perl 行程（`pkill -f musicat_helper_main`）後自動恢復；暫時改名動態庫（`target/release/libmusicat_mediaremote_helper.dylib`）後 App 不崩潰並退到視窗標題備援（已知會在 stderr 印一行 `system now-playing unavailable`，只印一次）。 | needs author | 監管者的重啟與退避有單元測試（假的啟動器）；沒有對真實 helper 殺過一次。附錄 E「helper 被殺掉後恢復」。 | ☐ |
 | 10 | 無網路時歌詞靜默消失、曲目顯示不受影響。 | needs author | 提供者「失敗」與「乾淨地沒有」的區分有單元測試；真實斷網沒有試過（附錄 E「LRCLIB／網易雲開關與離線」）。 | ☐ |
 | 11 | 視窗標題備援只顯示曲名（沒有演出者，不查歌詞）。 | needs author | 單元測試涵蓋；真實情境見附錄 E「視窗標題備援」。 | ☐ |
-| 12 | helper 的 CPU 與記憶體在長時間執行下的表現。 | partly | 已驗證（短時間）：App 閒置 15 秒約 1.3% CPU、RSS 約 42 MB；helper 約 0.3%、13 MB（Task 25b）。`measure.sh -d 40 -i 5` 對真實 App 與 helper 跑過，RSS 變化 +1.4%／+2.2%（Task 26 報告）。**作者要做**：第 6 節的 1 小時量測。 | ☐ |
+| 12 | helper 的 CPU 與記憶體在長時間執行下的表現。 | partly | 已驗證（短時間）：App 閒置 15 秒約 1.3% CPU、RSS 約 42 MB；helper 約 0.3%、13 MB（Task 25b）。`measure.sh -d 40 -i 5` 對真實 App 與 helper 跑過，RSS 變化 +1.4%／+2.2%（Task 26）。**作者要做**：第 6 節的 1 小時量測。 | ☐ |
 | 13 | 音柱（Equalizer）動畫的 CPU 成本。 | partly | 已量測：release、停在 Preview 的示範程式，音柱 12 fps 約 3.6%（目標約 3%，略高）；跑馬燈 30 fps 約 5.4%（Task 24）。**作者要做**：目視平順度、決定是否把 `music_layout::EQ_FRAME_SECONDS` 調成 1/10；在真實播放時再量一次（附錄 D「CPU 與平順度的取捨」）。 | ☐ |
 | 14 | Expanded 的模組切換列（AppBar）實際高度為 15pt（`music_layout::APP_BAR_HEIGHT`），版面預算是 149pt（`MUSIC_PAGE_HEIGHT` = `EXPANDED_CONTENT_HEIGHT` 172 − 15 − 8）而非 144pt，請目視確認沒有擠壓或裁切。常數都在 `rust/shell/src/music_layout.rs`；Expanded 高 180（`EXPANDED_HEIGHT`，`rust/core/src/shell_logic/geometry.rs`）、上方內距 8（`EXPANDED_TOP_PADDING`，`rust/shell/src/lib.rs`）。 | partly | 已驗證：預算由常數推導並有單元測試（內容角點在 24 pt 圓角內）；Task 24 的 Expanded 截圖沒有看到擠壓，下方圓角外沒有露出內容。**作者要做**：用真實內容再看一次（附錄 D「版面預算」）。 | ☐ |
 | 15 | 歌詞條額外高度的 0.28 秒動畫期間，Preview 的封面是從零尺寸長出來的，請確認觀感可接受。（Rust 版的實作不同：內容槽固定為目標大小、由外形裁切，封面**不會**從零長出來，歌詞條是被「揭開」。請確認新的觀感可接受。） | needs author | 附錄 D「歌詞條出現的動畫」。 | ☐ |
 | 16 | GPUI 歌詞捲動區不顯示捲軸，包含「系統設定 > 外觀 > 顯示捲動條：永遠」的情況下。 | needs author | 與第 6 項一起檢查（附錄 D「捲動條」）。 | ☐ |
 | 17 | 睡眠／喚醒：播放音樂時讓 Mac 睡眠再喚醒，helper 是否恢復、資料是否是新的。 | partly | 已驗證：`wake_smoke` 以程式發出 `NSWorkspaceDidWakeNotification`（**沒有**讓機器睡眠），回呼在主執行緒被呼叫、取消登記後不再被呼叫（Task 25b）。**作者要做**：真的睡眠再喚醒（附錄 E「睡眠與喚醒」，日誌 `system woke from sleep`、helper 換成新 pid）。 | ☐ |
-| 18 | 從選單列 Quit，以及對 App 下 `kill -9`，之後 `pgrep -f musicat_helper_main`（或 `pgrep perl`）都不應留下 helper 行程。 | agent-verified | `kill -9` App：0.05 秒內 helper 消失（Task 25b）；`MUSICAT_AUTO_QUIT_SECS`（與選單「結束」同一條程式路徑）後 `exit=0`、沒有 helper（Task 25b）；Task 26 另驗證 `SIGTERM`、`SIGINT`、系統式結束（`NSRunningApplication.terminate()`，同登出／Dock 結束的 Apple Event）都不留 helper。未做：用滑鼠真的點選單「結束」（附錄 E「結束不留 helper」，路徑相同、風險低）。 | ☐ |
+| 18 | 從選單列 Quit，以及對 App 下 `kill -9`，之後 `pgrep -f musicat_helper_main`（或 `pgrep perl`）都不應留下 helper 行程。 | partly | `kill -9` App：0.05 秒內 helper 消失（Task 25b）；`MUSICAT_AUTO_QUIT_SECS`（與選單「結束」同一條程式路徑）後 `exit=0`、沒有 helper（Task 25b）；Task 26 另驗證 `SIGTERM`、`SIGINT`、系統式結束（`NSRunningApplication.terminate()`，同登出的 Apple Event）都不留 helper。未做：用滑鼠真的點選單「結束」（附錄 E「結束不留 helper」，路徑相同、風險低）。 | ☐ |
 | 19 | App 執行中重新 `cargo build --release -p musicat-app`（動態庫被重新連結）後，確認 helper 能恢復。**注意**：cargo 只在 `rust/platform-macos/helper/` 或 `build.rs` 有變更時才重跑 build script、重新連結動態庫，所以要先 `touch rust/platform-macos/helper/helper.c` 才會真的換掉動態庫（build.rs 先刪再複製，新檔案是新的 inode）。只手動刪掉 `target/release/` 裡的那份複本不會被補回，要 `cargo clean -p musicat-platform-macos`（`run.sh` 會提示）。 | needs author | 附錄 E「重新建置後恢復」。 | ☐ |
 | 20 | 視窗標題備援在有／沒有「螢幕錄製」權限下的行為（沒有權限時預期什麼都不顯示）。 | needs author | 附錄 E「視窗標題備援」。 | ☐ |
 
