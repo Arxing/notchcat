@@ -8,4 +8,5 @@ pub mod gated_source;
 pub mod http_ureq;
 pub mod menu;
 pub mod real_runtime;
+pub mod single_instance;
 pub mod switchable;

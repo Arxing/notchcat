@@ -67,6 +67,66 @@ pub const STRIP_FONT_SIZE: f64 = 12.0;
 pub const STRIP_LINE_OPACITY: f64 = 0.95;
 /// 顯示曲名時的文字不透明度。
 pub const STRIP_TITLE_OPACITY: f64 = 0.7;
+/// 多行歌詞條裡，前後文行（非目前行）的文字不透明度。
+pub const STRIP_CONTEXT_OPACITY: f64 = 0.45;
+/// 歌詞條某一列的文字不透明度：依強調程度在前後文與目前行之間內插。
+pub fn strip_row_opacity(emphasis: f64) -> f64 {
+    STRIP_CONTEXT_OPACITY + (STRIP_LINE_OPACITY - STRIP_CONTEXT_OPACITY) * emphasis.clamp(0.0, 1.0)
+}
+
+/// 歌詞條一次跳超過這麼多行（拖動進度）時直接換，不做捲動動畫。
+pub const STRIP_MAX_ANIMATED_STEP: usize = 2;
+
+/// 歌詞條的換行捲動：目前行改變時，位置在 [`LYRIC_SCROLL_SECONDS`] 內以 ease-in-out 從舊行走到新行。
+/// 位置是「行索引」（捲動中為小數）；時間是任意起點的單調秒數。
+#[derive(Default, Debug)]
+pub struct StripScroll {
+    /// 哪一份歌詞、幾列（曲名、歌詞行數、顯示行數）；改變時直接跳。
+    key: Option<(String, usize, u8)>,
+    from: f64,
+    to: usize,
+    started: Option<f64>,
+}
+
+impl StripScroll {
+    /// 目前行是 `index`；回傳 `now` 時要畫的位置。
+    pub fn follow(&mut self, key: (String, usize, u8), index: usize, now: f64) -> f64 {
+        if self.key.as_ref() != Some(&key) || index.abs_diff(self.to) > STRIP_MAX_ANIMATED_STEP {
+            *self = StripScroll {
+                key: Some(key),
+                from: index as f64,
+                to: index,
+                started: None,
+            };
+        } else if index != self.to {
+            // 動畫中又換行：從目前畫到的位置接著走。
+            self.from = self.position(now);
+            self.to = index;
+            self.started = Some(now);
+        }
+        self.position(now)
+    }
+
+    /// `now` 時的位置。
+    pub fn position(&self, now: f64) -> f64 {
+        let to = self.to as f64;
+        match self.started {
+            Some(t) => animated_offset(self.from, to, now - t, LYRIC_SCROLL_SECONDS),
+            None => to,
+        }
+    }
+
+    /// 還在捲動中（畫面要繼續要求畫格）。
+    pub fn is_animating(&self, now: f64) -> bool {
+        self.started.is_some_and(|t| now - t < LYRIC_SCROLL_SECONDS)
+    }
+
+    /// 下一次 [`Self::follow`] 直接跳到位置。
+    pub fn reset(&mut self) {
+        *self = StripScroll::default();
+    }
+}
+
 /// 歌詞條重讀目前行的週期（`TimelineView(.periodic(by: 0.25))`）。
 pub const STRIP_TICK_SECONDS: f64 = 0.25;
 
@@ -139,6 +199,14 @@ pub const CONTROL_DISABLED_OPACITY: f64 = 0.3;
 /// 折疊開關的箭頭大小（`size: 10, weight: .semibold`）與不透明度（`opacity(0.6)`）。
 pub const FOLD_GLYPH_SIZE: f64 = 10.0;
 pub const FOLD_OPACITY: f64 = 0.6;
+/// 本版：歌詞來源標籤（控制列左側空位，Swift 沒有）。字級 9、行高 12（不超過控制列高 24）、白色 0.45（低對比）。
+pub const SOURCE_LABEL_FONT_SIZE: f64 = 9.0;
+pub const SOURCE_LABEL_LINE_HEIGHT: f64 = 12.0;
+pub const SOURCE_LABEL_OPACITY: f64 = 0.45;
+/// 本版：標籤裡主機名稱最多幾個字元（以字元計，超過以 `…` 截斷；畫面上仍會再依可用寬度裁切）。
+pub const SOURCE_LABEL_MAX_CHARS: usize = 24;
+/// 本版：標籤結尾的「外部連結」箭頭（含前面的空白）。
+pub const SOURCE_LABEL_SUFFIX: &str = " \u{2197}";
 /// 沒有曲目時的一行字（`Text("目前沒有播放")`，13 點、白色 0.6）。
 pub const NO_TRACK_TEXT: &str = "目前沒有播放";
 pub const NO_TRACK_FONT_SIZE: f64 = 13.0;
@@ -215,6 +283,65 @@ pub fn progress_fill_width(fraction: Option<f64>, track_width: f64) -> f64 {
         0.0
     };
     f * w
+}
+
+/// 控制按鈕群的寬：3 顆按鈕加 2 個間距（= 112）。
+pub fn control_buttons_width() -> f64 {
+    3.0 * CONTROL_BUTTON_WIDTH + 2.0 * CONTROL_BUTTON_SPACING
+}
+
+/// 控制列左右兩側區域的寬（`(資訊欄寬 − 按鈕群寬) / 2`，兩側相等所以按鈕群置中）。
+/// 左側是來源標籤的空位，右側是折疊開關所在的區域。非有限或不足時為 0。
+pub fn control_side_widths(info_width: f64) -> (f64, f64) {
+    let side = (info_width - control_buttons_width()) / 2.0;
+    if side.is_finite() && side > 0.0 {
+        (side, side)
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+/// 歌詞來源標籤的文字：網址的主機加上 ` ↗`（例如 `lrclib.net ↗`）。
+///
+/// 不用 `url` crate：取 `https://` 之後到第一個 `/`、`?`、`#` 之前的部分，去掉 `userinfo@` 與 `:埠號`
+/// （方括號的 IPv6 主機保留原樣），再去掉開頭一次的 `www.`；不改大小寫。主機超過
+/// [`SOURCE_LABEL_MAX_CHARS`] 個字元（以字元計，不以位元組）時保留前 `MAX − 1` 個字元加 `…`。
+/// 不是 `https://` 開頭、沒有主機、主機含空白／控制字元／反斜線或落單的方括號 → `None`。任何輸入都不 panic。
+pub fn source_label(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host_port = authority.rsplit('@').next().unwrap_or("");
+    let host = if host_port.starts_with('[') {
+        let end = host_port.find(']')?;
+        let (host, after) = host_port.split_at(end + 1);
+        if !(after.is_empty() || after.starts_with(':')) || host.len() <= 2 {
+            return None;
+        }
+        host
+    } else {
+        let host = host_port.split(':').next().unwrap_or("");
+        if host.contains(['[', ']']) {
+            return None;
+        }
+        host
+    };
+    let host = host.strip_prefix("www.").unwrap_or(host);
+    if host.is_empty()
+        || host
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    {
+        return None;
+    }
+    let mut label: String = if host.chars().count() > SOURCE_LABEL_MAX_CHARS {
+        let mut cut: String = host.chars().take(SOURCE_LABEL_MAX_CHARS - 1).collect();
+        cut.push('\u{2026}');
+        cut
+    } else {
+        host.to_string()
+    };
+    label.push_str(SOURCE_LABEL_SUFFIX);
+    Some(label)
 }
 
 /// Expanded 的歌詞區要怎麼畫（`ExpandedLyricsView`）。
@@ -689,5 +816,283 @@ mod tests {
         assert!(glyph_shapes(Glyph::Play, f64::NAN)
             .iter()
             .all(|s| s.points.iter().all(|p| p.0 == 0.0 && p.1 == 0.0)));
+    }
+
+    #[test]
+    fn source_label_uses_the_host_and_an_arrow() {
+        assert_eq!(
+            source_label("https://lrclib.net/api/get/1").as_deref(),
+            Some("lrclib.net ↗")
+        );
+        assert_eq!(
+            source_label("https://music.163.com/song?id=7").as_deref(),
+            Some("music.163.com ↗")
+        );
+        assert_eq!(
+            source_label("https://lrclib.net").as_deref(),
+            Some("lrclib.net ↗")
+        );
+        assert!(SOURCE_LABEL_SUFFIX.starts_with(' '));
+        assert!(source_label("https://lrclib.net/x")
+            .unwrap()
+            .ends_with(SOURCE_LABEL_SUFFIX));
+    }
+
+    #[test]
+    fn www_prefix_is_dropped() {
+        assert_eq!(
+            source_label("https://www.example.com/a").as_deref(),
+            Some("example.com ↗")
+        );
+        // 只去掉開頭的一次；主機只剩 "www." 時沒有東西可顯示。
+        assert_eq!(
+            source_label("https://www.www.example.com").as_deref(),
+            Some("www.example.com ↗")
+        );
+        assert_eq!(source_label("https://www."), None);
+        // 不改大小寫，也不把 "wwwx." 當成前綴。
+        assert_eq!(
+            source_label("https://wwwx.Example.com").as_deref(),
+            Some("wwwx.Example.com ↗")
+        );
+    }
+
+    #[test]
+    fn port_userinfo_query_and_fragment_are_ignored() {
+        for url in [
+            "https://lrclib.net:443/api/get/1",
+            "https://user:pw@lrclib.net/api",
+            "https://lrclib.net?q=1",
+            "https://lrclib.net#frag",
+            "https://a@b@lrclib.net:8443?x#y",
+            "https://lrclib.net:",
+        ] {
+            assert_eq!(source_label(url).as_deref(), Some("lrclib.net ↗"), "{url}");
+        }
+        // 方括號的 IPv6 主機保留原樣（裡面的冒號不是埠號）。
+        assert_eq!(
+            source_label("https://[::1]:8443/x").as_deref(),
+            Some("[::1] ↗")
+        );
+        assert_eq!(
+            source_label("https://[2001:db8::1]/x").as_deref(),
+            Some("[2001:db8::1] ↗")
+        );
+        // 只有 userinfo 或只有埠號：沒有主機。
+        assert_eq!(source_label("https://user@/x"), None);
+        assert_eq!(source_label("https://:443/x"), None);
+        // `@` 出現在路徑裡不算 userinfo。
+        assert_eq!(
+            source_label("https://lrclib.net/a@b").as_deref(),
+            Some("lrclib.net ↗")
+        );
+    }
+
+    #[test]
+    fn very_long_host_is_truncated_with_an_ellipsis() {
+        let host = format!("{}.example.com", "a".repeat(200));
+        let label = source_label(&format!("https://{host}/x")).unwrap();
+        assert!(
+            label.chars().count() <= SOURCE_LABEL_MAX_CHARS + 2,
+            "{label}"
+        );
+        assert!(
+            label.ends_with(&format!("…{SOURCE_LABEL_SUFFIX}")),
+            "{label}"
+        );
+        assert!(label.starts_with("aaaa"));
+        // 剛好 MAX 個字元不截斷；多一個才截斷。
+        let exact = "b".repeat(SOURCE_LABEL_MAX_CHARS);
+        assert_eq!(
+            source_label(&format!("https://{exact}")).unwrap(),
+            format!("{exact}{SOURCE_LABEL_SUFFIX}")
+        );
+        let over = "b".repeat(SOURCE_LABEL_MAX_CHARS + 1);
+        let label = source_label(&format!("https://{over}")).unwrap();
+        assert_eq!(label.chars().count(), SOURCE_LABEL_MAX_CHARS + 2);
+        assert!(label.contains('…'));
+    }
+
+    #[test]
+    fn non_ascii_host_does_not_panic_or_split_a_char() {
+        assert_eq!(
+            source_label("https://歌詞.例子.台灣/x").as_deref(),
+            Some("歌詞.例子.台灣 ↗")
+        );
+        // 多位元組字元剛好落在截斷邊界上（以字元截斷，不以位元組）。
+        for prefix in ["", "a", "ab", "abc"] {
+            for ch in ["é", "歌", "😀", "a\u{301}"] {
+                let host = format!("{prefix}{}", ch.repeat(40));
+                let label = source_label(&format!("https://{host}/p")).unwrap();
+                assert!(
+                    label.chars().count() <= SOURCE_LABEL_MAX_CHARS + 2,
+                    "{label}"
+                );
+                assert!(label.ends_with(SOURCE_LABEL_SUFFIX));
+            }
+        }
+        // 各種奇怪字串都不 panic。
+        let weird = [
+            "https://\u{0}",
+            "https://\u{feff}/",
+            "https://[",
+            "https://]",
+            "https://[::1",
+            "https://[]:1",
+            "https://@",
+            "https://@@@",
+            "https://::::",
+            "https://?",
+            "https://#",
+            "https://\\x",
+            "https:// /",
+            "https://é:é@é:é/é",
+            "HTTPS://lrclib.net",
+            "https:https://",
+            "\u{10ffff}https://x",
+        ];
+        for url in weird {
+            let _ = source_label(url);
+        }
+        // 所有長度的前綴都不 panic（切在多位元組字元中間的位元組位置之前就以字元處理）。
+        let long = "https://ä.歌😀.www.example.com:44/路?q#f";
+        for (i, _) in long.char_indices() {
+            let _ = source_label(&long[..i]);
+        }
+    }
+
+    #[test]
+    fn garbage_returns_none() {
+        for url in [
+            "",
+            "https://",
+            "not a url",
+            "https:///x",
+            "http://lrclib.net",
+            "javascript:alert(1)",
+            "https://?q",
+            "https://#f",
+            "https://www./x",
+            "https:// /x",
+            "https://\t/x",
+        ] {
+            assert_eq!(source_label(url), None, "{url:?}");
+        }
+    }
+
+    #[test]
+    fn strip_rows_fit_inside_the_strip_for_every_line_count() {
+        use musicat_core::music::module::{lyric_strip_height, LYRIC_STRIP_ROW_HEIGHT};
+        // 列高就是 12 pt 字加 4 的行高（跑馬燈用同一個值）。
+        assert_eq!(LYRIC_STRIP_ROW_HEIGHT, STRIP_FONT_SIZE + 4.0);
+        for lines in 1u8..=3 {
+            let rows = f64::from(lines) * LYRIC_STRIP_ROW_HEIGHT;
+            let height = lyric_strip_height(lines);
+            // 上下各至少留 4 pt，字不會貼到下方圓角。
+            assert!(height - rows >= 8.0, "lines = {lines}");
+            assert!(STRIP_CORNER_RADIUS <= height);
+        }
+        const { assert!(STRIP_CONTEXT_OPACITY < STRIP_TITLE_OPACITY) };
+    }
+
+    fn strip_key(lines: u8) -> (String, usize, u8) {
+        ("Song".into(), 40, lines)
+    }
+
+    #[test]
+    fn strip_scroll_starts_at_the_first_line_without_animating() {
+        let mut sc = StripScroll::default();
+        close(sc.follow(strip_key(1), 7, 100.0), 7.0);
+        assert!(!sc.is_animating(100.0));
+    }
+
+    #[test]
+    fn strip_scroll_glides_to_the_next_line() {
+        let mut sc = StripScroll::default();
+        sc.follow(strip_key(1), 7, 100.0);
+        // 換行那一刻還在舊位置，之後往新行走。
+        close(sc.follow(strip_key(1), 8, 101.0), 7.0);
+        assert!(sc.is_animating(101.0));
+        let mid = sc.follow(strip_key(1), 8, 101.0 + LYRIC_SCROLL_SECONDS / 2.0);
+        close(mid, 7.5);
+        close(
+            sc.follow(strip_key(1), 8, 101.0 + LYRIC_SCROLL_SECONDS),
+            8.0,
+        );
+        // 時間差有浮點誤差，取剛過終點的時刻。
+        assert!(!sc.is_animating(101.001 + LYRIC_SCROLL_SECONDS));
+    }
+
+    #[test]
+    fn strip_scroll_retargets_from_where_it_is() {
+        let mut sc = StripScroll::default();
+        sc.follow(strip_key(1), 0, 0.0);
+        sc.follow(strip_key(1), 1, 1.0);
+        let half = 1.0 + LYRIC_SCROLL_SECONDS / 2.0;
+        close(sc.follow(strip_key(1), 2, half), 0.5);
+        close(sc.position(half + LYRIC_SCROLL_SECONDS), 2.0);
+    }
+
+    #[test]
+    fn strip_scroll_jumps_on_seeks_new_lyrics_new_line_count_and_reset() {
+        let mut sc = StripScroll::default();
+        sc.follow(strip_key(1), 10, 0.0);
+        // 往前、往後的大跳（拖動進度）都直接換。
+        close(sc.follow(strip_key(1), 13, 1.0), 13.0);
+        close(sc.follow(strip_key(1), 4, 2.0), 4.0);
+        assert!(!sc.is_animating(2.0));
+        // 剛好兩行仍做動畫。
+        close(sc.follow(strip_key(1), 6, 3.0), 4.0);
+        // 行數設定改了、換歌了：直接跳。
+        close(sc.follow(strip_key(3), 7, 4.0), 7.0);
+        close(sc.follow(("Other".into(), 40, 3), 8, 5.0), 8.0);
+        sc.reset();
+        close(sc.follow(("Other".into(), 40, 3), 9, 6.0), 9.0);
+        assert!(!sc.is_animating(6.0));
+    }
+
+    #[test]
+    fn strip_row_opacity_interpolates_between_context_and_current() {
+        close(strip_row_opacity(0.0), STRIP_CONTEXT_OPACITY);
+        close(strip_row_opacity(1.0), STRIP_LINE_OPACITY);
+        close(
+            strip_row_opacity(0.5),
+            (STRIP_CONTEXT_OPACITY + STRIP_LINE_OPACITY) / 2.0,
+        );
+        close(strip_row_opacity(7.0), STRIP_LINE_OPACITY);
+    }
+
+    #[test]
+    fn source_label_fits_the_control_row_without_moving_the_buttons() {
+        // 標籤一行，行高不超過控制列（不會撐高列）。
+        const { assert!(SOURCE_LABEL_LINE_HEIGHT <= CONTROL_ROW_HEIGHT) };
+        const { assert!(SOURCE_LABEL_FONT_SIZE <= SOURCE_LABEL_LINE_HEIGHT) };
+        const { assert!(SOURCE_LABEL_OPACITY > 0.0 && SOURCE_LABEL_OPACITY < CONTROL_ENABLED_OPACITY) };
+        // 按鈕群：3 顆 28 寬加 2 個 14 間距。
+        close(control_buttons_width(), 112.0);
+        for notch in [185.0, 200.0, 150.0] {
+            // 資訊欄寬 = 外形寬（瀏海 + 160）− 左右內距 − 封面 − 間距。
+            let info = notch + 160.0
+                - 2.0 * PAGE_HORIZONTAL_PADDING
+                - EXPANDED_COVER_SIDE
+                - HEADER_SPACING;
+            let (left, right) = control_side_widths(info);
+            // 左右兩側等寬 → 按鈕群置中，與加標籤前（左 24 方塊 + flex_1、右 flex_1 + 24 折疊開關）相同。
+            close(left, right);
+            close(left + control_buttons_width() + right, info);
+            close(
+                left,
+                CONTROL_ROW_HEIGHT
+                    + (info - control_buttons_width() - 2.0 * CONTROL_ROW_HEIGHT) / 2.0,
+            );
+            // 右側仍放得下折疊開關；左側的標籤空位就是 `left`（標籤以 overflow hidden + 省略號截斷，不會推擠按鈕）。
+            assert!(right >= CONTROL_ROW_HEIGHT, "{notch}");
+            assert!(left > 0.0);
+        }
+        // 退化寬度不 panic、不為負。
+        let (l, r) = control_side_widths(f64::NAN);
+        assert!(l == 0.0 && r == 0.0);
+        let (l, r) = control_side_widths(10.0);
+        assert!(l == 0.0 && r == 0.0);
     }
 }

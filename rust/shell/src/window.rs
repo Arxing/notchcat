@@ -16,6 +16,14 @@
 //! `render` 不再執行（螢幕睡眠或鎖定時也一樣）。所以 (1) 輪詢每拍也依時間推進動畫器，0.28 秒後一定算「靜止」、
 //! 回到閒置節拍；(2) 隱藏時動畫器直接停在目標（`snap_to`），隱藏狀態算閒置，再顯示時不會播放殘留的動畫。
 //!
+//! # 原生視窗操作：只能在 `update` 之外
+//!
+//! `setFrame:`、`orderFront` 會**同步**回呼進 GPUI（`setFrameSize:`、`viewDidChangeBackingProperties`），
+//! GPUI 0.2.2 在回呼裡以 `try_borrow_mut` 借用 `App` 來更新視窗大小與縮放比例，借不到就靜默丟掉。
+//! 若在 `cx.update` 之中改外框，GPUI 會一直用舊的大小與縮放比例排版（接投影機、換到非 Retina 螢幕時整個跑版）。
+//! 所以 `open`、`reposition` 與顯示／隱藏都只在 [`Shared`] 裡登記，由輪詢工作在 `update` 之外套用
+//! （[`apply_native_ops`]），最多晚一拍（≤ 40 ms）。回歸檢查：`cargo run -p musicat-shell --example move_check`。
+//!
 //! # 外形：外框與黑底分開
 //!
 //! 外框（不塗色、`overflow_hidden`）是內容的裁切範圍；黑底是外框裡、從左上角開始的另一個 div。
@@ -67,6 +75,10 @@ struct Shared {
     geometry: NotchGeometry,
     /// 面板的原生把手；視窗消失（根 view 釋放）後為 `None`。
     native: Option<NativeWindow>,
+    /// 還沒套用的原生操作（見模組文件「原生視窗操作」）：改成面板、移動外框、顯示或隱藏。
+    configure_pending: bool,
+    frame_pending: bool,
+    visibility_pending: Option<bool>,
     /// `set_visible` 設定的值。
     user_visible: bool,
     /// `reposition` 之後設為 true，下一拍由 view 套用（形狀直接跳到新大小、重新判 hover）。
@@ -75,6 +87,34 @@ struct Shared {
     refresh_requested: bool,
     /// `ShellWindow` 已被 drop：下一拍移除視窗、結束輪詢。
     close_requested: bool,
+}
+
+/// 套用登記中的原生操作。**只能在沒有借用 GPUI `App` 時呼叫**（輪詢工作的 `update` 之外），
+/// 否則同步發生的視窗回呼會被 GPUI 丟掉（見模組文件「原生視窗操作」）。
+fn apply_native_ops(shared: &Rc<RefCell<Shared>>) {
+    let (native, frame, configure, move_frame, visibility) = {
+        let mut s = shared.borrow_mut();
+        (
+            s.native,
+            container_frame(&s.geometry),
+            std::mem::take(&mut s.configure_pending),
+            std::mem::take(&mut s.frame_pending),
+            s.visibility_pending.take(),
+        )
+    };
+    // 借用到此結束：下面的呼叫會回到 GPUI。
+    let Some(native) = native else {
+        return;
+    };
+    if configure {
+        // 也設定外框，所以同一拍的移動不必再做。
+        panel::configure_panel(native, frame);
+    } else if move_frame {
+        panel::set_panel_frame(native, frame);
+    }
+    if let Some(visible) = visibility {
+        panel::set_panel_visible(native, visible);
+    }
 }
 
 /// 開啟中的瀏海面板。只能在主執行緒使用（GPUI 的 `App` 回呼裡）。
@@ -101,6 +141,9 @@ impl ShellWindow {
         let shared = Rc::new(RefCell::new(Shared {
             geometry,
             native: None,
+            configure_pending: true,
+            frame_pending: false,
+            visibility_pending: None,
             user_visible: true,
             geometry_changed: false,
             refresh_requested: false,
@@ -108,6 +151,7 @@ impl ShellWindow {
         }));
 
         // GPUI 的初始位置只是大概（以顯示器為準的座標）；真正的外框由 configure_panel 設定。
+        // 先不顯示：configure_panel 稍後由輪詢工作套用（見模組文件），它會把面板排到最前面。
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: gpui::point(px(0.), px(0.)),
@@ -115,7 +159,7 @@ impl ShellWindow {
             })),
             titlebar: None,
             focus: false,
-            show: true,
+            show: false,
             kind: WindowKind::PopUp,
             is_movable: false,
             is_resizable: false,
@@ -142,9 +186,6 @@ impl ShellWindow {
                     None
                 }
             };
-            if let Some(native) = native {
-                panel::configure_panel(native, frame);
-            }
             view_shared.borrow_mut().native = native;
             cx.new(|cx| ShellView::new(view_shared, content, window, cx))
         })?;
@@ -155,17 +196,12 @@ impl ShellWindow {
     ///
     /// **注意：這不一定只是移動。** 新舊螢幕的瀏海一樣大時只移動；不一樣大時（例如 185 × 32 的實體瀏海與
     /// 200 × 32 的虛擬瀏海）容器的**大小**也跟著新瀏海改變，也就是視窗會被 resize。
-    /// 形狀直接跳到新幾何的樣子（不做動畫），下一拍起以新幾何判 hover。
+    /// 形狀直接跳到新幾何的樣子（不做動畫），下一拍（≤ 40 ms）起移動視窗並以新幾何判 hover。
     pub fn reposition(&self, geometry: NotchGeometry) {
-        let native = {
-            let mut s = self.shared.borrow_mut();
-            s.geometry = geometry;
-            s.geometry_changed = true;
-            s.native
-        };
-        if let Some(native) = native {
-            panel::set_panel_frame(native, container_frame(&geometry));
-        }
+        let mut s = self.shared.borrow_mut();
+        s.geometry = geometry;
+        s.geometry_changed = true;
+        s.frame_pending = true;
     }
 
     /// 顯示或隱藏面板（例如使用者在選單關掉瀏海式外殼）。隱藏時強制收合、不展開、點擊穿透；
@@ -249,10 +285,13 @@ impl ShellView {
         let initial = shape_layout(ShellMode::Preview, &geometry, extra);
 
         // 輪詢工作：每拍之後回傳下一拍的等待時間；`None`（已關閉）或 view 消失時結束。
+        let ops = shared.clone();
         cx.spawn_in(window, async move |this, cx| loop {
             let Ok(Some(wait)) = this.update_in(cx, |v, window, cx| v.tick(window, cx)) else {
                 break;
             };
+            // 在 `update` 之外：見模組文件「原生視窗操作」。
+            apply_native_ops(&ops);
             cx.background_executor()
                 .timer(Duration::from_secs_f64(wait))
                 .await;
@@ -375,9 +414,7 @@ impl ShellView {
             self.animator.snap_to(self.target_layout());
         }
         if self.applied_visible != Some(out.visible) {
-            if let Some(native) = native {
-                panel::set_panel_visible(native, out.visible);
-            }
+            self.shared.borrow_mut().visibility_pending = Some(out.visible);
             self.applied_visible = Some(out.visible);
             self.content
                 .on_shell_event(ShellEvent::Visible(out.visible));

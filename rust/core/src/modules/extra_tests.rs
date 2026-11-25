@@ -30,9 +30,9 @@ fn highest_priority_active_module_wins_and_ties_go_to_the_first_registered() {
 #[test]
 fn clamped_preview_extra_handles_non_finite_and_boundary_values() {
     assert_eq!(clamped_preview_extra(f64::NAN), 0.0);
-    assert_eq!(clamped_preview_extra(f64::INFINITY), 28.0);
+    assert_eq!(clamped_preview_extra(f64::INFINITY), 56.0);
     assert_eq!(clamped_preview_extra(f64::NEG_INFINITY), 0.0);
-    assert_eq!(clamped_preview_extra(99.0), 28.0);
+    assert_eq!(clamped_preview_extra(99.0), 56.0);
     assert_eq!(clamped_preview_extra(10.0), 10.0);
 }
 
@@ -84,9 +84,9 @@ fn subscribers_are_notified_only_when_active_or_height_changes() {
     assert_eq!(n.load(Ordering::SeqCst), 1);
     module.set_extra_height(10.0);
     assert_eq!(n.load(Ordering::SeqCst), 2);
-    module.set_extra_height(99.0); // 夾到 28
+    module.set_extra_height(99.0); // 夾到 56
     assert_eq!(n.load(Ordering::SeqCst), 3);
-    module.set_extra_height(500.0); // 仍是 28：沒有變化
+    module.set_extra_height(500.0); // 仍是 56：沒有變化
     assert_eq!(n.load(Ordering::SeqCst), 3);
 }
 

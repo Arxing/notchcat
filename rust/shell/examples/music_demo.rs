@@ -24,6 +24,7 @@
 //! - `MUSICAT_DEMO_NO_CONTROL=1`：沒有播放控制（按鈕顯示停用樣式）。
 //! - `MUSICAT_DEMO_STRIP=0`：歌詞條一開始是收起的。
 //!
+//! Expanded 控制列左側的歌詞來源標籤（有歌詞時顯示 `lrclib.net ↗`）點擊後只印出 `open <網址>`，不會開瀏覽器。
 //! Expanded 的按鈕會作用在腳本來源上：播放／暫停會凍結或恢復位置，上一首／下一首在兩首曲目間切換。
 //! 只在 macOS 有效；其他平台印一行訊息就結束。
 
@@ -47,7 +48,7 @@ mod demo {
     use image::{ImageEncoder, Rgba, RgbaImage};
     use musicat_core::artwork_cache::ArtworkCache;
     use musicat_core::lyrics::repository::LyricsResolving;
-    use musicat_core::lyrics::{LyricLine, Lyrics, TrackIdentity};
+    use musicat_core::lyrics::{LyricLine, Lyrics, LyricsHit, TrackIdentity};
     use musicat_core::modules::{ModuleManager, ModuleState};
     use musicat_core::music::controller::MusicController;
     use musicat_core::music::module::MusicModuleState;
@@ -349,7 +350,7 @@ mod demo {
     }
 
     impl LyricsResolving for DemoLyrics {
-        fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<Lyrics>> {
+        fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
             let lyrics = match self.scene {
                 Scene::Plain => Some(plain_lyrics()),
                 Scene::NoLyrics => None,
@@ -357,7 +358,8 @@ mod demo {
                 _ if track.title.contains("Morning") || track.title.contains("晨光") => None,
                 scene => Some(synced_lyrics(scene == Scene::LongTitle)),
             };
-            Box::pin(std::future::ready(lyrics))
+            let hit = lyrics.map(|l| LyricsHit::new(l, "https://lrclib.net/api/get/1"));
+            Box::pin(std::future::ready(hit))
         }
     }
 
@@ -455,6 +457,8 @@ mod demo {
                 module_state.clone(),
                 modules.clone(),
                 Arc::new(SystemClock),
+                // 示範不開瀏覽器：只印出要開的網址，用來確認點擊來源標籤。
+                Arc::new(move |url: &str| println!("{} open {url}", stamp(t0))),
             )
             .with_event_hook(move |event| match event {
                 ShellEvent::Expanded => println!("{} expand", stamp(t0)),

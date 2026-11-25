@@ -85,9 +85,13 @@ fn run_song(
     );
 
     let start = Instant::now();
-    let lyrics = block_on(repo.lyrics(identity.clone()));
+    let hit = block_on(repo.lyrics(identity.clone()));
     println!("  1st lookup: {}", ms(start.elapsed()));
+    let lyrics = hit.as_ref().map(|h| h.lyrics.clone());
     println!("  result: {}", describe(&lyrics));
+    if let Some(h) = &hit {
+        println!("  url: {}", h.url);
+    }
     if let Some(l) = &lyrics {
         println!("  is_plausible({duration:?}): {}", l.is_plausible(duration));
     }
@@ -97,7 +101,7 @@ fn run_song(
     println!(
         "  2nd lookup (cache): {}  same result: {}",
         ms(start.elapsed()),
-        again == lyrics
+        again == hit
     );
 
     // 與控制器一致：不可信的歌詞不進歌詞條。

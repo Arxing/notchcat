@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::Lyrics;
+use super::LyricsHit;
 use crate::http::{HttpClient, HttpError, HttpRequest};
 use crate::lyrics::identity::TrackIdentity;
 use crate::runtime::BoxFuture;
@@ -35,12 +35,13 @@ impl std::error::Error for ProviderError {}
 ///
 /// 回傳 `Err` 表示請求失敗（傳輸錯誤、非 2xx、2xx 但看不懂的本體）；
 /// `Ok(None)` 只用於服務乾淨地回答「沒有」。兩者的快取策略不同，不可混用。
+/// 命中的 `LyricsHit` 帶著這筆歌詞在來源服務上的 `https://` 網址。
 pub trait LyricsProvider: Send + Sync {
     fn id(&self) -> &str;
     fn fetch<'a>(
         &'a self,
         track: &'a TrackIdentity,
-    ) -> BoxFuture<'a, Result<Option<Lyrics>, ProviderError>>;
+    ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>>;
 }
 
 /// 固定、不帶任何使用者資料。

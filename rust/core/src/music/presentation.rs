@@ -2,7 +2,7 @@
 //!
 //! 時間一律是 Unix 秒（`f64`）。
 
-use crate::lyrics::Lyrics;
+use crate::lyrics::{LyricLine, Lyrics};
 use crate::types::TrackSnapshot;
 
 /// 歌詞條要顯示什麼。
@@ -28,11 +28,68 @@ pub fn strip_content(s: Option<&TrackSnapshot>, lyrics: Option<&Lyrics>, now: f6
         return StripContent::None;
     };
     if let Some(Lyrics::Synced(lines)) = lyrics {
-        if let Some(index) = playback_position(s, now).and_then(|p| lyrics?.line_index(p)) {
+        if let Some(index) = strip_line_index(Some(s), lyrics, now) {
             return StripContent::Line(lines[index].text.clone());
         }
     }
     StripContent::Title(s.title.clone())
+}
+
+/// 歌詞條最多一次顯示的行數。
+pub const STRIP_MAX_LINES: u8 = 3;
+
+/// 歌詞條目前行的索引；只有 [`strip_content`] 會回 [`StripContent::Line`] 時才是 `Some`。
+pub fn strip_line_index(
+    s: Option<&TrackSnapshot>,
+    lyrics: Option<&Lyrics>,
+    now: f64,
+) -> Option<usize> {
+    let lyrics = lyrics?;
+    lyrics.line_index(playback_position(s?, now)?)
+}
+
+/// 歌詞條上（至少部分）看得到的一列。
+#[derive(Clone, PartialEq, Debug)]
+pub struct StripRow {
+    /// 這一列是第幾行歌詞。
+    pub index: usize,
+    pub text: String,
+    /// 列的頂端位置，以「列高」為單位、從歌詞條的第一列算起；捲動中是小數，
+    /// 範圍是 `-1.0 < slot < 行數`（超出的部分由畫面裁掉）。
+    pub slot: f64,
+    /// 強調程度 `0..=1`：目前行是 1，離目前位置一行以上是 0，捲動中在兩者之間。
+    pub emphasis: f64,
+}
+
+/// 歌詞條在 `position` 時看得到的列。`position` 是目前行的索引，捲動動畫中可以是小數。
+///
+/// `lines` 夾在 `1..=`[`STRIP_MAX_LINES`]：1 列 = 目前行；2 列 = 目前行＋下一行；
+/// 3 列 = 前一行＋目前行＋下一行（目前行在中間）。沒有對應歌詞行的位置（第一行之前、最後一行之後）
+/// 不回傳列，位置照樣空著，目前行不會跳動。`position` 非有限值時回空。
+pub fn strip_rows(all: &[LyricLine], position: f64, lines: u8) -> Vec<StripRow> {
+    let lines = lines.clamp(1, STRIP_MAX_LINES);
+    if !position.is_finite() {
+        return Vec::new();
+    }
+    // 目前行所在的列：3 列時在中間，其餘在最上面。
+    let current_slot = if lines == 3 { 1.0 } else { 0.0 };
+    let first = (position - current_slot - 1.0).floor().max(0.0) as usize;
+    all.iter()
+        .enumerate()
+        .skip(first)
+        .map(|(index, line)| {
+            let distance = index as f64 - position;
+            (index, line, distance + current_slot, distance.abs())
+        })
+        .take_while(|&(_, _, slot, _)| slot < f64::from(lines))
+        .filter(|&(_, _, slot, _)| slot > -1.0)
+        .map(|(index, line, slot, distance)| StripRow {
+            index,
+            text: line.text.clone(),
+            slot,
+            emphasis: (1.0 - distance).max(0.0),
+        })
+        .collect()
 }
 
 /// 進度條能不能畫：需要「有限且大於 0 的曲長」加上位置 anchor，否則比例只是猜的。
@@ -295,5 +352,101 @@ mod tests {
                 }
             }
         }
+    }
+    fn all() -> Vec<LyricLine> {
+        let Lyrics::Synced(lines) = synced() else {
+            unreachable!()
+        };
+        lines
+    }
+
+    /// `(文字, 列位置, 強調)`。
+    fn shown(position: f64, lines: u8) -> Vec<(String, f64, f64)> {
+        strip_rows(&all(), position, lines)
+            .into_iter()
+            .map(|r| (r.text, r.slot, r.emphasis))
+            .collect()
+    }
+
+    fn at(text: &str, slot: f64, emphasis: f64) -> (String, f64, f64) {
+        (text.into(), slot, emphasis)
+    }
+
+    #[test]
+    fn strip_rows_at_rest_one_line_is_the_current_line() {
+        assert_eq!(shown(1.0, 1), [at("second", 0.0, 1.0)]);
+    }
+
+    #[test]
+    fn strip_rows_at_rest_two_lines_is_current_then_next() {
+        assert_eq!(
+            shown(1.0, 2),
+            [at("second", 0.0, 1.0), at("third", 1.0, 0.0)]
+        );
+        // 最後一行：下一列空著。
+        assert_eq!(shown(2.0, 2), [at("third", 0.0, 1.0)]);
+    }
+
+    #[test]
+    fn strip_rows_at_rest_three_lines_keeps_current_in_the_middle() {
+        assert_eq!(
+            shown(1.0, 3),
+            [
+                at("first", 0.0, 0.0),
+                at("second", 1.0, 1.0),
+                at("third", 2.0, 0.0)
+            ]
+        );
+        // 第一行：最上面那列空著；最後一行：最下面那列空著。目前行都在中間。
+        assert_eq!(
+            shown(0.0, 3),
+            [at("first", 1.0, 1.0), at("second", 2.0, 0.0)]
+        );
+        assert_eq!(
+            shown(2.0, 3),
+            [at("second", 0.0, 0.0), at("third", 1.0, 1.0)]
+        );
+    }
+
+    #[test]
+    fn strip_rows_halfway_between_lines_scrolls_and_cross_fades() {
+        // 1 列：舊行往上滑出一半、新行從下面進來一半，亮度各半。
+        assert_eq!(
+            shown(0.5, 1),
+            [at("first", -0.5, 0.5), at("second", 0.5, 0.5)]
+        );
+        // 3 列：原本在上方外面的、下方外面的各露出一半。
+        assert_eq!(
+            shown(1.5, 3),
+            [
+                at("first", -0.5, 0.0),
+                at("second", 0.5, 0.5),
+                at("third", 1.5, 0.5)
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_rows_clamps_the_line_count_and_rejects_non_finite_positions() {
+        assert_eq!(shown(1.0, 0), shown(1.0, 1));
+        assert_eq!(shown(1.0, 200), shown(1.0, 3));
+        assert!(shown(f64::NAN, 3).is_empty());
+        assert!(shown(f64::INFINITY, 3).is_empty());
+        assert!(strip_rows(&[], 0.0, 3).is_empty());
+    }
+
+    #[test]
+    fn strip_line_index_matches_when_strip_content_shows_a_line() {
+        let s = snapshot(Some(anchor(22.0, 1.0)));
+        assert_eq!(strip_line_index(Some(&s), Some(&synced()), T0), Some(1));
+        // 尚未到第一行、位置未知、純文字、沒有歌詞、沒有曲目：沒有目前行。
+        let early = snapshot(Some(anchor(3.0, 1.0)));
+        assert_eq!(strip_line_index(Some(&early), Some(&synced()), T0), None);
+        let unknown = snapshot(None);
+        assert_eq!(strip_line_index(Some(&unknown), Some(&synced()), T0), None);
+        let plain = Lyrics::Plain("x".into());
+        assert_eq!(strip_line_index(Some(&s), Some(&plain), T0), None);
+        assert_eq!(strip_line_index(Some(&s), None, T0), None);
+        assert_eq!(strip_line_index(None, Some(&synced()), T0), None);
     }
 }

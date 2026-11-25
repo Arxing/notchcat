@@ -6,13 +6,13 @@
 
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 use super::provider::{
     build_url, candidate_title, decode_array, decode_object, is_success, request, send,
     success_body, LyricsProvider, ProviderError,
 };
-use super::{parse_lrc, Lyrics, TrackIdentity};
+use super::{parse_lrc, Lyrics, LyricsHit, TrackIdentity};
 use crate::http::HttpClient;
 use crate::runtime::BoxFuture;
 
@@ -24,10 +24,29 @@ pub struct LrclibProvider {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Payload {
+    /// 紀錄編號，只用來組來源網址；怪異的型別或值一律視為沒有，絕不讓整筆回應變成壞回應。
+    #[serde(default, deserialize_with = "lenient_positive_id")]
+    id: Option<i64>,
     track_name: Option<String>,
     duration: Option<f64>,
     plain_lyrics: Option<String>,
     synced_lyrics: Option<String>,
+}
+
+/// 正整數才是 `Some`（也接受小數部分為零的浮點，如 `12.0`）；缺漏、`null`、0、負數、字串、
+/// `7.5`、超出 `i64` 的值、布林、陣列、物件一律是 `None`，而且不是錯誤。
+fn lenient_positive_id<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    let serde_json::Value::Number(n) = value else {
+        return Ok(None);
+    };
+    let id = n.as_i64().or_else(|| {
+        n.as_f64()
+            // `i64::MAX as f64` 是 2^63：嚴格小於它的整數值浮點才轉得進 `i64`。
+            .filter(|f| f.fract() == 0.0 && *f >= 1.0 && *f < i64::MAX as f64)
+            .map(|f| f as i64)
+    });
+    Ok(id.filter(|id| *id > 0))
 }
 
 impl LrclibProvider {
@@ -56,6 +75,14 @@ impl LrclibProvider {
         build_url("https://lrclib.net/api/search", &[("q", &q)])
     }
 
+    /// 有紀錄編號時指向該紀錄；否則退回產生這筆命中的請求位址。
+    fn record_url(id: Option<i64>, request_url: &str) -> String {
+        match id {
+            Some(id) => format!("https://lrclib.net/api/get/{id}"),
+            None => request_url.to_string(),
+        }
+    }
+
     /// 單筆紀錄的歌詞；沒有歌詞或長度不符時為 `None`（壞掉的本體也是 `None`）。
     #[cfg(test)]
     fn decode(data: &[u8], track: &TrackIdentity) -> Option<Lyrics> {
@@ -67,16 +94,21 @@ impl LrclibProvider {
     #[cfg(test)]
     fn decode_search(data: &[u8], track: &TrackIdentity) -> Option<Lyrics> {
         let payloads = decode_array::<Payload>(data).ok()?;
-        Self::select_candidate(&payloads, track)
+        Self::select_candidate(&payloads, track).map(|hit| hit.lyrics)
     }
 
-    async fn fetch_lyrics(&self, track: &TrackIdentity) -> Result<Option<Lyrics>, ProviderError> {
-        let exact = request(Self::exact_url(track), &[]);
+    async fn fetch_lyrics(
+        &self,
+        track: &TrackIdentity,
+    ) -> Result<Option<LyricsHit>, ProviderError> {
+        let exact_url = Self::exact_url(track);
+        let exact = request(exact_url.clone(), &[]);
         let (status, body) = send(&self.http, exact).await?;
         if is_success(status) {
             let payload = decode_object::<Payload>(&body)?;
             if let Some(lyrics) = Self::payload_lyrics(&payload, track) {
-                return Ok(Some(lyrics));
+                let url = Self::record_url(payload.id, &exact_url);
+                return Ok(Some(LyricsHit::new(lyrics, url)));
             }
         } else if status != 404 {
             return Err(ProviderError::BadStatus(status));
@@ -90,14 +122,18 @@ impl LrclibProvider {
 
     /// 搜尋是模糊的，可能回來另一首歌、混音或翻唱；不像精確查詢（伺服器自己比對名稱），
     /// 每個候選都必須帶有與查詢寬鬆相符的歌名。寧可沒有歌詞，也不要錯的歌詞。
-    fn select_candidate(payloads: &[Payload], track: &TrackIdentity) -> Option<Lyrics> {
+    ///
+    /// 命中的網址是候選自己的紀錄頁；候選沒有可用編號時退回搜尋請求的位址。
+    fn select_candidate(payloads: &[Payload], track: &TrackIdentity) -> Option<LyricsHit> {
         let wanted = track.normalized().title;
         payloads.iter().find_map(|payload| {
             let name = payload.track_name.as_deref().filter(|n| !n.is_empty())?;
             if !TrackIdentity::loosely_matches(&candidate_title(name), &wanted) {
                 return None;
             }
-            Self::payload_lyrics(payload, track)
+            let lyrics = Self::payload_lyrics(payload, track)?;
+            let url = Self::record_url(payload.id, &Self::search_url(track));
+            Some(LyricsHit::new(lyrics, url))
         })
     }
 
@@ -128,7 +164,7 @@ impl LyricsProvider for LrclibProvider {
     fn fetch<'a>(
         &'a self,
         track: &'a TrackIdentity,
-    ) -> BoxFuture<'a, Result<Option<Lyrics>, ProviderError>> {
+    ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>> {
         Box::pin(self.fetch_lyrics(track))
     }
 }
@@ -305,7 +341,7 @@ mod tests {
 
         let result = block_on(provider.fetch(&query)).unwrap();
 
-        assert_eq!(result, Some(synced(1.0, "hit")));
+        assert_eq!(result.map(|h| h.lyrics), Some(synced(1.0, "hit")));
         let requests = http.requests();
         assert_eq!(requests.len(), 1);
         let request = &requests[0];
@@ -398,7 +434,10 @@ mod tests {
 
         let result = block_on(provider.fetch(&t)).unwrap();
 
-        assert_eq!(result, Some(synced(2.0, "found by search")));
+        assert_eq!(
+            result.map(|h| h.lyrics),
+            Some(synced(2.0, "found by search"))
+        );
         let requests = http.requests();
         let paths: Vec<&str> = requests.iter().map(|r| path(&r.url)).collect();
         assert_eq!(paths, ["/api/get", "/api/search"]);
@@ -426,7 +465,7 @@ mod tests {
 
         let result = block_on(provider.fetch(&t)).unwrap();
 
-        assert_eq!(result, Some(synced(2.0, "right song")));
+        assert_eq!(result.map(|h| h.lyrics), Some(synced(2.0, "right song")));
     }
 
     #[test]
@@ -558,7 +597,8 @@ mod tests {
             201,
             r#"{"duration":200,"syncedLyrics":"[00:01.00]hit"}"#,
         );
-        assert_eq!(block_on(provider.fetch(&t)), Ok(Some(synced(1.0, "hit"))));
+        let hit = block_on(provider.fetch(&t)).unwrap().unwrap();
+        assert_eq!(hit.lyrics, synced(1.0, "hit"));
     }
 
     #[test]
@@ -569,6 +609,126 @@ mod tests {
         assert_eq!(
             block_on(provider.fetch(&t)),
             Err(ProviderError::BadStatus(301))
+        );
+    }
+
+    // MARK: source URL (LyricsHit)
+
+    const TWO_LINES: &str = "[00:01.00]a\\n[00:02.00]b";
+
+    fn exact_hit(provider_http: &(Arc<FakeHttp>, LrclibProvider), body: &str) -> LyricsHit {
+        let t = track();
+        provider_http
+            .0
+            .respond(LrclibProvider::exact_url(&t), 200, body);
+        block_on(provider_http.1.fetch(&t)).unwrap().unwrap()
+    }
+
+    #[test]
+    fn lrclib_exact_hit_uses_the_record_id_url() {
+        let ctx = setup();
+        let hit = exact_hit(
+            &ctx,
+            &format!(r#"{{"id":3396226,"duration":200,"syncedLyrics":"{TWO_LINES}"}}"#),
+        );
+        assert_eq!(hit.url, "https://lrclib.net/api/get/3396226");
+        assert!(hit.lyrics.is_synced());
+    }
+
+    #[test]
+    fn lrclib_hit_without_a_usable_id_falls_back_to_the_request_url() {
+        let t = track();
+        for id in [
+            None,
+            Some("null"),
+            Some("0"),
+            Some("-5"),
+            Some(r#""abc""#),
+            Some(r#""42""#),
+            Some("7.5"),
+            Some("1e30"),
+            Some("-1e30"),
+            Some("18446744073709551615"),
+            Some("true"),
+            Some("[1]"),
+            Some(r#"{"a":1}"#),
+        ] {
+            let field = id.map_or(String::new(), |v| format!(r#""id":{v},"#));
+            let ctx = setup();
+            let hit = exact_hit(
+                &ctx,
+                &format!(r#"{{{field}"duration":200,"syncedLyrics":"{TWO_LINES}"}}"#),
+            );
+            assert_eq!(hit.url, LrclibProvider::exact_url(&t), "id = {id:?}");
+        }
+    }
+
+    #[test]
+    fn lrclib_integral_float_id_is_accepted_but_other_fields_stay_strict() {
+        let ctx = setup();
+        let hit = exact_hit(
+            &ctx,
+            &format!(r#"{{"id":12.0,"duration":200,"syncedLyrics":"{TWO_LINES}"}}"#),
+        );
+        assert_eq!(hit.url, "https://lrclib.net/api/get/12");
+
+        // 寬鬆的只有 id；其他欄位型別不對仍是壞回應。
+        let (http, provider) = setup();
+        let t = track();
+        http.respond(
+            LrclibProvider::exact_url(&t),
+            200,
+            r#"{"id":"x","duration":"200","syncedLyrics":"[00:01.00]a"}"#,
+        );
+        assert_eq!(
+            block_on(provider.fetch(&t)),
+            Err(ProviderError::BadResponse)
+        );
+    }
+
+    #[test]
+    fn lrclib_search_fallback_hit_uses_the_candidate_id_or_the_search_url() {
+        let t = track();
+        let (http, provider) = setup();
+        http.respond(LrclibProvider::exact_url(&t), 404, "{}");
+        http.respond(
+            LrclibProvider::search_url(&t),
+            200,
+            format!(
+                r#"[{{"id":7,"trackName":"Other","duration":200,"syncedLyrics":"{TWO_LINES}"}},
+                   {{"id":42,"trackName":"T","duration":200,"syncedLyrics":"{TWO_LINES}"}}]"#
+            ),
+        );
+        let hit = block_on(provider.fetch(&t)).unwrap().unwrap();
+        assert_eq!(hit.url, "https://lrclib.net/api/get/42");
+
+        let (http, provider) = setup();
+        http.respond(LrclibProvider::exact_url(&t), 404, "{}");
+        http.respond(
+            LrclibProvider::search_url(&t),
+            200,
+            format!(r#"[{{"id":0,"trackName":"T","duration":200,"syncedLyrics":"{TWO_LINES}"}}]"#),
+        );
+        let hit = block_on(provider.fetch(&t)).unwrap().unwrap();
+        assert_eq!(hit.url, LrclibProvider::search_url(&t));
+    }
+
+    #[test]
+    fn lrclib_every_hit_url_is_https() {
+        let t = track();
+        let ctx = setup();
+        let hit = exact_hit(
+            &ctx,
+            &format!(r#"{{"duration":200,"syncedLyrics":"{TWO_LINES}"}}"#),
+        );
+        assert!(hit.url.starts_with("https://"));
+        assert!(
+            LrclibProvider::record_url(Some(1), &LrclibProvider::search_url(&t))
+                .starts_with("https://")
+        );
+        assert!(
+            LrclibProvider::record_url(None, &LrclibProvider::search_url(&t))
+                .starts_with("https://")
         );
     }
 }

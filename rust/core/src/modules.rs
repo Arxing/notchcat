@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex, Weak};
 
 use crate::runtime::{lock, Notifier, Subscription};
 
-/// Preview 額外高度的上限（Swift `NotchMode.maxPreviewExtraHeight`）。
-pub const MAX_PREVIEW_EXTRA_HEIGHT: f64 = 28.0;
+/// Preview 額外高度的上限（Swift `NotchMode.maxPreviewExtraHeight` 是 28；這裡放寬到 56，
+/// 放得下三行的歌詞條，見 `music::module::lyric_strip_height`）。
+pub const MAX_PREVIEW_EXTRA_HEIGHT: f64 = 56.0;
 
 /// 夾到 `0..=MAX_PREVIEW_EXTRA_HEIGHT`；NaN 視為 0。
 pub fn clamped_preview_extra(height: f64) -> f64 {
@@ -37,7 +38,7 @@ pub trait ModuleState: Send + Sync {
     /// 模組目前是否有「不必 hover 就想顯示」的環境內容（例如音樂正在播）。
     fn is_active(&self) -> bool;
 
-    /// 模組作為 active 模組時，希望 Preview 比瀏海高多少。管理器會夾到 `0..=28`。預設恆為 0。
+    /// 模組作為 active 模組時，希望 Preview 比瀏海高多少。管理器會夾到 `0..=MAX_PREVIEW_EXTRA_HEIGHT`。預設恆為 0。
     fn preview_extra_height(&self) -> f64 {
         0.0
     }
@@ -159,7 +160,7 @@ impl ModuleManager {
         lock(&self.inner.state).active.clone()
     }
 
-    /// active 模組要求的 Preview 額外高度，夾到 `0..=28`；沒有 active 模組為 0。
+    /// active 模組要求的 Preview 額外高度，夾到 `0..=MAX_PREVIEW_EXTRA_HEIGHT`；沒有 active 模組為 0。
     pub fn preview_extra_height(&self) -> f64 {
         lock(&self.inner.state).preview_extra_height
     }
@@ -329,7 +330,7 @@ mod tests {
         assert_eq!(manager.preview_extra_height(), 0.0);
 
         module.set_extra_height(99.0);
-        assert_eq!(manager.preview_extra_height(), 28.0);
+        assert_eq!(manager.preview_extra_height(), 56.0);
 
         module.set_extra_height(f64::NAN);
         assert_eq!(manager.preview_extra_height(), 0.0);
@@ -378,12 +379,12 @@ mod tests {
     /// Swift `testClampedPreviewExtra`（Swift 的 `NotchMode.clampedPreviewExtra`；NaN 另見 extra_tests）。
     #[test]
     fn clamped_preview_extra_clamps_to_zero_through_maximum() {
-        assert_eq!(MAX_PREVIEW_EXTRA_HEIGHT, 28.0);
+        assert_eq!(MAX_PREVIEW_EXTRA_HEIGHT, 56.0);
         assert_eq!(clamped_preview_extra(-5.0), 0.0);
         assert_eq!(clamped_preview_extra(0.0), 0.0);
         assert_eq!(clamped_preview_extra(24.0), 24.0);
-        assert_eq!(clamped_preview_extra(28.0), 28.0);
-        assert_eq!(clamped_preview_extra(500.0), 28.0);
+        assert_eq!(clamped_preview_extra(56.0), 56.0);
+        assert_eq!(clamped_preview_extra(500.0), 56.0);
     }
 
     /// Swift `testNotchModuleDefaultIsZero`：沒覆寫額外高度的模組，預設就是 0（trait 的預設方法）。

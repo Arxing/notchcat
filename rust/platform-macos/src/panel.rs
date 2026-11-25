@@ -18,6 +18,9 @@
 //! 座標：所有 [`Rect`]／[`Point`] 都是 MusiCat 全域座標（主螢幕左上原點、y 向下），
 //! 定義與換算見 [`crate::screens`]。
 //!
+//! 重入：[`configure_panel`]、[`set_panel_frame`]、[`set_panel_visible`] 會同步回呼進 GPUI（視窗大小、縮放比例）。
+//! **呼叫時不可以正在借用 GPUI 的 `App`**（例如在 `cx.update` 之中），否則 GPUI 0.2.2 靜默丟掉回呼、之後整個跑版。
+//!
 //! 執行緒：除了 [`mouse_location`] 與 [`foreground_is_fullscreen`]，其餘函式都必須在主執行緒呼叫
 //! （GPUI 的 `App`／`Window` 回呼本來就在主執行緒）。在其他執行緒呼叫時印警告並什麼都不做，不會崩潰。
 
@@ -230,6 +233,13 @@ pub fn set_panel_visible(window: NativeWindow, visible: bool) {
     }
 }
 
+/// 面板目前所在螢幕的縮放比例（`backingScaleFactor`，Retina 為 2）。視窗不存在或不在主執行緒時回 `None`。
+/// 給診斷與測試用。
+pub fn panel_backing_scale(window: NativeWindow) -> Option<f64> {
+    let mtm = MainThreadMarker::new()?;
+    window.ns_window(mtm).map(|w| w.backingScaleFactor())
+}
+
 /// 面板目前是否在畫面上（`isVisible`）。給診斷與測試用；視窗不存在時回 `false`。
 pub fn panel_is_visible(window: NativeWindow) -> bool {
     let Some(mtm) = MainThreadMarker::new() else {
@@ -359,6 +369,7 @@ mod tests {
         set_panel_visible(bogus, false);
         set_panel_visible(bogus, true);
         assert!(!panel_is_visible(bogus));
+        assert_eq!(panel_backing_scale(bogus), None);
         assert!(describe_panel(bogus).contains("not on the main thread"));
         assert!(!foreground_is_fullscreen());
     }

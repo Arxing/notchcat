@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer};
 use super::provider::{
     build_url, candidate_title, decode_object, request, success_body, LyricsProvider, ProviderError,
 };
-use super::{parse_lrc, Lyrics, TrackIdentity};
+use super::{parse_lrc, Lyrics, LyricsHit, TrackIdentity};
 use crate::http::HttpClient;
 use crate::runtime::BoxFuture;
 
@@ -98,6 +98,11 @@ impl NetEaseProvider {
         )
     }
 
+    /// 這首歌在網易雲網站上的頁面。
+    pub(crate) fn song_url(song_id: i64) -> String {
+        format!("https://music.163.com/song?id={song_id}")
+    }
+
     /// 第一個歌名與曲長都符合查詢的搜尋結果；都不符時為 `None`。歌名不同的結果永遠不收：
     /// 錯的歌詞比沒有更糟。歌名寬鬆比對，因為這個服務會對繁體查詢回簡體歌名。
     ///
@@ -159,7 +164,10 @@ impl NetEaseProvider {
         Self::parse_lyric(data).unwrap_or(None)
     }
 
-    async fn fetch_lyrics(&self, track: &TrackIdentity) -> Result<Option<Lyrics>, ProviderError> {
+    async fn fetch_lyrics(
+        &self,
+        track: &TrackIdentity,
+    ) -> Result<Option<LyricsHit>, ProviderError> {
         let search = request(Self::search_url(track), &REFERER);
         let search_body = success_body(&self.http, search).await?;
         let Some(song_id) = Self::select_song_id(&search_body, track)? else {
@@ -168,7 +176,8 @@ impl NetEaseProvider {
 
         let lyric = request(Self::lyric_url(song_id), &REFERER);
         let lyric_body = success_body(&self.http, lyric).await?;
-        Self::parse_lyric(&lyric_body)
+        let lyrics = Self::parse_lyric(&lyric_body)?;
+        Ok(lyrics.map(|lyrics| LyricsHit::new(lyrics, Self::song_url(song_id))))
     }
 }
 
@@ -194,7 +203,7 @@ impl LyricsProvider for NetEaseProvider {
     fn fetch<'a>(
         &'a self,
         track: &'a TrackIdentity,
-    ) -> BoxFuture<'a, Result<Option<Lyrics>, ProviderError>> {
+    ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>> {
         Box::pin(self.fetch_lyrics(track))
     }
 }
@@ -476,7 +485,7 @@ mod tests {
 
         let result = block_on(provider.fetch(&query)).unwrap();
 
-        assert_eq!(result, Some(synced1(3.0, "original")));
+        assert_eq!(result.map(|h| h.lyrics), Some(synced1(3.0, "original")));
         let requests = http.requests();
         let hosts: Vec<&str> = requests.iter().map(|r| host(&r.url)).collect();
         assert_eq!(hosts, ["music.163.com", "music.163.com"]);
@@ -629,5 +638,27 @@ mod tests {
             NetEaseProvider::parse_lyric(json),
             Err(ProviderError::BadResponse)
         );
+    }
+
+    #[test]
+    fn netease_hit_url_points_at_the_song_page() {
+        let (http, provider) = setup();
+        let query = query_track("T", "A", Some(200.0));
+        http.respond(
+            NetEaseProvider::search_url(&query),
+            200,
+            search_json(r#"{"id":7,"name":"T","duration":200000}"#),
+        );
+        http.respond(
+            NetEaseProvider::lyric_url(7),
+            200,
+            r#"{"lrc":{"lyric":"[00:01.00]a\n[00:02.00]b"}}"#,
+        );
+
+        let hit = block_on(provider.fetch(&query)).unwrap().unwrap();
+
+        assert_eq!(hit.url, "https://music.163.com/song?id=7");
+        assert_eq!(NetEaseProvider::song_url(7), hit.url);
+        assert!(hit.lyrics.is_synced());
     }
 }

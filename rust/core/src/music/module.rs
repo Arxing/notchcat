@@ -1,23 +1,32 @@
 //! 音樂模組的狀態（移植自 Swift `Modules/Music/MusicModule.swift`；畫面在 `shell`）。
 //!
 //! - `is_active` = 目前快照的 `is_playing`（沒有快照或暫停都不是），同 Swift `monitor.isPlayingPublisher`。
-//! - Preview 額外高度 = [`LYRIC_STRIP_HEIGHT`] 當且僅當 `is_playing && strip_visible`，否則 0。
-//!   沒有同步歌詞時歌詞條改顯示曲名，高度不變，所以高度與歌詞內容無關。
+//! - Preview 額外高度 = [`lyric_strip_height`]（依歌詞條行數，一行為 [`LYRIC_STRIP_HEIGHT`]）當且僅當
+//!   `is_playing && strip_visible`，否則 0。沒有同步歌詞時歌詞條改顯示曲名，高度不變，所以高度與歌詞內容無關。
 //! - 訂閱者只在 `is_active` 或額外高度真的改變時被通知（Swift `removeDuplicates`）。
 //!
 //! 並行：`last`（上次通知的值）的 mutex 同時串行化「讀控制器狀態、與上次比較、存入」，
 //! 所以不同執行緒的更新不會把舊值寫在新值之後；通知在鎖外。控制器訂閱的回呼只持有內部狀態的 `Weak`。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::modules::ModuleState;
 use crate::music::controller::MusicController;
+use crate::music::presentation::STRIP_MAX_LINES;
 use crate::nowplaying::NowPlayingSource;
 use crate::runtime::{lock, Notifier, Subscription};
 
-/// Preview 中瀏海下方歌詞條的高度（需實機調整）。
+/// Preview 中瀏海下方歌詞條「一行」時的高度（需實機調整）。
 pub const LYRIC_STRIP_HEIGHT: f64 = 24.0;
+/// 歌詞條每多一行增加的高度（12 pt 字、行高 16）。
+pub const LYRIC_STRIP_ROW_HEIGHT: f64 = 16.0;
+
+/// 歌詞條顯示 `lines` 行（夾在 `1..=`[`STRIP_MAX_LINES`]）時的高度：一行 24、兩行 40、三行 56。
+pub fn lyric_strip_height(lines: u8) -> f64 {
+    let lines = lines.clamp(1, STRIP_MAX_LINES);
+    LYRIC_STRIP_HEIGHT + f64::from(lines - 1) * LYRIC_STRIP_ROW_HEIGHT
+}
 /// 歌詞條黑底的不透明度（需實機調整）。
 pub const LYRIC_STRIP_OPACITY: f64 = 0.6;
 
@@ -30,6 +39,8 @@ pub struct MusicModuleState {
 struct Inner {
     controller: Arc<MusicController>,
     strip_visible: Arc<AtomicBool>,
+    /// 歌詞條一次顯示幾行（1..=3）；與設定共用，用 [`MusicModuleState::set_strip_lines`] 改。
+    strip_lines: Arc<AtomicU8>,
     sources: Vec<Arc<dyn NowPlayingSource>>,
     last: Mutex<(bool, f64)>,
     notifier: Notifier<()>,
@@ -47,7 +58,7 @@ impl Inner {
         (
             playing,
             if playing && visible {
-                LYRIC_STRIP_HEIGHT
+                lyric_strip_height(self.strip_lines.load(Ordering::SeqCst))
             } else {
                 0.0
             },
@@ -85,9 +96,25 @@ impl MusicModuleState {
         strip_visible: Arc<AtomicBool>,
         sources: Vec<Arc<dyn NowPlayingSource>>,
     ) -> Self {
+        Self::with_strip_lines(
+            controller,
+            strip_visible,
+            Arc::new(AtomicU8::new(1)),
+            sources,
+        )
+    }
+
+    /// 同 [`Self::new`]，並指定歌詞條一次顯示的行數（共用旗標，超出 `1..=3` 的值按夾住處理）。
+    pub fn with_strip_lines(
+        controller: Arc<MusicController>,
+        strip_visible: Arc<AtomicBool>,
+        strip_lines: Arc<AtomicU8>,
+        sources: Vec<Arc<dyn NowPlayingSource>>,
+    ) -> Self {
         let inner = Arc::new(Inner {
             controller,
             strip_visible,
+            strip_lines,
             sources,
             last: Mutex::new((false, 0.0)),
             notifier: Notifier::new(),
@@ -114,6 +141,22 @@ impl MusicModuleState {
     /// 畫面在呼叫 [`Self::set_strip_visible`] 之後要自己重繪。
     pub fn strip_visible(&self) -> bool {
         self.inner.strip_visible.load(Ordering::SeqCst)
+    }
+
+    /// 歌詞條一次顯示幾行（1..=3，共用旗標的現值夾進範圍）。
+    pub fn strip_lines(&self) -> u8 {
+        self.inner
+            .strip_lines
+            .load(Ordering::SeqCst)
+            .clamp(1, STRIP_MAX_LINES)
+    }
+
+    /// 改歌詞條的行數（夾進 `1..=3`）並立刻更新額外高度；值沒變時不通知。
+    pub fn set_strip_lines(&self, lines: u8) {
+        self.inner
+            .strip_lines
+            .store(lines.clamp(1, STRIP_MAX_LINES), Ordering::SeqCst);
+        self.inner.refresh();
     }
 
     /// 歌詞條展開或收起：寫入共用的旗標並立刻更新額外高度。
@@ -169,7 +212,7 @@ mod tests {
     use crate::artwork_cache::ArtworkCache;
     use crate::lyrics::identity::TrackIdentity;
     use crate::lyrics::repository::LyricsResolving;
-    use crate::lyrics::Lyrics;
+    use crate::lyrics::LyricsHit;
     use crate::nowplaying::{NowPlayingMonitor, SharedSnapshotCallback, SnapshotCallback};
     use crate::runtime::BoxFuture;
     use crate::testing::LocalSpawner;
@@ -224,7 +267,7 @@ mod tests {
     struct NoLyrics;
 
     impl LyricsResolving for NoLyrics {
-        fn lyrics(&self, _track: TrackIdentity) -> BoxFuture<'_, Option<Lyrics>> {
+        fn lyrics(&self, _track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
             Box::pin(std::future::ready(None))
         }
     }
@@ -359,6 +402,43 @@ mod tests {
     }
 
     #[test]
+    fn strip_height_grows_by_one_row_per_line() {
+        assert_eq!([1u8, 2, 3].map(lyric_strip_height), [24.0, 40.0, 56.0]);
+        // 超出範圍夾住。
+        assert_eq!((lyric_strip_height(0), lyric_strip_height(9)), (24.0, 56.0));
+    }
+
+    #[test]
+    fn changing_the_line_count_updates_height_immediately() {
+        let fx = Fixture::new();
+        assert_eq!(fx.module.strip_lines(), 1);
+        fx.play(true);
+        assert_eq!(fx.last_height(), Some(24.0));
+
+        fx.module.set_strip_lines(3);
+        assert_eq!(fx.module.strip_lines(), 3);
+        assert_eq!(fx.last_height(), Some(56.0));
+        fx.module.set_strip_lines(2);
+        assert_eq!(fx.last_height(), Some(40.0));
+        // 同值不重複通知；超出範圍夾住（9 → 3）。
+        fx.module.set_strip_lines(2);
+        fx.module.set_strip_lines(9);
+        assert_eq!(fx.module.strip_lines(), 3);
+        assert_eq!(*lock(&fx.heights), [0.0, 24.0, 56.0, 40.0, 56.0]);
+    }
+
+    #[test]
+    fn line_count_does_not_unfold_a_folded_strip() {
+        let fx = Fixture::new();
+        fx.module.set_strip_visible(false);
+        fx.play(true);
+        fx.module.set_strip_lines(3);
+        assert_eq!(fx.last_height(), Some(0.0));
+        fx.module.set_strip_visible(true);
+        assert_eq!(fx.last_height(), Some(56.0));
+    }
+
+    #[test]
     fn extra_height_does_not_repeat_values() {
         let fx = Fixture::new();
         fx.play(true);
@@ -464,6 +544,24 @@ mod tests {
 
         fx.module.set_strip_visible(false);
         assert_eq!(manager.preview_extra_height(), 0.0);
+    }
+
+    /// 回歸：外殼只看得到管理器夾過上限的高度；上限比 3 行歌詞條矮時，歌詞會被切掉。
+    #[test]
+    fn every_line_count_reaches_the_shell_unclipped() {
+        use crate::modules::ModuleManager;
+        let fx = Fixture::new();
+        let manager = ModuleManager::new();
+        manager.register(fx.module.clone());
+        fx.play(true);
+        for lines in 1..=STRIP_MAX_LINES {
+            fx.module.set_strip_lines(lines);
+            assert_eq!(
+                manager.preview_extra_height(),
+                lyric_strip_height(lines),
+                "lines = {lines}"
+            );
+        }
     }
 
     #[test]

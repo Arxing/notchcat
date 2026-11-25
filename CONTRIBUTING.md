@@ -43,6 +43,6 @@ sh scripts/check-core-purity.sh
 
 ## 其他約定
 
-- 私有 API 只准出現在 `platform-macos/src/mediaremote_control.rs` 與 `platform-macos/helper/`；`objc2` 只准出現在 `platform-macos/src/` 內：`panel.rs`（視窗繞路）、以及只用公開 AppKit／Foundation API 的 `screens.rs`、`tray.rs`、`power.rs`（見 ADR-0002）。
+- 私有 API 只准出現在 `platform-macos/src/mediaremote_control.rs` 與 `platform-macos/helper/`；`objc2` 只准出現在 `platform-macos/src/` 內：`panel.rs`（視窗繞路）、以及只用公開 AppKit／Foundation API 的 `screens.rs`、`tray.rs`、`power.rs`、`links.rs`（見 ADR-0002；`links.rs` 只用公開的 `NSWorkspace.openURL:`／`NSURL`）。
 - Windows 程式碼一律標示「未在實機驗證」。
 - 授權為 `MIT OR Apache-2.0`，User-Agent 固定為 `MusiCat`。

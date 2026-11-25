@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use super::identity::TrackIdentity;
 use super::provider::LyricsProvider;
-use super::Lyrics;
+use super::LyricsHit;
 use crate::runtime::{lock, BoxFuture, Clock};
 use crate::timing::{with_timeout, Coalescer};
 
@@ -43,20 +43,20 @@ impl Default for RepositoryConfig {
 
 /// 依曲目解析歌詞。回傳的 future 被 drop 即代表這個呼叫者放棄。
 pub trait LyricsResolving: Send + Sync {
-    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<Lyrics>>;
+    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>>;
 }
 
 /// `until`（Unix epoch 秒）為 `None` 表示永不過期。
 #[derive(Clone)]
 enum CacheEntry {
-    Found { lyrics: Lyrics, until: Option<f64> },
+    Found { hit: LyricsHit, until: Option<f64> },
     Missing { until: f64 },
 }
 
 /// 跨來源解析歌詞並快取結果（見模組說明）。
 pub struct LyricsRepository {
     inner: Arc<Inner>,
-    flights: Coalescer<String, Option<Lyrics>>,
+    flights: Coalescer<String, Option<LyricsHit>>,
 }
 
 /// 被合併的查詢 future 需要 `'static`，所以它用到的狀態放在 `Arc` 裡。
@@ -69,7 +69,7 @@ struct Inner {
 
 /// 單一來源的結果。
 enum FetchOutcome {
-    Hit(Lyrics),
+    Hit(LyricsHit),
     /// 來源答了，而且沒有。
     Empty,
     /// 錯誤或逾時。
@@ -101,7 +101,7 @@ impl LyricsRepository {
 }
 
 impl LyricsResolving for LyricsRepository {
-    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<Lyrics>> {
+    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
         let key = track.cache_key();
         if let Some(hit) = self.inner.cached(&key) {
             return Box::pin(std::future::ready(hit));
@@ -118,26 +118,26 @@ impl LyricsResolving for LyricsRepository {
 
 impl Inner {
     /// 未過期的快取結果：`Some(Some(_))` 命中歌詞、`Some(None)` 命中「查無」、`None` 沒有可用的快取。
-    fn cached(&self, key: &str) -> Option<Option<Lyrics>> {
+    fn cached(&self, key: &str) -> Option<Option<LyricsHit>> {
         let now = self.clock.now();
         match lock(&self.cache).get(key)? {
-            CacheEntry::Found { lyrics, until } if until.is_none_or(|u| now < u) => {
-                Some(Some(lyrics.clone()))
+            CacheEntry::Found { hit, until } if until.is_none_or(|u| now < u) => {
+                Some(Some(hit.clone()))
             }
             CacheEntry::Missing { until } if now < *until => Some(None),
             _ => None,
         }
     }
 
-    async fn resolve(&self, track: TrackIdentity, key: String) -> Option<Lyrics> {
+    async fn resolve(&self, track: TrackIdentity, key: String) -> Option<LyricsHit> {
         // 多執行緒競態：呼叫者查快取沒命中之後、本查詢第一次被輪詢之前，另一條執行緒的查詢可能
         // 已經寫好快取並移除了它的表項（快取一律先寫、表項後移除），於是這裡成了第二輪查詢。
         // 開頭重查一次快取即可擋下，不必再問一輪來源。
         if let Some(hit) = self.cached(&key) {
             return hit;
         }
-        let mut fallback: Option<Lyrics> = None;
-        let mut found: Option<Lyrics> = None;
+        let mut fallback: Option<LyricsHit> = None;
+        let mut found: Option<LyricsHit> = None;
         let mut any_failed = false;
 
         for provider in &self.providers {
@@ -145,14 +145,14 @@ impl Inner {
                 FetchOutcome::Failed => any_failed = true,
                 FetchOutcome::Empty => {}
                 FetchOutcome::Hit(result) => {
-                    if result.is_synced() {
-                        if result.is_plausible(track.duration) {
+                    if result.lyrics.is_synced() {
+                        if result.lyrics.is_plausible(track.duration) {
                             found = Some(result);
                             break;
                         }
-                        // 來源答了，但時間軸不可信：等同沒有——不是失敗，也不當保底。
+                        // 來源答了，但時間軸不可信：等同沒有——不是失敗，也不當保底，網址也一併丟掉。
                     } else if fallback.is_none() {
-                        // 留下最高順位的純文字，以防找不到同步歌詞。不覆寫，由優先序決定。
+                        // 留下最高順位的純文字（連同它自己的網址），以防找不到同步歌詞。不覆寫，由優先序決定。
                         fallback = Some(result);
                     }
                 }
@@ -165,7 +165,7 @@ impl Inner {
         let (entry, result) = if let Some(found) = found {
             (
                 CacheEntry::Found {
-                    lyrics: found.clone(),
+                    hit: found.clone(),
                     until: None,
                 },
                 Some(found),
@@ -174,7 +174,7 @@ impl Inner {
             // 有來源掛掉時找到的純文字，之後可能被同步歌詞取代，所以只短暫記住。
             (
                 CacheEntry::Found {
-                    lyrics: fallback.clone(),
+                    hit: fallback.clone(),
                     until: any_failed.then_some(failure_expiry),
                 },
                 Some(fallback),
@@ -199,7 +199,7 @@ impl Inner {
             provider.fetch(track),
         );
         match attempt.await {
-            Ok(Ok(Some(lyrics))) => FetchOutcome::Hit(lyrics),
+            Ok(Ok(Some(hit))) => FetchOutcome::Hit(hit),
             Ok(Ok(None)) => FetchOutcome::Empty,
             Ok(Err(_)) | Err(_) => FetchOutcome::Failed,
         }
@@ -216,7 +216,7 @@ mod tests {
 
     use super::*;
     use crate::lyrics::provider::ProviderError;
-    use crate::lyrics::LyricLine;
+    use crate::lyrics::{LyricLine, Lyrics, LyricsHit};
     use crate::runtime::{Spawner, TaskHandle};
     use crate::testing::{FakeClock, LocalSpawner};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -229,17 +229,33 @@ mod tests {
     /// 可在中途改答案（例如來源恢復）。延遲之後才讀取答案，與 Swift 相同。
     struct FakeProvider {
         id: String,
-        response: Mutex<(Option<Lyrics>, bool)>,
+        response: Mutex<(Option<LyricsHit>, bool)>,
         delay: Duration,
         clock: Arc<FakeClock>,
         calls: AtomicUsize,
+    }
+
+    /// 測試用命中：網址固定。
+    fn hit(lyrics: Lyrics) -> LyricsHit {
+        LyricsHit::new(lyrics, "https://test.example/0")
+    }
+
+    /// 帶指定來源網址的命中。
+    fn hit_at(lyrics: Lyrics, url: &str) -> LyricsHit {
+        LyricsHit::new(lyrics, url)
+    }
+
+    /// 方便寫法：命中的網址由來源 id 決定（`https://test.example/<id>`），
+    /// 讓只關心歌詞的測試不必每個都寫網址。
+    fn hit_for(id: &str, lyrics: Option<Lyrics>) -> Option<LyricsHit> {
+        lyrics.map(|l| hit_at(l, &format!("https://test.example/{id}")))
     }
 
     impl FakeProvider {
         fn new(
             id: &str,
             clock: &Arc<FakeClock>,
-            result: Option<Lyrics>,
+            result: Option<LyricsHit>,
             fails: bool,
             delay: Duration,
         ) -> Arc<Self> {
@@ -253,6 +269,11 @@ mod tests {
         }
 
         fn result(id: &str, clock: &Arc<FakeClock>, result: Option<Lyrics>) -> Arc<Self> {
+            Self::new(id, clock, hit_for(id, result), false, Duration::ZERO)
+        }
+
+        /// 明確指定整個命中（含網址）。
+        fn result_hit(id: &str, clock: &Arc<FakeClock>, result: Option<LyricsHit>) -> Arc<Self> {
             Self::new(id, clock, result, false, Duration::ZERO)
         }
 
@@ -266,17 +287,17 @@ mod tests {
             result: Option<Lyrics>,
             delay: Duration,
         ) -> Arc<Self> {
-            Self::new(id, clock, result, false, delay)
+            Self::new(id, clock, hit_for(id, result), false, delay)
         }
 
         /// 永不回應的來源。
         fn hanging(id: &str, clock: &Arc<FakeClock>, result: Option<Lyrics>) -> Arc<Self> {
-            Self::new(id, clock, result, false, Duration::MAX)
+            Self::new(id, clock, hit_for(id, result), false, Duration::MAX)
         }
 
         /// 改變之後呼叫的答案。
         fn respond(&self, result: Option<Lyrics>, fails: bool) {
-            *self.response.lock().unwrap() = (result, fails);
+            *self.response.lock().unwrap() = (hit_for(&self.id, result), fails);
         }
 
         fn call_count(&self) -> usize {
@@ -292,7 +313,7 @@ mod tests {
         fn fetch<'a>(
             &'a self,
             _track: &'a TrackIdentity,
-        ) -> BoxFuture<'a, Result<Option<Lyrics>, ProviderError>> {
+        ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 if self.delay > Duration::ZERO {
@@ -310,7 +331,7 @@ mod tests {
     /// 對應 Swift `StubbornProvider`：不理會取消，等滿 `delay` 才回答。
     /// Rust 的取消就是 drop；這裡在 drop 時立旗，證明逾時後它被丟掉而不是被等完。
     struct StubbornProvider {
-        result: Option<Lyrics>,
+        result: Option<LyricsHit>,
         delay: Duration,
         clock: Arc<FakeClock>,
         calls: AtomicUsize,
@@ -332,7 +353,7 @@ mod tests {
         fn fetch<'a>(
             &'a self,
             _track: &'a TrackIdentity,
-        ) -> BoxFuture<'a, Result<Option<Lyrics>, ProviderError>> {
+        ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let flag = DropFlag(self.dropped.clone());
             Box::pin(async move {
@@ -345,7 +366,7 @@ mod tests {
 
     /// 對應 Swift `GatedProvider`：`open()` 之前不回答。
     struct GatedProvider {
-        result: Option<Lyrics>,
+        result: Option<LyricsHit>,
         calls: AtomicUsize,
         gate: Mutex<(bool, Vec<Waker>)>,
     }
@@ -353,7 +374,7 @@ mod tests {
     impl GatedProvider {
         fn new(result: Option<Lyrics>) -> Arc<Self> {
             Arc::new(Self {
-                result,
+                result: result.map(hit),
                 calls: AtomicUsize::new(0),
                 gate: Mutex::new((false, Vec::new())),
             })
@@ -381,7 +402,7 @@ mod tests {
         fn fetch<'a>(
             &'a self,
             _track: &'a TrackIdentity,
-        ) -> BoxFuture<'a, Result<Option<Lyrics>, ProviderError>> {
+        ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 std::future::poll_fn(|cx| {
@@ -403,18 +424,24 @@ mod tests {
 
     /// 一次在背景跑的查詢：結果寫進 `slot`；drop `task` 即取消該呼叫者。
     struct Lookup {
-        slot: Arc<Mutex<Option<Option<Lyrics>>>>,
+        slot: Arc<Mutex<Option<Option<LyricsHit>>>>,
         task: TaskHandle,
     }
 
     impl Lookup {
-        /// `None`：還沒結束（或已被取消）；`Some(r)`：查詢回傳了 `r`。
+        /// `None`：還沒結束（或已被取消）；`Some(r)`：查詢回傳了 `r`（只看歌詞）。
         fn outcome(&self) -> Option<Option<Lyrics>> {
-            self.slot.lock().unwrap().clone()
+            let done = self.slot.lock().unwrap().clone()?;
+            Some(done.map(|h| h.lyrics))
         }
 
         fn finished(&self) -> Option<Lyrics> {
             self.outcome().expect("the lookup should have finished")
+        }
+
+        fn finished_hit(&self) -> Option<LyricsHit> {
+            let done = self.slot.lock().unwrap().clone();
+            done.expect("the lookup should have finished")
         }
     }
 
@@ -483,9 +510,14 @@ mod tests {
 
         /// 查詢並在不推進時間的情況下跑完（來源都立即回答時）。
         fn ask(&self, repo: &Arc<LyricsRepository>, track: TrackIdentity) -> Option<Lyrics> {
+            self.ask_hit(repo, track).map(|h| h.lyrics)
+        }
+
+        /// 同 `ask`，但連來源網址一起回傳。
+        fn ask_hit(&self, repo: &Arc<LyricsRepository>, track: TrackIdentity) -> Option<LyricsHit> {
             let lookup = self.start(repo, track);
             self.run();
-            lookup.finished()
+            lookup.finished_hit()
         }
     }
 
@@ -843,7 +875,7 @@ mod tests {
     fn provider_ignoring_cancellation_does_not_stall_the_walk() {
         let h = Harness::new();
         let stubborn = Arc::new(StubbornProvider {
-            result: Some(synced()),
+            result: Some(hit(synced())),
             delay: secs(1),
             clock: h.clock.clone(),
             calls: AtomicUsize::new(0),
@@ -1340,13 +1372,13 @@ mod tests {
         lock(&repo.inner.cache).insert(
             track().cache_key(),
             CacheEntry::Found {
-                lyrics: synced(),
+                hit: hit(synced()),
                 until: None,
             },
         );
 
         assert_eq!(
-            caller.now_or_never(),
+            caller.now_or_never().map(|r| r.map(|h| h.lyrics)),
             Some(Some(synced())),
             "the run must answer from the cache another run just wrote"
         );
@@ -1387,5 +1419,120 @@ mod tests {
         };
         assert_eq!(h.ask(&repo, unknown), Some(synced()));
         assert_eq!(provider.call_count(), 1);
+    }
+
+    // ------------------------------------------------------------ 來源網址（LyricsHit）
+
+    #[test]
+    fn a_hit_carries_the_providers_url() {
+        let h = Harness::new();
+        let provider =
+            FakeProvider::result_hit("a", &h.clock, Some(hit_at(synced(), "https://a.example/1")));
+        let repo = h.repo(vec![dynp(&provider)]);
+
+        let got = h.ask_hit(&repo, track()).expect("a hit");
+
+        assert_eq!(got.lyrics, synced());
+        assert_eq!(got.url, "https://a.example/1");
+        assert!(got.url.starts_with("https://"));
+    }
+
+    #[test]
+    fn cached_hit_still_carries_its_url() {
+        let h = Harness::new();
+        let synced_src =
+            FakeProvider::result_hit("s", &h.clock, Some(hit_at(synced(), "https://s.example/9")));
+        let repo = h.repo(vec![dynp(&synced_src)]);
+        let first = h.ask_hit(&repo, track()).expect("a hit");
+        let again = h.ask_hit(&repo, track()).expect("a cached hit");
+        assert_eq!(synced_src.call_count(), 1, "the second answer is cached");
+        assert_eq!(first, again);
+        assert_eq!(again.url, "https://s.example/9");
+
+        // 純文字保底也一樣：從快取回來的仍帶來源網址。
+        let plain_src = FakeProvider::result_hit(
+            "p",
+            &h.clock,
+            Some(hit_at(plain("words"), "https://p.example/2")),
+        );
+        let repo = h.repo(vec![dynp(&plain_src)]);
+        h.ask_hit(&repo, track());
+        let again = h.ask_hit(&repo, track()).expect("a cached plain hit");
+        assert_eq!(plain_src.call_count(), 1);
+        assert_eq!(again.url, "https://p.example/2");
+    }
+
+    #[test]
+    fn plain_fallback_carries_the_fallback_providers_url_not_a_later_one() {
+        // A 純文字、B 沒有：用 A 的網址。
+        let h = Harness::new();
+        let a = FakeProvider::result_hit(
+            "a",
+            &h.clock,
+            Some(hit_at(plain("a words"), "https://a.example/1")),
+        );
+        let b = FakeProvider::result("b", &h.clock, None);
+        let repo = h.repo(vec![dynp(&a), dynp(&b)]);
+        let got = h.ask_hit(&repo, track()).expect("fallback");
+        assert_eq!(got.lyrics, plain("a words"));
+        assert_eq!(got.url, "https://a.example/1");
+
+        // A、B 都純文字：保底是第一個，網址也是第一個的。
+        let h = Harness::new();
+        let a = FakeProvider::result_hit(
+            "a",
+            &h.clock,
+            Some(hit_at(plain("a words"), "https://a.example/1")),
+        );
+        let b = FakeProvider::result_hit(
+            "b",
+            &h.clock,
+            Some(hit_at(plain("b words"), "https://b.example/2")),
+        );
+        let repo = h.repo(vec![dynp(&a), dynp(&b)]);
+        let got = h.ask_hit(&repo, track()).expect("fallback");
+        assert_eq!(got.url, "https://a.example/1");
+
+        // A 純文字、B 帶時間軸：整個換成 B 的 hit。
+        let h = Harness::new();
+        let a = FakeProvider::result_hit(
+            "a",
+            &h.clock,
+            Some(hit_at(plain("a words"), "https://a.example/1")),
+        );
+        let b =
+            FakeProvider::result_hit("b", &h.clock, Some(hit_at(synced(), "https://b.example/2")));
+        let repo = h.repo(vec![dynp(&a), dynp(&b)]);
+        let got = h.ask_hit(&repo, track()).expect("synced wins");
+        assert_eq!(got, hit_at(synced(), "https://b.example/2"));
+    }
+
+    #[test]
+    fn implausible_synced_result_does_not_leak_its_url() {
+        let h = Harness::new();
+        let a = FakeProvider::result_hit(
+            "a",
+            &h.clock,
+            Some(hit_at(implausible(), "https://a.example/leak")),
+        );
+        let b = FakeProvider::result("b", &h.clock, None);
+        let repo = h.repo(vec![dynp(&a), dynp(&b)]);
+        assert_eq!(h.ask_hit(&repo, track()), None);
+
+        // 後面有純文字：用它自己的網址，不是不可信那個的。
+        let h = Harness::new();
+        let a = FakeProvider::result_hit(
+            "a",
+            &h.clock,
+            Some(hit_at(implausible(), "https://a.example/leak")),
+        );
+        let b = FakeProvider::result_hit(
+            "b",
+            &h.clock,
+            Some(hit_at(plain("words"), "https://b.example/2")),
+        );
+        let repo = h.repo(vec![dynp(&a), dynp(&b)]);
+        let got = h.ask_hit(&repo, track()).expect("plain fallback");
+        assert_eq!(got.url, "https://b.example/2");
     }
 }

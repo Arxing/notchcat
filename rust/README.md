@@ -76,10 +76,14 @@ cargo run --release -p musicat-app
 ```
 
 可執行檔是 `target/release/musicat`。它會在有瀏海的螢幕（沒有就用主螢幕與虛擬瀏海）頂端顯示面板，並在選單列放一個「♪」圖示
-（選單：顯示螢幕、歌詞來源、歌詞條、perl 宿主、結束）。沒有 Dock 圖示。
+（選單：顯示螢幕、歌詞來源、歌詞轉繁體中文、歌詞條與行數、perl 宿主、結束）。沒有 Dock 圖示。
 
 - 讀取系統現正播放需要 helper 動態庫 `libmusicat_mediaremote_helper.dylib` 放在**可執行檔旁邊**（建置時自動產生在
   `target/<profile>/`）。找不到時印一行 `system now-playing unavailable` 並只用視窗標題備援，程式照常執行。
+- 有歌詞時，Expanded 畫面控制列左側會顯示一個小的歌詞來源標籤（例如 `lrclib.net ↗`），點擊會用預設瀏覽器開啟該歌詞的來源網站（只開 `https://` 網址）。
+- **同一時間只能執行一個 MusiCat**：第二次啟動會在 stderr 印一行「已在執行中」並以狀態碼 1 結束，不會開任何視窗或選單列圖示。
+  做法是在設定檔旁取一把檔案鎖 `musicat.lock`（用 `MUSICAT_CONFIG` 指到別處的測試執行個體鎖在它自己的設定檔旁，不會與真正的執行個體衝突）；
+  App 結束或崩潰（含 `kill -9`）時作業系統會自動釋放鎖，不會留下過期的鎖。若鎖檔無法建立（唯讀、檔案系統不支援），只印一行警告並照常啟動。
 - 選單列圖示很多時，macOS 會把放不下的圖示藏起來（有瀏海的螢幕特別明顯）；看不到「♪」時請按住 ⌘ 拖曳其他圖示騰出位置。
 - **結束與 helper**：從選單「結束」，以及登出、關機與 `NSRunningApplication.terminate()` 這些經由 AppKit 結束通知的路徑，都會先停掉 perl helper 再結束。
   Activity Monitor 的強制結束（`kill -9`）與 `SIGINT`／`SIGTERM`（Ctrl-C、`kill`）會直接殺掉行程，**不會**呼叫停止來源的程式；
@@ -118,6 +122,8 @@ cargo run --release -p musicat-app
 mode = "notch"                 # 目前只有 "notch"
 screen = "1"                   # 選填：顯示在哪個螢幕（螢幕 id）；省略 = 自動
 lyric_strip_visible = true     # 瀏海下方的歌詞條
+lyric_strip_lines = 1          # 歌詞條一次顯示幾行：1..=3（2 = 目前＋下一行；3 = 前一行＋目前＋下一行）
+traditional_lyrics = false     # 簡體中文歌詞轉成台灣繁體字形（只換字、不換用語；日文與繁體歌詞不動）
 
 [sources]                      # 歌詞來源開關；兩個都關 = 不查歌詞、不送任何請求
 lrclib = true
@@ -151,6 +157,8 @@ virtual_height = 32            # 10 到 400
 - **music.163.com**（網易雲）：先以「曲名 演出者」搜尋，再用搜尋結果裡找到的歌曲 id 取歌詞。
 
 標準的 HTTP 請求本身會讓對方看到你的 IP 位址與 User-Agent（固定為 `MusiCat`），網易雲的請求另帶固定的 Referer 標頭（`https://music.163.com/`）；這些之外不帶任何其他使用者資料。兩個歌詞來源可以個別在選單或 TOML 設定檔中關閉。
+
+點擊 Expanded 畫面的歌詞來源標籤時，是你的預設瀏覽器自己連線到該網站（與你在瀏覽器裡開那個網址相同）；MusiCat 只把網址交給系統，不會為此另外送出任何請求或資料。
 
 ## macOS 風險
 

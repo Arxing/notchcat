@@ -26,7 +26,7 @@ core-foundation = "0.10"
 # 見 docs/adr-0002-menu-bar-item.md）。objc2 家族皆為 MIT；只在 macOS 才相依，
 # 關掉預設的「全部框架」feature，只開用到的類別。版本與 GPUI spike（spikes/gpui-notch）相同。
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString", "NSArray", "NSEnumerator", "NSDictionary", "NSValue", "NSData", "NSNotification", "NSOperation", "block2"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString", "NSArray", "NSEnumerator", "NSDictionary", "NSValue", "NSData", "NSNotification", "NSOperation", "NSURL", "block2"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen", "NSWindow", "NSResponder", "NSView", "NSEvent", "NSApplication", "NSRunningApplication", "NSGraphics", "NSColor", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSButton", "NSControl", "NSMenu", "NSMenuItem", "NSCell", "NSImage", "NSWorkspace", "objc2-core-foundation"] }
 # 系統喚醒通知（power.rs：`addObserverForName:object:queue:usingBlock:` 的 block）。objc2 家族，MIT；已在 Cargo.lock。
 block2 = "0.6"
