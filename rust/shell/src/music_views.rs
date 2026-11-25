@@ -466,7 +466,7 @@ impl MusicView {
     fn render_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let s = self.shared.clone();
         let empty = || div().size_full().into_any_element();
-        // 同 Swift：active 模組不是音樂（沒在播放）時 Preview 不畫任何內容（DefaultShellContent 是 EmptyView）。
+        // active 模組不是音樂（沒有曲目）時 Preview 不畫任何內容（Swift DefaultShellContent 是 EmptyView）。
         if !s.music_is_active() {
             return empty();
         }
@@ -512,7 +512,11 @@ impl MusicView {
             .child(right);
 
         let mut root = div().size_full().flex().flex_col().child(wings);
-        if extra > 0.0 {
+        if extra <= 0.0 {
+            // 歌詞條收起（暫停或使用者折疊）：下次出現時從頭顯示目前行，不接著舊的捲動位置。
+            s.strip_marquee.reset();
+            s.strip_scroll.borrow_mut().reset();
+        } else {
             let rows = self.strip_content_element(snapshot, &state, window);
             // 歌詞條：外殼在這一段不塗黑，由內容畫 0.6 不透明的黑底與下方圓角（Swift LyricStripView）。
             // 高度就是模組回報的額外高度（隨行數變），列在其中垂直置中。

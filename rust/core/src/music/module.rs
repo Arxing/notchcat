@@ -1,6 +1,8 @@
 //! 音樂模組的狀態（移植自 Swift `Modules/Music/MusicModule.swift`；畫面在 `shell`）。
 //!
-//! - `is_active` = 目前快照的 `is_playing`（沒有快照或暫停都不是），同 Swift `monitor.isPlayingPublisher`。
+//! - `is_active` = 有目前快照（播放中或暫停中）。暫停時 Preview 仍顯示封面與靜止的音柱，展開直接進音樂頁；
+//!   系統回報沒有曲目才讓出瀏海。與 Swift 版不同（Swift 只在播放中 active）。
+//!   目前只有音樂一個模組；之後若加其他模組，暫停中的音樂會以 [`MusicModuleState::PRIORITY`] 蓋過它們。
 //! - Preview 額外高度 = [`lyric_strip_height`]（依歌詞條行數，一行為 [`LYRIC_STRIP_HEIGHT`]）當且僅當
 //!   `is_playing && strip_visible`，否則 0。沒有同步歌詞時歌詞條改顯示曲名，高度不變，所以高度與歌詞內容無關。
 //! - 訂閱者只在 `is_active` 或額外高度真的改變時被通知（Swift `removeDuplicates`）。
@@ -49,14 +51,12 @@ struct Inner {
 impl Inner {
     /// `(is_active, preview_extra_height)`，每次都從控制器與 `strip_visible` 現讀。
     fn compute(&self) -> (bool, f64) {
-        let playing = self
-            .controller
-            .state()
-            .snapshot
-            .is_some_and(|snapshot| snapshot.is_playing);
+        let snapshot = self.controller.state().snapshot;
+        let has_track = snapshot.is_some();
+        let playing = snapshot.is_some_and(|snapshot| snapshot.is_playing);
         let visible = self.strip_visible.load(Ordering::SeqCst);
         (
-            playing,
+            has_track,
             if playing && visible {
                 lyric_strip_height(self.strip_lines.load(Ordering::SeqCst))
             } else {
@@ -448,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn is_active_follows_playback() {
+    fn is_active_while_there_is_a_track() {
         let fx = Fixture::new();
         let values = Arc::new(Mutex::new(vec![fx.module.is_active()]));
         let (v, weak) = (values.clone(), Arc::downgrade(&fx.module));
@@ -459,7 +459,39 @@ mod tests {
         }));
         fx.play(true);
         fx.play(false);
-        assert_eq!(*lock(&values), [false, true, false]);
+        fx.source.send(None);
+        fx.spawner.run_until_stalled();
+        // 暫停仍是 active（仍通知一次，因為額外高度收掉了）；沒有曲目才不是。
+        assert_eq!(*lock(&values), [false, true, true, false]);
+    }
+
+    #[test]
+    fn a_paused_track_stays_active_without_the_lyric_strip() {
+        use crate::modules::ModuleManager;
+        let fx = Fixture::new();
+        let manager = ModuleManager::new();
+        manager.register(fx.module.clone());
+        fx.module.set_strip_lines(3);
+
+        // 啟動時就是暫停中的曲目。
+        fx.play(false);
+        assert_eq!(
+            manager.active_module_id().as_deref(),
+            Some(MusicModuleState::ID)
+        );
+        assert_eq!(manager.preview_extra_height(), 0.0);
+
+        // 繼續播放歌詞條回來；再暫停又收掉，模組仍 active。
+        fx.play(true);
+        assert_eq!(manager.preview_extra_height(), 56.0);
+        fx.play(false);
+        assert!(manager.active_module_id().is_some());
+        assert_eq!(manager.preview_extra_height(), 0.0);
+
+        // 系統回報沒有曲目才讓出瀏海。
+        fx.source.send(None);
+        fx.spawner.run_until_stalled();
+        assert_eq!(manager.active_module_id(), None);
     }
 
     #[test]
@@ -500,9 +532,11 @@ mod tests {
     fn folding_while_paused_changes_nothing_and_does_not_notify() {
         let fx = Fixture::new();
         fx.play(false);
+        // 初始值，加上「沒有曲目 → 暫停中」那一次。
+        assert_eq!(*lock(&fx.heights), [0.0, 0.0]);
         fx.module.set_strip_visible(false);
         fx.module.set_strip_visible(true);
-        assert_eq!(*lock(&fx.heights), [0.0]);
+        assert_eq!(*lock(&fx.heights), [0.0, 0.0]);
     }
 
     #[test]
