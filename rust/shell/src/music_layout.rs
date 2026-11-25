@@ -5,7 +5,7 @@
 //! 長度單位都是點（GPUI 的 `px` 即點，Retina 由縮放係數處理）。
 
 use musicat_core::lyrics::Lyrics;
-use musicat_core::music::presentation::playback_position;
+use musicat_core::music::presentation::{playback_position, LyricsStatus};
 use musicat_core::shell_logic::geometry::{ease_in_out, EXPANDED_HEIGHT};
 use musicat_core::types::TrackSnapshot;
 
@@ -300,6 +300,20 @@ pub fn control_side_widths(info_width: f64) -> (f64, f64) {
         (0.0, 0.0)
     }
 }
+
+/// 歌詞命中狀態的標籤（歌詞條顯示曲名時的小標，與 Expanded 控制列左側）。
+pub fn lyrics_status_label(status: LyricsStatus) -> &'static str {
+    match status {
+        LyricsStatus::Searching => "查詢中…",
+        LyricsStatus::NotFound => "沒有歌詞",
+        LyricsStatus::Plain => "純文字版",
+        LyricsStatus::Synced => "時間軸版",
+    }
+}
+/// 歌詞條上曲名與狀態小標的間距。
+pub const STRIP_TAG_SPACING: f64 = 6.0;
+/// Expanded 狀態標籤的不透明度：比下面的來源連結亮一點。
+pub const STATUS_LABEL_OPACITY: f64 = 0.7;
 
 /// 歌詞來源標籤的文字：網址的主機加上 ` ↗`（例如 `lrclib.net ↗`）。
 ///
@@ -816,6 +830,20 @@ mod tests {
         assert!(glyph_shapes(Glyph::Play, f64::NAN)
             .iter()
             .all(|s| s.points.iter().all(|p| p.0 == 0.0 && p.1 == 0.0)));
+    }
+
+    #[test]
+    fn each_lyrics_status_has_its_own_label() {
+        assert_eq!(
+            [
+                LyricsStatus::Searching,
+                LyricsStatus::NotFound,
+                LyricsStatus::Plain,
+                LyricsStatus::Synced,
+            ]
+            .map(lyrics_status_label),
+            ["查詢中…", "沒有歌詞", "純文字版", "時間軸版"]
+        );
     }
 
     #[test]

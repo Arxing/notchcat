@@ -53,8 +53,8 @@ use musicat_core::modules::{ModuleManager, ModuleState};
 use musicat_core::music::controller::{MusicController, MusicState};
 use musicat_core::music::module::{MusicModuleState, LYRIC_STRIP_OPACITY, LYRIC_STRIP_ROW_HEIGHT};
 use musicat_core::music::presentation::{
-    has_progress, progress_fraction, strip_content, strip_line_index, strip_rows, StripContent,
-    StripRow,
+    has_progress, lyrics_status, progress_fraction, strip_content, strip_line_index, strip_rows,
+    StripContent, StripRow,
 };
 use musicat_core::nowplaying::PlaybackCommand;
 use musicat_core::runtime::{Clock, Subscription};
@@ -570,8 +570,29 @@ impl MusicView {
                 StripContent::Title(t) | StripContent::Line(t) => t,
                 StripContent::None => String::new(),
             };
+            let label = lyrics_status_label(lyrics_status(lyrics, state.searching));
+            let tag = || {
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .text_size(px(SOURCE_LABEL_FONT_SIZE as f32))
+                    .line_height(px(LYRIC_STRIP_ROW_HEIGHT as f32))
+                    .text_color(white_a(SOURCE_LABEL_OPACITY))
+                    .child(label)
+            };
             return row_box()
-                .child(marquee(&s.strip_marquee, title, style(STRIP_TITLE_OPACITY)))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(STRIP_TAG_SPACING as f32))
+                // 左側放一份看不見的標籤，讓曲名維持在整列的正中央。
+                .child(tag().invisible())
+                .child(div().flex_1().min_w_0().child(marquee(
+                    &s.strip_marquee,
+                    title,
+                    style(STRIP_TITLE_OPACITY),
+                )))
+                .child(tag())
                 .into_any_element();
         };
 
@@ -965,6 +986,9 @@ impl MusicView {
         // 左側區域取代原本的「24 方塊 + flex_1」：flex_1 但基準寬 24，所以寬度仍等於右側的
         // 「flex_1 + 24 折疊開關」（見 `control_side_widths`），按鈕群位置不變。`min_w_0` + 裁切讓標籤
         // 再長也只會被截斷，不會撐寬這一側去推擠按鈕。
+        // 上行是歌詞命中狀態，下行是來源連結（沒有網址時只剩狀態，垂直置中）。
+        let state = s.state();
+        let status = lyrics_status_label(lyrics_status(state.lyrics.as_ref(), state.searching));
         let mut source = div()
             .flex_1()
             .flex_basis(px(CONTROL_ROW_HEIGHT as f32))
@@ -972,9 +996,19 @@ impl MusicView {
             .h(px(CONTROL_ROW_HEIGHT as f32))
             .overflow_hidden()
             .flex()
-            .flex_row()
-            .items_center();
-        if let Some(label) = s.state().lyrics_url.as_deref().and_then(source_label) {
+            .flex_col()
+            .items_start()
+            .justify_center()
+            .child(
+                div()
+                    .max_w_full()
+                    .truncate()
+                    .text_size(px(SOURCE_LABEL_FONT_SIZE as f32))
+                    .line_height(px(SOURCE_LABEL_LINE_HEIGHT as f32))
+                    .text_color(white_a(STATUS_LABEL_OPACITY))
+                    .child(status),
+            );
+        if let Some(label) = state.lyrics_url.as_deref().and_then(source_label) {
             let host = label
                 .strip_suffix(SOURCE_LABEL_SUFFIX)
                 .unwrap_or(&label)

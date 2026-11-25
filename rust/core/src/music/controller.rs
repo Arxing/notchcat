@@ -46,6 +46,8 @@ pub struct MusicState {
     pub lyrics: Option<Lyrics>,
     /// 歌詞來源頁面（`https://` 開頭）；沒有歌詞時為 `None`。
     pub lyrics_url: Option<String>,
+    /// 目前曲目的歌詞查詢還沒有結果。沒有查詢（沒有曲目、缺演出者）時為 `false`。
+    pub searching: bool,
 }
 
 /// 依開關產生要顯示的歌詞。
@@ -177,6 +179,8 @@ impl MusicController {
                 core.source = None;
                 core.state.lyrics = None;
                 core.state.lyrics_url = None;
+                // 有 key 就一定會在下面開始查詢。
+                core.state.searching = key.is_some();
             }
             (
                 core.state != before,
@@ -228,8 +232,8 @@ impl MusicController {
     }
 
     /// 查詢完成：曲目可能在請求期間改變；key 或世代不同（含 A→B→A 的舊 A）就丟棄。
-    /// 這裡是唯一拆開 [`LyricsHit`] 的地方：歌詞與網址在同一個鎖內一起寫入，
-    /// 歌詞或網址任一改變才通知（兩者都相同就不通知）。
+    /// 這裡是唯一拆開 [`LyricsHit`] 的地方：歌詞與網址在同一個鎖內一起寫入。
+    /// 查詢中結束（包含沒命中），或歌詞、網址任一改變才通知。
     fn finish_lookup(&self, key: &str, generation: u64, result: Option<LyricsHit>) {
         let (lyrics, lyrics_url) = match result {
             Some(hit) => (Some(hit.lyrics), Some(hit.url)),
@@ -237,12 +241,14 @@ impl MusicController {
         };
         let state = {
             let mut core = lock(&self.core);
-            if core.generation != generation
-                || core.current_key.as_deref() != Some(key)
-                || (core.source == lyrics && core.state.lyrics_url == lyrics_url)
+            if core.generation != generation || core.current_key.as_deref() != Some(key) {
+                return;
+            }
+            if !core.state.searching && core.source == lyrics && core.state.lyrics_url == lyrics_url
             {
                 return;
             }
+            core.state.searching = false;
             core.state.lyrics = displayed(lyrics.as_ref(), core.traditional);
             core.source = lyrics;
             core.state.lyrics_url = lyrics_url;
@@ -664,6 +670,67 @@ mod tests {
     }
 
     #[test]
+    fn searching_is_set_while_the_lookup_is_in_flight_and_cleared_by_a_hit() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        assert!(!controller.state().searching);
+
+        fx.emit(song("Song A"));
+        assert!(controller.state().searching);
+        fx.respond(0, plain("lyrics of A"));
+        assert!(!controller.state().searching);
+
+        // 同一首只是暫停：不重查，也不回到查詢中。
+        fx.emit(snapshot("Song A", Some("Artist"), false, None));
+        assert!(!controller.state().searching);
+        // 換歌重新查；沒有曲目就沒有查詢。
+        fx.emit(song("Song B"));
+        assert!(controller.state().searching);
+        fx.emit(None);
+        assert!(!controller.state().searching);
+    }
+
+    #[test]
+    fn a_miss_ends_the_search_and_notifies_once() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+        let seen: Arc<Mutex<Vec<MusicState>>> = Arc::default();
+        let s = seen.clone();
+        let _sub = controller.subscribe(Box::new(move |state| lock(&s).push(state.clone())));
+
+        fx.respond(0, None);
+
+        assert!(!controller.state().searching);
+        assert_eq!(controller.state().lyrics, None);
+        assert_eq!(lock(&seen).len(), 1);
+    }
+
+    #[test]
+    fn a_track_without_artist_is_not_searching() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+        fx.emit(snapshot("No Artist Song", None, true, None));
+        assert!(!controller.state().searching);
+    }
+
+    #[test]
+    fn a_stale_result_does_not_end_the_new_tracks_search() {
+        let fx = Fixture::new();
+        let controller = MusicController::new(
+            fx.monitor.clone(),
+            fx.resolver.clone(),
+            None,
+            Arc::new(DetachingSpawner(fx.spawner.clone())),
+        );
+        fx.emit(song("Song A"));
+        fx.emit(song("Song B"));
+        fx.respond(0, None);
+        assert!(controller.state().searching);
+    }
+
+    #[test]
     fn no_snapshot_clears_lyrics() {
         let fx = Fixture::new();
         let controller = fx.controller(None);
@@ -953,12 +1020,14 @@ mod tests {
         fx.respond(0, plain("words"));
         assert_eq!(lock(&seen).len(), 2);
         assert_eq!(lock(&seen)[1].lyrics, plain("words"));
-        // 查無結果且歌詞本來就是 None：沒有變化，不通知。
+        // 查無結果：歌詞仍是 None，但「查詢中」結束了，畫面要換標籤，所以通知。
         fx.emit(song("Song B"));
         assert_eq!(lock(&seen).len(), 3);
         assert_eq!(lock(&seen)[2].lyrics, None);
+        assert!(lock(&seen)[2].searching);
         fx.respond(1, None);
-        assert_eq!(lock(&seen).len(), 3);
+        assert_eq!(lock(&seen).len(), 4);
+        assert!(!lock(&seen)[3].searching);
     }
 
     /// 通知在鎖外送出，所以重入（回呼內又觸發較新的變化）時，較新的通知可能先於較舊的抵達。
