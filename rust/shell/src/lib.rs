@@ -54,7 +54,7 @@ pub enum ShellEvent {
 ///   （`entity.clone().into_any_element()`），在該 entity 上 `cx.notify()`，GPUI 只重繪那個 view，
 ///   不必經過外殼。
 /// - [`preview_extra_height`](Self::preview_extra_height)：active 模組要的 Preview 額外高度
-///   （`ModuleManager::preview_extra_height()`）。外殼每一拍（16–40 ms）讀一次並夾到 `0..=28`；
+///   （`ModuleManager::preview_extra_height()`）。外殼每一拍（16–40 ms）讀一次並夾到 `0..=56`（`MAX_PREVIEW_EXTRA_HEIGHT`）；
 ///   改變時 Preview 的高度與 hover 範圍跟著以同樣的動畫改變。
 /// - [`on_expand`](Self::on_expand)：每次**新**展開呼叫一次（`HoverOutput::just_expanded`）。
 ///   app 在這裡呼叫 `ModuleManager::reset_selection_to_active()`（spec 5.3）。在外殼的輪詢更新中途呼叫，
@@ -73,7 +73,7 @@ pub trait ShellContent: 'static {
     /// Expanded（展開）時的內容。
     fn expanded(&self, window: &mut Window, cx: &mut App) -> AnyElement;
 
-    /// active 模組要求的 Preview 額外高度（點）；外殼夾到 `0..=28`，NaN 視為 0。
+    /// active 模組要求的 Preview 額外高度（點）；外殼夾到 `0..=56`，NaN 視為 0。
     fn preview_extra_height(&self) -> f64;
 
     /// 每次新展開時呼叫一次。

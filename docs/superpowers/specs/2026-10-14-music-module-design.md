@@ -313,7 +313,7 @@ Preview 的條寬是「瀏海寬 + 160pt」，瀏海本體是螢幕硬體的挖�
 **Shell 的配合（本模組唯一對 Shell 的改動）：** Preview 的高度要能隨模組需求變動。
 
 - `NotchModule` 新增 `var previewExtraHeightPublisher: AnyPublisher<CGFloat, Never>`，預設實作回傳固定的 0，既有模組不受影響。
-- `ModuleManager` 對外提供「目前 active 模組要求的額外高度」，Shell 據此加高 Preview，上限夾在一個常數（建議 28pt）內。
+- `ModuleManager` 對外提供「目前 active 模組要求的額外高度」，Shell 據此加高 Preview，上限夾在一個常數（建議 28pt；Rust 版 MusiCat 2026-11-25 起為 56pt，放得下三行歌詞條）內。
 - Preview 實際高度 = 瀏海高度 + 額外高度。額外高度變動時要有動畫，且 Preview 的 hover 判定範圍必須跟著更新，歌詞條範圍內也算 hover。
 - 固定大小的容器必須容得下 Preview 加上額外高度的最大值（目前 Expanded 的 180pt 遠大於此，所以容器大小不變）。
 - Music 在「不 active」、「已折疊」兩種情形下回報 0。

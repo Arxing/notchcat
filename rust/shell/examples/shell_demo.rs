@@ -6,7 +6,7 @@
 //!
 //! 環境變數：
 //! - `MUSICAT_DEMO_SECS`：幾秒後自動結束（預設 60）。
-//! - `MUSICAT_DEMO_EXTRA`：歌詞條（Preview 額外高度）出現時的高度（點，預設 24；外殼夾到 0…28）。
+//! - `MUSICAT_DEMO_EXTRA`：歌詞條（Preview 額外高度）出現時的高度（點，預設 24；外殼夾到 0…56）。
 //! - `MUSICAT_DEMO_TOGGLE_SECS`：每幾秒切換一次歌詞條的有無（預設 6；0 = 一直顯示）。每次切換印 `extra=..`。
 //!   歌詞條是外殼黑底下方、透明區域上的 0.6 不透明黑色帶（Preview 有額外高度時外殼只塗瀏海高度）。
 //! - `MUSICAT_DEMO_BLINK=1`：第 3 秒 `set_visible(false)`、第 4 秒 `set_visible(true)`（驗證隱藏／再顯示）。

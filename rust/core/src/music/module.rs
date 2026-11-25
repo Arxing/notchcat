@@ -546,6 +546,24 @@ mod tests {
         assert_eq!(manager.preview_extra_height(), 0.0);
     }
 
+    /// 回歸：外殼只看得到管理器夾過上限的高度；上限比 3 行歌詞條矮時，歌詞會被切掉。
+    #[test]
+    fn every_line_count_reaches_the_shell_unclipped() {
+        use crate::modules::ModuleManager;
+        let fx = Fixture::new();
+        let manager = ModuleManager::new();
+        manager.register(fx.module.clone());
+        fx.play(true);
+        for lines in 1..=STRIP_MAX_LINES {
+            fx.module.set_strip_lines(lines);
+            assert_eq!(
+                manager.preview_extra_height(),
+                lyric_strip_height(lines),
+                "lines = {lines}"
+            );
+        }
+    }
+
     #[test]
     fn dropping_the_module_unsubscribes_from_the_controller() {
         let fx = Fixture::new();

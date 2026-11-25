@@ -297,9 +297,9 @@ mod tests {
     fn preview_extra_is_clamped_negative_huge_and_nan() {
         let g = geometry();
         assert_eq!(mode_size(ShellMode::Preview, &g, -5.0).h, 32.0);
-        assert_eq!(mode_size(ShellMode::Preview, &g, 99.0).h, 60.0);
+        assert_eq!(mode_size(ShellMode::Preview, &g, 99.0).h, 88.0);
         assert_eq!(mode_size(ShellMode::Preview, &g, f64::NAN).h, 32.0);
-        assert_eq!(mode_size(ShellMode::Preview, &g, f64::INFINITY).h, 60.0);
+        assert_eq!(mode_size(ShellMode::Preview, &g, f64::INFINITY).h, 88.0);
         assert_eq!(mode_size(ShellMode::Preview, &g, f64::NEG_INFINITY).h, 32.0);
     }
 
@@ -335,8 +335,8 @@ mod tests {
     #[test]
     fn container_grows_to_a_tall_notch_when_preview_is_taller_than_expanded() {
         let g = geometry_with(200.0, 400.0);
-        // Preview 400 + 28 超過 Expanded 的 180：容器跟著 Preview 走。
-        assert_eq!(container_size(&g).h, 428.0);
+        // Preview 400 + 56 超過 Expanded 的 180：容器跟著 Preview 走。
+        assert_eq!(container_size(&g).h, 456.0);
     }
 
     #[test]
@@ -522,9 +522,9 @@ mod tests {
         assert_eq!(s.outer, Size { w: 345.0, h: 56.0 });
         assert_eq!(s.fill, Size { w: 345.0, h: 32.0 });
         assert_eq!(s.radius, 0.0);
-        // 額外高度被夾到 28。
+        // 額外高度被夾到 56。
         let s = shape_layout(ShellMode::Preview, &g185(), 99.0);
-        assert_eq!(s.outer.h, 60.0);
+        assert_eq!(s.outer.h, 88.0);
         assert_eq!(s.fill.h, 32.0);
         assert_eq!(s.radius, 0.0);
     }
