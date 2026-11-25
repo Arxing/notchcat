@@ -48,12 +48,13 @@ use gpui::{
     Context, Entity, FontWeight, Hsla, ObjectFit, PathBuilder, Pixels, RenderImage, SharedString,
     StyledImage, Task, WeakEntity, Window,
 };
-use musicat_core::lyrics::LyricLine;
+use musicat_core::lyrics::{LyricLine, Lyrics};
 use musicat_core::modules::{ModuleManager, ModuleState};
 use musicat_core::music::controller::{MusicController, MusicState};
 use musicat_core::music::module::{MusicModuleState, LYRIC_STRIP_OPACITY, LYRIC_STRIP_ROW_HEIGHT};
 use musicat_core::music::presentation::{
-    has_progress, progress_fraction, strip_view, StripRow, StripView,
+    has_progress, progress_fraction, strip_content, strip_line_index, strip_rows, StripContent,
+    StripRow,
 };
 use musicat_core::nowplaying::PlaybackCommand;
 use musicat_core::runtime::{Clock, Subscription};
@@ -106,6 +107,8 @@ struct Shared {
     /// 被快取擠出、等下一次 render（有 `Window`）時從 GPU 圖集釋放的封面。
     released: RefCell<Vec<Arc<RenderImage>>>,
     strip_marquee: MarqueeState,
+    /// 歌詞條的換行捲動。
+    strip_scroll: RefCell<StripScroll>,
     title_marquee: MarqueeState,
     artist_marquee: MarqueeState,
     lyric_scroll: RefCell<LyricScroll>,
@@ -237,6 +240,7 @@ impl MusicShellContent {
             },
             released: RefCell::new(Vec::new()),
             strip_marquee: MarqueeState::new(),
+            strip_scroll: RefCell::new(StripScroll::default()),
             title_marquee: MarqueeState::new(),
             artist_marquee: MarqueeState::new(),
             lyric_scroll: RefCell::new(LyricScroll::default()),
@@ -411,6 +415,8 @@ impl ShellContent for MusicShellContent {
             ShellEvent::Collapsed => {
                 s.mode.set(ShellMode::Preview);
                 s.strip_marquee.reset();
+                // 歌詞條重新出現：直接顯示目前行，不從展開前的舊行捲過來。
+                s.strip_scroll.borrow_mut().reset();
             }
             ShellEvent::Visible(v) => s.visible.set(v),
         }
@@ -448,7 +454,7 @@ impl Render for MusicView {
             }
         }
         match self.kind {
-            ShellMode::Preview => self.render_preview(cx),
+            ShellMode::Preview => self.render_preview(window, cx),
             ShellMode::Expanded => self.render_expanded(window, cx),
         }
     }
@@ -457,7 +463,7 @@ impl Render for MusicView {
 impl MusicView {
     // ------------------------------------------------------------------ Preview
 
-    fn render_preview(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let s = self.shared.clone();
         let empty = || div().size_full().into_any_element();
         // 同 Swift：active 模組不是音樂（沒在播放）時 Preview 不畫任何內容（DefaultShellContent 是 EmptyView）。
@@ -507,59 +513,7 @@ impl MusicView {
 
         let mut root = div().size_full().flex().flex_col().child(wings);
         if extra > 0.0 {
-            let view = strip_view(
-                Some(snapshot),
-                state.lyrics.as_ref(),
-                s.clock.now(),
-                s.module_state.strip_lines(),
-            );
-            let style = |opacity: f64| MarqueeStyle {
-                font_size: STRIP_FONT_SIZE as f32,
-                weight: FontWeight::MEDIUM,
-                color: white_a(opacity),
-                line_height: LYRIC_STRIP_ROW_HEIGHT as f32,
-            };
-            // 每一列固定高度；目前行與曲名用跑馬燈（太長會捲動），前後文只截斷（不捲動，避免多行同時動）。
-            let row_box = || {
-                div()
-                    .w_full()
-                    .h(px(LYRIC_STRIP_ROW_HEIGHT as f32))
-                    .flex_none()
-                    .overflow_hidden()
-            };
-            let rows: Vec<AnyElement> = match view {
-                StripView::Rows(rows) => rows
-                    .into_iter()
-                    .map(|StripRow { text, current }| {
-                        if current {
-                            row_box()
-                                .child(marquee(&s.strip_marquee, text, style(STRIP_LINE_OPACITY)))
-                                .into_any_element()
-                        } else {
-                            row_box()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_center()
-                                .text_size(px(STRIP_FONT_SIZE as f32))
-                                .line_height(px(LYRIC_STRIP_ROW_HEIGHT as f32))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(white_a(STRIP_CONTEXT_OPACITY))
-                                .child(text)
-                                .into_any_element()
-                        }
-                    })
-                    .collect(),
-                StripView::Title(t) => vec![row_box()
-                    .child(marquee(&s.strip_marquee, t, style(STRIP_TITLE_OPACITY)))
-                    .into_any_element()],
-                StripView::None => vec![row_box()
-                    .child(marquee(
-                        &s.strip_marquee,
-                        String::new(),
-                        style(STRIP_TITLE_OPACITY),
-                    ))
-                    .into_any_element()],
-            };
+            let rows = self.strip_content_element(snapshot, &state, window);
             // 歌詞條：外殼在這一段不塗黑，由內容畫 0.6 不透明的黑底與下方圓角（Swift LyricStripView）。
             // 高度就是模組回報的額外高度（隨行數變），列在其中垂直置中。
             root = root.child(
@@ -573,10 +527,94 @@ impl MusicView {
                     .flex()
                     .flex_col()
                     .justify_center()
-                    .children(rows),
+                    .child(rows),
             );
         }
         root.into_any_element()
+    }
+
+    /// 歌詞條黑底裡的內容：同步歌詞時是會換行捲動的歌詞列，否則是單列曲名。
+    fn strip_content_element(
+        &self,
+        snapshot: &TrackSnapshot,
+        state: &MusicState,
+        window: &mut Window,
+    ) -> AnyElement {
+        let s = &self.shared;
+        let now = s.clock.now();
+        let lines = s.module_state.strip_lines();
+        let style = |opacity: f64| MarqueeStyle {
+            font_size: STRIP_FONT_SIZE as f32,
+            weight: FontWeight::MEDIUM,
+            color: white_a(opacity),
+            line_height: LYRIC_STRIP_ROW_HEIGHT as f32,
+        };
+        // 每一列固定高度；目前行與曲名用跑馬燈（太長會捲動），前後文只截斷（不捲動，避免多行同時動）。
+        let row_box = || {
+            div()
+                .w_full()
+                .h(px(LYRIC_STRIP_ROW_HEIGHT as f32))
+                .flex_none()
+                .overflow_hidden()
+        };
+
+        let lyrics = state.lyrics.as_ref();
+        let current = strip_line_index(Some(snapshot), lyrics, now);
+        let (Some(current), Some(Lyrics::Synced(all))) = (current, lyrics) else {
+            s.strip_scroll.borrow_mut().reset();
+            let title = match strip_content(Some(snapshot), lyrics, now) {
+                StripContent::Title(t) | StripContent::Line(t) => t,
+                StripContent::None => String::new(),
+            };
+            return row_box()
+                .child(marquee(&s.strip_marquee, title, style(STRIP_TITLE_OPACITY)))
+                .into_any_element();
+        };
+
+        let position = {
+            let mut scroll = s.strip_scroll.borrow_mut();
+            let t = s.t0.elapsed().as_secs_f64();
+            let position = scroll.follow((snapshot.title.clone(), all.len(), lines), current, t);
+            if scroll.is_animating(t) {
+                window.request_animation_frame();
+            }
+            position
+        };
+
+        // 固定高度的視窗，列依捲動位置絕對定位；滑出視窗的部分被裁掉。
+        div()
+            .relative()
+            .w_full()
+            .h(px((f64::from(lines) * LYRIC_STRIP_ROW_HEIGHT) as f32))
+            .flex_none()
+            .overflow_hidden()
+            .children(strip_rows(all, position, lines).into_iter().map(
+                |StripRow {
+                     index,
+                     text,
+                     slot,
+                     emphasis,
+                 }| {
+                    let opacity = strip_row_opacity(emphasis);
+                    let row = row_box()
+                        .absolute()
+                        .left_0()
+                        .top(px((slot * LYRIC_STRIP_ROW_HEIGHT) as f32));
+                    if index == current {
+                        row.child(marquee(&s.strip_marquee, text, style(opacity)))
+                    } else {
+                        row.whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_center()
+                            .text_size(px(STRIP_FONT_SIZE as f32))
+                            .line_height(px(LYRIC_STRIP_ROW_HEIGHT as f32))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(white_a(opacity))
+                            .child(text)
+                    }
+                },
+            ))
+            .into_any_element()
     }
 
     // ------------------------------------------------------------------ 封面

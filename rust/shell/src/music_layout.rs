@@ -69,6 +69,64 @@ pub const STRIP_LINE_OPACITY: f64 = 0.95;
 pub const STRIP_TITLE_OPACITY: f64 = 0.7;
 /// 多行歌詞條裡，前後文行（非目前行）的文字不透明度。
 pub const STRIP_CONTEXT_OPACITY: f64 = 0.45;
+/// 歌詞條某一列的文字不透明度：依強調程度在前後文與目前行之間內插。
+pub fn strip_row_opacity(emphasis: f64) -> f64 {
+    STRIP_CONTEXT_OPACITY + (STRIP_LINE_OPACITY - STRIP_CONTEXT_OPACITY) * emphasis.clamp(0.0, 1.0)
+}
+
+/// 歌詞條一次跳超過這麼多行（拖動進度）時直接換，不做捲動動畫。
+pub const STRIP_MAX_ANIMATED_STEP: usize = 2;
+
+/// 歌詞條的換行捲動：目前行改變時，位置在 [`LYRIC_SCROLL_SECONDS`] 內以 ease-in-out 從舊行走到新行。
+/// 位置是「行索引」（捲動中為小數）；時間是任意起點的單調秒數。
+#[derive(Default, Debug)]
+pub struct StripScroll {
+    /// 哪一份歌詞、幾列（曲名、歌詞行數、顯示行數）；改變時直接跳。
+    key: Option<(String, usize, u8)>,
+    from: f64,
+    to: usize,
+    started: Option<f64>,
+}
+
+impl StripScroll {
+    /// 目前行是 `index`；回傳 `now` 時要畫的位置。
+    pub fn follow(&mut self, key: (String, usize, u8), index: usize, now: f64) -> f64 {
+        if self.key.as_ref() != Some(&key) || index.abs_diff(self.to) > STRIP_MAX_ANIMATED_STEP {
+            *self = StripScroll {
+                key: Some(key),
+                from: index as f64,
+                to: index,
+                started: None,
+            };
+        } else if index != self.to {
+            // 動畫中又換行：從目前畫到的位置接著走。
+            self.from = self.position(now);
+            self.to = index;
+            self.started = Some(now);
+        }
+        self.position(now)
+    }
+
+    /// `now` 時的位置。
+    pub fn position(&self, now: f64) -> f64 {
+        let to = self.to as f64;
+        match self.started {
+            Some(t) => animated_offset(self.from, to, now - t, LYRIC_SCROLL_SECONDS),
+            None => to,
+        }
+    }
+
+    /// 還在捲動中（畫面要繼續要求畫格）。
+    pub fn is_animating(&self, now: f64) -> bool {
+        self.started.is_some_and(|t| now - t < LYRIC_SCROLL_SECONDS)
+    }
+
+    /// 下一次 [`Self::follow`] 直接跳到位置。
+    pub fn reset(&mut self) {
+        *self = StripScroll::default();
+    }
+}
+
 /// 歌詞條重讀目前行的週期（`TimelineView(.periodic(by: 0.25))`）。
 pub const STRIP_TICK_SECONDS: f64 = 0.25;
 
@@ -935,6 +993,73 @@ mod tests {
             assert!(STRIP_CORNER_RADIUS <= height);
         }
         const { assert!(STRIP_CONTEXT_OPACITY < STRIP_TITLE_OPACITY) };
+    }
+
+    fn strip_key(lines: u8) -> (String, usize, u8) {
+        ("Song".into(), 40, lines)
+    }
+
+    #[test]
+    fn strip_scroll_starts_at_the_first_line_without_animating() {
+        let mut sc = StripScroll::default();
+        close(sc.follow(strip_key(1), 7, 100.0), 7.0);
+        assert!(!sc.is_animating(100.0));
+    }
+
+    #[test]
+    fn strip_scroll_glides_to_the_next_line() {
+        let mut sc = StripScroll::default();
+        sc.follow(strip_key(1), 7, 100.0);
+        // 換行那一刻還在舊位置，之後往新行走。
+        close(sc.follow(strip_key(1), 8, 101.0), 7.0);
+        assert!(sc.is_animating(101.0));
+        let mid = sc.follow(strip_key(1), 8, 101.0 + LYRIC_SCROLL_SECONDS / 2.0);
+        close(mid, 7.5);
+        close(
+            sc.follow(strip_key(1), 8, 101.0 + LYRIC_SCROLL_SECONDS),
+            8.0,
+        );
+        // 時間差有浮點誤差，取剛過終點的時刻。
+        assert!(!sc.is_animating(101.001 + LYRIC_SCROLL_SECONDS));
+    }
+
+    #[test]
+    fn strip_scroll_retargets_from_where_it_is() {
+        let mut sc = StripScroll::default();
+        sc.follow(strip_key(1), 0, 0.0);
+        sc.follow(strip_key(1), 1, 1.0);
+        let half = 1.0 + LYRIC_SCROLL_SECONDS / 2.0;
+        close(sc.follow(strip_key(1), 2, half), 0.5);
+        close(sc.position(half + LYRIC_SCROLL_SECONDS), 2.0);
+    }
+
+    #[test]
+    fn strip_scroll_jumps_on_seeks_new_lyrics_new_line_count_and_reset() {
+        let mut sc = StripScroll::default();
+        sc.follow(strip_key(1), 10, 0.0);
+        // 往前、往後的大跳（拖動進度）都直接換。
+        close(sc.follow(strip_key(1), 13, 1.0), 13.0);
+        close(sc.follow(strip_key(1), 4, 2.0), 4.0);
+        assert!(!sc.is_animating(2.0));
+        // 剛好兩行仍做動畫。
+        close(sc.follow(strip_key(1), 6, 3.0), 4.0);
+        // 行數設定改了、換歌了：直接跳。
+        close(sc.follow(strip_key(3), 7, 4.0), 7.0);
+        close(sc.follow(("Other".into(), 40, 3), 8, 5.0), 8.0);
+        sc.reset();
+        close(sc.follow(("Other".into(), 40, 3), 9, 6.0), 9.0);
+        assert!(!sc.is_animating(6.0));
+    }
+
+    #[test]
+    fn strip_row_opacity_interpolates_between_context_and_current() {
+        close(strip_row_opacity(0.0), STRIP_CONTEXT_OPACITY);
+        close(strip_row_opacity(1.0), STRIP_LINE_OPACITY);
+        close(
+            strip_row_opacity(0.5),
+            (STRIP_CONTEXT_OPACITY + STRIP_LINE_OPACITY) / 2.0,
+        );
+        close(strip_row_opacity(7.0), STRIP_LINE_OPACITY);
     }
 
     #[test]
