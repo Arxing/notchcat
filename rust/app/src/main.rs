@@ -338,6 +338,7 @@ mod macos {
         }
         let controller =
             MusicController::new(monitor.clone(), resolver.clone(), control, spawner.clone());
+        controller.set_traditional_lyrics(cfg.traditional_lyrics);
         let module_state = Arc::new(MusicModuleState::with_strip_lines(
             controller.clone(),
             Arc::new(AtomicBool::new(cfg.lyric_strip_visible)),
@@ -629,6 +630,13 @@ mod macos {
                 Effect::SetLyricStripLines(lines) => {
                     log!("lyric strip lines: {lines}");
                     st.module_state.set_strip_lines(lines);
+                    if let Some(shell) = &st.shell {
+                        shell.refresh();
+                    }
+                }
+                Effect::SetTraditionalLyrics(on) => {
+                    log!("traditional chinese lyrics: {on}");
+                    st.controller.set_traditional_lyrics(on);
                     if let Some(shell) = &st.shell {
                         shell.refresh();
                     }

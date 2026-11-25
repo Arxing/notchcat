@@ -8,6 +8,7 @@ pub mod netease;
 pub mod normalizer;
 pub mod provider;
 pub mod repository;
+pub mod traditional;
 
 pub use identity::TrackIdentity;
 pub use normalizer::identity_from;

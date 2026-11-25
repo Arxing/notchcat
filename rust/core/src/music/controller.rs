@@ -8,6 +8,9 @@
 //! 守門同時比對世代計數（[`Core::generation`]）：A→B→A 時，第一個 A 的查詢與第二個 A 的 key 相同，
 //! 只比 key 擋不住它；世代每次換曲都加一，所以被取代的查詢一定過期。
 //!
+//! 簡轉繁（[`MusicController::set_traditional_lyrics`]）只影響顯示：控制器另外保留提供者給的原始歌詞，
+//! 開關切換時從原始版本重新產生 [`MusicState::lyrics`]，不重查。
+//!
 //! 並行：狀態（快照、歌詞、目前 key、世代、查詢把手）由單一 mutex 保護；通知訂閱者一律在**鎖外**，
 //! 所以回呼內可以再讀 `state()` 或訂閱。`spawn` 與舊把手的 drop 也都在鎖外
 //! （有的執行器會在 `spawn` 內就地執行，或在 drop 把手時同步執行取消邏輯）。
@@ -27,6 +30,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use crate::lyrics::normalizer::identity_from;
 use crate::lyrics::repository::LyricsResolving;
+use crate::lyrics::traditional::to_traditional;
 use crate::lyrics::{Lyrics, LyricsHit};
 use crate::nowplaying::{NowPlayingMonitor, PlaybackCommand, PlaybackControl};
 use crate::runtime::{lock, Notifier, Spawner, Subscription, TaskHandle};
@@ -38,14 +42,30 @@ use crate::types::TrackSnapshot;
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct MusicState {
     pub snapshot: Option<TrackSnapshot>,
+    /// 要顯示的歌詞（開了簡轉繁時是轉換後的版本）。
     pub lyrics: Option<Lyrics>,
     /// 歌詞來源頁面（`https://` 開頭）；沒有歌詞時為 `None`。
     pub lyrics_url: Option<String>,
 }
 
+/// 依開關產生要顯示的歌詞。
+fn displayed(source: Option<&Lyrics>, traditional: bool) -> Option<Lyrics> {
+    source.map(|lyrics| {
+        if traditional {
+            to_traditional(lyrics)
+        } else {
+            lyrics.clone()
+        }
+    })
+}
+
 #[derive(Default)]
 struct Core {
     state: MusicState,
+    /// 提供者給的原始歌詞；`state.lyrics` 由它（依 `traditional`）產生，兩者永遠一起設定、一起清除。
+    source: Option<Lyrics>,
+    /// 歌詞轉繁體中文開關。
+    traditional: bool,
     /// 目前曲目的 `cache_key`；沒有 identity（沒有快照、缺演出者…）時為 `None`。
     current_key: Option<String>,
     /// 進行中的查詢；drop 即取消。
@@ -124,6 +144,22 @@ impl MusicController {
         }
     }
 
+    /// 開或關「歌詞轉繁體中文」（見 [`to_traditional`]：日文與本來就是繁體的歌詞不受影響）。
+    /// 立即套用到目前的歌詞與之後查到的歌詞；顯示內容真的改變時才通知訂閱者。
+    pub fn set_traditional_lyrics(&self, on: bool) {
+        let state = {
+            let mut core = lock(&self.core);
+            core.traditional = on;
+            let lyrics = displayed(core.source.as_ref(), on);
+            if core.state.lyrics == lyrics {
+                return;
+            }
+            core.state.lyrics = lyrics;
+            core.state.clone()
+        };
+        self.notifier.notify(&state);
+    }
+
     fn apply(self: &Arc<Self>, new: Option<TrackSnapshot>) {
         let identity = new.as_ref().and_then(identity_from);
         let key = identity.as_ref().map(|i| i.cache_key());
@@ -138,6 +174,7 @@ impl MusicController {
                 core.current_key = key.clone();
                 core.generation += 1;
                 old_lookup = core.lookup.take();
+                core.source = None;
                 core.state.lyrics = None;
                 core.state.lyrics_url = None;
             }
@@ -202,11 +239,12 @@ impl MusicController {
             let mut core = lock(&self.core);
             if core.generation != generation
                 || core.current_key.as_deref() != Some(key)
-                || (core.state.lyrics == lyrics && core.state.lyrics_url == lyrics_url)
+                || (core.source == lyrics && core.state.lyrics_url == lyrics_url)
             {
                 return;
             }
-            core.state.lyrics = lyrics;
+            core.state.lyrics = displayed(lyrics.as_ref(), core.traditional);
+            core.source = lyrics;
             core.state.lyrics_url = lyrics_url;
             core.state.clone()
         };
@@ -988,5 +1026,90 @@ mod tests {
         fx.respond(0, plain("words"));
 
         assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    const SIMPLIFIED: &str = "我们的时间过得很快";
+    const TRADITIONAL: &str = "我們的時間過得很快";
+
+    #[test]
+    fn lyrics_are_shown_as_provided_by_default() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+        fx.respond(0, plain(SIMPLIFIED));
+        assert_eq!(controller.state().lyrics, plain(SIMPLIFIED));
+    }
+
+    #[test]
+    fn traditional_toggle_converts_current_lyrics_and_back_without_refetching() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+        fx.respond(0, plain(SIMPLIFIED));
+        let url = controller.state().lyrics_url;
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        let _sub = controller.subscribe(Box::new(move |s| lock(&log).push(s.lyrics.clone())));
+
+        controller.set_traditional_lyrics(true);
+        assert_eq!(controller.state().lyrics, plain(TRADITIONAL));
+        // 同值再設一次不通知。
+        controller.set_traditional_lyrics(true);
+        controller.set_traditional_lyrics(false);
+        assert_eq!(controller.state().lyrics, plain(SIMPLIFIED));
+
+        assert_eq!(*lock(&seen), [plain(TRADITIONAL), plain(SIMPLIFIED)]);
+        assert_eq!(
+            controller.state().lyrics_url,
+            url,
+            "source url is untouched"
+        );
+        assert_eq!(fx.resolver.requested().len(), 1, "no second lookup");
+    }
+
+    #[test]
+    fn lyrics_arriving_while_the_toggle_is_on_are_converted() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        controller.set_traditional_lyrics(true);
+        fx.emit(song("Song A"));
+        fx.respond(0, plain(SIMPLIFIED));
+        assert_eq!(controller.state().lyrics, plain(TRADITIONAL));
+
+        // 換歌後開關仍然有效。
+        fx.emit(song("Song B"));
+        fx.respond(1, plain("这里"));
+        assert_eq!(controller.state().lyrics, plain("這裡"));
+    }
+
+    #[test]
+    fn toggling_after_a_track_change_does_not_bring_back_old_lyrics() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+        fx.respond(0, plain(SIMPLIFIED));
+        fx.emit(song("Song B"));
+
+        controller.set_traditional_lyrics(true);
+        controller.set_traditional_lyrics(false);
+
+        assert_eq!(controller.state().lyrics, None);
+    }
+
+    #[test]
+    fn toggling_with_lyrics_that_need_no_conversion_does_not_notify() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+        fx.respond(0, plain("words"));
+        let count = Arc::new(AtomicUsize::new(0));
+        let n = count.clone();
+        let _sub = controller.subscribe(Box::new(move |_| {
+            n.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        controller.set_traditional_lyrics(true);
+
+        assert_eq!(count.load(Ordering::SeqCst), 0);
     }
 }

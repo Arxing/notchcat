@@ -32,6 +32,8 @@ pub const TOGGLE_LYRIC_LINES: [&str; 3] = [
     "music.lyric_lines.2",
     "music.lyric_lines.3",
 ];
+/// 歌詞轉繁體中文的開關 id。
+pub const TOGGLE_TRADITIONAL: &str = "lyrics.traditional";
 /// macOS perl 宿主的開關 id。
 pub const TOGGLE_PERL_HOST: &str = "macos.perl_host";
 /// 歌詞條顯示的開關 id。
@@ -65,6 +67,8 @@ pub enum Effect {
     SetLyricStripVisible(bool),
     /// 歌詞條一次顯示的行數變了：新行數（1..=3）。
     SetLyricStripLines(u8),
+    /// 歌詞轉繁體中文開關變了：新狀態。
+    SetTraditionalLyrics(bool),
     /// 面板要移到這個螢幕；`None` = 自動（交給 `choose_screen`）。
     MoveToScreen(Option<String>),
     Quit,
@@ -103,6 +107,11 @@ pub fn build_menu(cfg: &Config, screens: &[ScreenInfo], platform: MenuPlatform) 
         TOGGLE_NETEASE,
         "歌詞來源：網易雲音樂",
         cfg.sources.netease,
+    ));
+    items.push(toggle(
+        TOGGLE_TRADITIONAL,
+        "歌詞轉繁體中文",
+        cfg.traditional_lyrics,
     ));
     items.push(toggle(
         TOGGLE_LYRIC_STRIP,
@@ -148,6 +157,9 @@ pub fn apply_event(cfg: &mut Config, event: MenuEvent) -> Vec<Effect> {
         MenuEvent::Toggled(TOGGLE_NETEASE, v) => change(&mut cfg.sources.netease, v, |_| {
             Effect::RebuildLyricsProviders
         }),
+        MenuEvent::Toggled(TOGGLE_TRADITIONAL, v) => {
+            change(&mut cfg.traditional_lyrics, v, Effect::SetTraditionalLyrics)
+        }
         MenuEvent::Toggled(TOGGLE_PERL_HOST, v) => {
             change(&mut cfg.macos.perl_host, v, Effect::SetPerlHost)
         }
@@ -248,6 +260,7 @@ mod tests {
             MenuItem::Separator,
             toggle(TOGGLE_LRCLIB, "歌詞來源：LRCLIB", lrclib),
             toggle(TOGGLE_NETEASE, "歌詞來源：網易雲音樂", netease),
+            toggle(TOGGLE_TRADITIONAL, "歌詞轉繁體中文", false),
             toggle(TOGGLE_LYRIC_STRIP, "顯示歌詞條", strip),
             toggle(TOGGLE_LYRIC_LINES[0], "歌詞條顯示 1 行", lines == 1),
             toggle(TOGGLE_LYRIC_LINES[1], "歌詞條顯示 2 行", lines == 2),
@@ -271,6 +284,7 @@ mod tests {
         assert_eq!(TOGGLE_NETEASE, "lyrics.netease");
         assert_eq!(TOGGLE_PERL_HOST, "macos.perl_host");
         assert_eq!(TOGGLE_LYRIC_STRIP, "music.lyric_strip");
+        assert_eq!(TOGGLE_TRADITIONAL, "lyrics.traditional");
         assert_eq!(
             TOGGLE_LYRIC_LINES,
             [
@@ -408,6 +422,29 @@ mod tests {
             vec![]
         );
         assert_eq!(cfg.lyric_strip_lines, 1);
+    }
+
+    #[test]
+    fn the_traditional_toggle_updates_the_config_and_shows_its_state() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            apply_event(&mut cfg, MenuEvent::Toggled(TOGGLE_TRADITIONAL, true)),
+            vec![Effect::SetTraditionalLyrics(true)]
+        );
+        assert!(cfg.traditional_lyrics);
+        let m = build_menu(&cfg, &[], MenuPlatform::MacOs);
+        assert!(m
+            .items
+            .contains(&toggle(TOGGLE_TRADITIONAL, "歌詞轉繁體中文", true)));
+        assert_eq!(
+            apply_event(&mut cfg, MenuEvent::Toggled(TOGGLE_TRADITIONAL, true)),
+            vec![]
+        );
+        assert_eq!(
+            apply_event(&mut cfg, MenuEvent::Toggled(TOGGLE_TRADITIONAL, false)),
+            vec![Effect::SetTraditionalLyrics(false)]
+        );
+        assert!(!cfg.traditional_lyrics);
     }
 
     #[test]
@@ -589,6 +626,6 @@ mod tests {
                 MenuItem::Separator => unreachable!(),
             }
         }
-        assert_eq!(toggles, 7);
+        assert_eq!(toggles, 8);
     }
 }

@@ -25,6 +25,7 @@
 //! screen = "1"                   # 選填：顯示在哪個螢幕（螢幕 id）；省略 = 自動
 //! lyric_strip_visible = true     # 瀏海下方的歌詞條
 //! lyric_strip_lines = 1          # 歌詞條一次顯示幾行：1..=3（3 = 前一行＋目前＋下一行）
+//! traditional_lyrics = false     # 簡體中文歌詞轉成台灣繁體字形顯示
 //!
 //! [sources]                      # 歌詞來源開關
 //! lrclib = true
@@ -169,6 +170,8 @@ pub struct Config {
     pub lyric_strip_visible: bool,
     /// 歌詞條一次顯示幾行，`1..=`[`LYRIC_STRIP_LINES_RANGE`]`.1`。
     pub lyric_strip_lines: u8,
+    /// 簡體中文歌詞是否轉成台灣繁體字形顯示（日文與本來就是繁體的歌詞不受影響）。
+    pub traditional_lyrics: bool,
 }
 
 impl Default for Config {
@@ -181,6 +184,7 @@ impl Default for Config {
             notch: NotchConfig::default(),
             lyric_strip_visible: true,
             lyric_strip_lines: 1,
+            traditional_lyrics: false,
         }
     }
 }
@@ -357,6 +361,7 @@ fn parse(text: &str) -> LoadResult {
             "screen",
             "lyric_strip_visible",
             "lyric_strip_lines",
+            "traditional_lyrics",
             "sources",
             "macos",
             "notch",
@@ -382,6 +387,7 @@ fn parse(text: &str) -> LoadResult {
     }
     cfg.lyric_strip_visible = w.boolean(&table, "lyric_strip_visible", "", true);
     cfg.lyric_strip_lines = w.lines(&table, "lyric_strip_lines", cfg.lyric_strip_lines);
+    cfg.traditional_lyrics = w.boolean(&table, "traditional_lyrics", "", false);
 
     if let Some(t) = w.section(&table, "sources") {
         w.unknown_keys(t, &["lrclib", "netease"], "sources");
@@ -555,6 +561,7 @@ fn serialize(cfg: &Config) -> String {
         cfg.lyric_strip_lines
             .clamp(LYRIC_STRIP_LINES_RANGE.0, LYRIC_STRIP_LINES_RANGE.1)
     );
+    let _ = writeln!(out, "traditional_lyrics = {}", cfg.traditional_lyrics);
     let _ = writeln!(out, "\n[sources]");
     let _ = writeln!(out, "lrclib = {}", cfg.sources.lrclib);
     let _ = writeln!(out, "netease = {}", cfg.sources.netease);
@@ -817,6 +824,7 @@ mod tests {
             },
             lyric_strip_visible: false,
             lyric_strip_lines: 2,
+            traditional_lyrics: true,
         }
     }
 
@@ -1074,6 +1082,25 @@ mod tests {
         let (mut store, _) = ConfigStore::open(dir.file());
         store.update(|c| c.lyric_strip_lines = 200).unwrap();
         assert_eq!(load(&dir.file()).config.lyric_strip_lines, 3);
+    }
+
+    #[test]
+    fn traditional_lyrics_defaults_to_off_and_round_trips() {
+        let dir = TempDir::new();
+        assert!(!Config::default().traditional_lyrics);
+        // 舊的設定檔沒有這個鍵：關。
+        write(&dir.file(), "lyric_strip_visible = true\n");
+        assert!(!load(&dir.file()).config.traditional_lyrics);
+        let (mut store, _) = ConfigStore::open(dir.file());
+        store.update(|c| c.traditional_lyrics = true).unwrap();
+        let r = load(&dir.file());
+        assert!(r.config.traditional_lyrics);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        // 型別錯誤退回預設值並警告。
+        write(&dir.file(), "traditional_lyrics = 1\n");
+        let r = load(&dir.file());
+        assert!(!r.config.traditional_lyrics);
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
     }
 
     #[test]

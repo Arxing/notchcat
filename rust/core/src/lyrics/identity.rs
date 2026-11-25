@@ -108,7 +108,7 @@ static SUFFIX_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 /// 繁→簡轉換器，只建一次。字典內建於套件，建立不應失敗；若失敗，debug 建置以 `debug_assert!` 直接報錯
 /// （測試與開發時立刻發現），release 建置退化為不轉換（只失去簡繁折疊，其餘比對照常）。
 /// core 沒有日誌套件，所以 release 的退化是無聲的。
-static T2S: LazyLock<Option<OpenCC>> = LazyLock::new(|| {
+pub(super) static T2S: LazyLock<Option<OpenCC>> = LazyLock::new(|| {
     let converter = OpenCC::from_config(BuiltinConfig::T2s);
     debug_assert!(
         converter.is_ok(),

@@ -18,8 +18,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 # NFKC（全半形）與 NFD（去重音符號）。
 unicode-normalization = { version = "0.1", default-features = false, features = ["std"] }
-# 繁→簡折疊。不選 zhconv：它是 GPL-2.0-or-later，與本專案 MIT OR Apache-2.0 不相容（詳見 identity.rs 註解）。
-ferrous-opencc = { version = "0.4", default-features = false, features = ["t2s-conversion"] }
+# 繁→簡折疊（曲目比對）與簡→繁（歌詞顯示，lyrics::traditional）。不選 zhconv：它是 GPL-2.0-or-later，與本專案 MIT OR Apache-2.0 不相容（詳見 identity.rs 註解）。
+ferrous-opencc = { version = "0.4", default-features = false, features = ["t2s-conversion", "s2t-conversion"] }
 # 提供者回應的 JSON 解碼（lyrics::lrclib／netease）。兩者皆為純 Rust；serde 的 derive 只在編譯期展開。
 serde = { version = "1", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
