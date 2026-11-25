@@ -75,7 +75,7 @@ fn main() {
 mod macos {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU8};
     use std::sync::{Arc, Mutex, OnceLock, PoisonError};
     use std::time::Instant;
 
@@ -338,9 +338,10 @@ mod macos {
         }
         let controller =
             MusicController::new(monitor.clone(), resolver.clone(), control, spawner.clone());
-        let module_state = Arc::new(MusicModuleState::new(
+        let module_state = Arc::new(MusicModuleState::with_strip_lines(
             controller.clone(),
             Arc::new(AtomicBool::new(cfg.lyric_strip_visible)),
+            Arc::new(AtomicU8::new(cfg.lyric_strip_lines)),
             sources.clone(),
         ));
         let modules = Arc::new(ModuleManager::new());
@@ -621,6 +622,13 @@ mod macos {
                 },
                 Effect::SetLyricStripVisible(visible) => {
                     st.module_state.set_strip_visible(visible);
+                    if let Some(shell) = &st.shell {
+                        shell.refresh();
+                    }
+                }
+                Effect::SetLyricStripLines(lines) => {
+                    log!("lyric strip lines: {lines}");
+                    st.module_state.set_strip_lines(lines);
                     if let Some(shell) = &st.shell {
                         shell.refresh();
                     }

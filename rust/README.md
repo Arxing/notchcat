@@ -76,7 +76,7 @@ cargo run --release -p musicat-app
 ```
 
 可執行檔是 `target/release/musicat`。它會在有瀏海的螢幕（沒有就用主螢幕與虛擬瀏海）頂端顯示面板，並在選單列放一個「♪」圖示
-（選單：顯示螢幕、歌詞來源、歌詞條、perl 宿主、結束）。沒有 Dock 圖示。
+（選單：顯示螢幕、歌詞來源、歌詞條與行數、perl 宿主、結束）。沒有 Dock 圖示。
 
 - 讀取系統現正播放需要 helper 動態庫 `libmusicat_mediaremote_helper.dylib` 放在**可執行檔旁邊**（建置時自動產生在
   `target/<profile>/`）。找不到時印一行 `system now-playing unavailable` 並只用視窗標題備援，程式照常執行。
@@ -122,6 +122,7 @@ cargo run --release -p musicat-app
 mode = "notch"                 # 目前只有 "notch"
 screen = "1"                   # 選填：顯示在哪個螢幕（螢幕 id）；省略 = 自動
 lyric_strip_visible = true     # 瀏海下方的歌詞條
+lyric_strip_lines = 1          # 歌詞條一次顯示幾行：1..=3（2 = 目前＋下一行；3 = 前一行＋目前＋下一行）
 
 [sources]                      # 歌詞來源開關；兩個都關 = 不查歌詞、不送任何請求
 lrclib = true

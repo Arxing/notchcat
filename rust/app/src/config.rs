@@ -24,6 +24,7 @@
 //! mode = "notch"                 # 目前只有 "notch"
 //! screen = "1"                   # 選填：顯示在哪個螢幕（螢幕 id）；省略 = 自動
 //! lyric_strip_visible = true     # 瀏海下方的歌詞條
+//! lyric_strip_lines = 1          # 歌詞條一次顯示幾行：1..=3（3 = 前一行＋目前＋下一行）
 //!
 //! [sources]                      # 歌詞來源開關
 //! lrclib = true
@@ -80,6 +81,9 @@ pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub const MAX_WARNINGS: usize = 20;
 /// 警告裡顯示的鍵名最長字元數。
 const MAX_KEY_CHARS: usize = 48;
+
+/// 歌詞條行數的合法範圍（含兩端）。
+pub const LYRIC_STRIP_LINES_RANGE: (u8, u8) = (1, 3);
 
 /// 虛擬瀏海寬度的合理範圍。
 pub const VIRTUAL_WIDTH_RANGE: (f64, f64) = (40.0, 2000.0);
@@ -163,6 +167,8 @@ pub struct Config {
     pub notch: NotchConfig,
     /// 歌詞條是否顯示（對應 Swift 的 `LyricStripPreference.isVisible`）。
     pub lyric_strip_visible: bool,
+    /// 歌詞條一次顯示幾行，`1..=`[`LYRIC_STRIP_LINES_RANGE`]`.1`。
+    pub lyric_strip_lines: u8,
 }
 
 impl Default for Config {
@@ -174,6 +180,7 @@ impl Default for Config {
             macos: MacosConfig::default(),
             notch: NotchConfig::default(),
             lyric_strip_visible: true,
+            lyric_strip_lines: 1,
         }
     }
 }
@@ -349,6 +356,7 @@ fn parse(text: &str) -> LoadResult {
             "mode",
             "screen",
             "lyric_strip_visible",
+            "lyric_strip_lines",
             "sources",
             "macos",
             "notch",
@@ -373,6 +381,7 @@ fn parse(text: &str) -> LoadResult {
         }
     }
     cfg.lyric_strip_visible = w.boolean(&table, "lyric_strip_visible", "", true);
+    cfg.lyric_strip_lines = w.lines(&table, "lyric_strip_lines", cfg.lyric_strip_lines);
 
     if let Some(t) = w.section(&table, "sources") {
         w.unknown_keys(t, &["lrclib", "netease"], "sources");
@@ -464,6 +473,25 @@ impl Warnings {
         }
     }
 
+    /// 整數、夾進 [`LYRIC_STRIP_LINES_RANGE`]；型別不對退回預設值。
+    fn lines(&mut self, table: &Table, key: &str, default: u8) -> u8 {
+        let (min, max) = LYRIC_STRIP_LINES_RANGE;
+        match table.get(key) {
+            None => default,
+            Some(Value::Integer(i)) => {
+                let clamped = (*i).clamp(i64::from(min), i64::from(max));
+                if clamped != *i {
+                    self.push(format!("`{key}` 超出範圍 {min}..={max}，已調整為合理值"));
+                }
+                clamped as u8
+            }
+            Some(_) => {
+                self.wrong_type(key, "整數");
+                default
+            }
+        }
+    }
+
     fn size(&mut self, table: &Table, key: &str, default: f64, range: (f64, f64)) -> f64 {
         let name = dotted("notch", key);
         let value = match table.get(key) {
@@ -521,6 +549,12 @@ fn serialize(cfg: &Config) -> String {
         let _ = writeln!(out, "screen = {}", Value::String(screen.into()));
     }
     let _ = writeln!(out, "lyric_strip_visible = {}", cfg.lyric_strip_visible);
+    let _ = writeln!(
+        out,
+        "lyric_strip_lines = {}",
+        cfg.lyric_strip_lines
+            .clamp(LYRIC_STRIP_LINES_RANGE.0, LYRIC_STRIP_LINES_RANGE.1)
+    );
     let _ = writeln!(out, "\n[sources]");
     let _ = writeln!(out, "lrclib = {}", cfg.sources.lrclib);
     let _ = writeln!(out, "netease = {}", cfg.sources.netease);
@@ -782,6 +816,7 @@ mod tests {
                 virtual_height: 40.0,
             },
             lyric_strip_visible: false,
+            lyric_strip_lines: 2,
         }
     }
 
@@ -1001,6 +1036,44 @@ mod tests {
         assert!(r.warnings.len() <= MAX_WARNINGS + 1, "{}", r.warnings.len());
         assert!(r.warnings.iter().all(|w| w.chars().count() < 200));
         assert!(r.warnings.last().unwrap().contains("省略"));
+    }
+
+    #[test]
+    fn lyric_strip_lines_defaults_to_one_and_round_trips() {
+        let dir = TempDir::new();
+        assert_eq!(load(&dir.file()).config.lyric_strip_lines, 1);
+        assert_eq!(Config::default().lyric_strip_lines, 1);
+        let (mut store, _) = ConfigStore::open(dir.file());
+        store.update(|c| c.lyric_strip_lines = 3).unwrap();
+        let r = load(&dir.file());
+        assert_eq!(r.config.lyric_strip_lines, 3);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn lyric_strip_lines_is_clamped_and_type_checked() {
+        let dir = TempDir::new();
+        for (text, want, warned) in [
+            ("lyric_strip_lines = 2\n", 2, false),
+            ("lyric_strip_lines = 0\n", 1, true),
+            ("lyric_strip_lines = -5\n", 1, true),
+            ("lyric_strip_lines = 99\n", 3, true),
+            ("lyric_strip_lines = \"3\"\n", 1, true),
+            ("lyric_strip_lines = 2.0\n", 1, true),
+        ] {
+            write(&dir.file(), text);
+            let r = load(&dir.file());
+            assert_eq!(r.config.lyric_strip_lines, want, "{text}");
+            assert_eq!(!r.warnings.is_empty(), warned, "{text}: {:?}", r.warnings);
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_line_count_in_memory_is_written_back_in_range() {
+        let dir = TempDir::new();
+        let (mut store, _) = ConfigStore::open(dir.file());
+        store.update(|c| c.lyric_strip_lines = 200).unwrap();
+        assert_eq!(load(&dir.file()).config.lyric_strip_lines, 3);
     }
 
     #[test]

@@ -67,6 +67,8 @@ pub const STRIP_FONT_SIZE: f64 = 12.0;
 pub const STRIP_LINE_OPACITY: f64 = 0.95;
 /// 顯示曲名時的文字不透明度。
 pub const STRIP_TITLE_OPACITY: f64 = 0.7;
+/// 多行歌詞條裡，前後文行（非目前行）的文字不透明度。
+pub const STRIP_CONTEXT_OPACITY: f64 = 0.45;
 /// 歌詞條重讀目前行的週期（`TimelineView(.periodic(by: 0.25))`）。
 pub const STRIP_TICK_SECONDS: f64 = 0.25;
 
@@ -918,6 +920,21 @@ mod tests {
         ] {
             assert_eq!(source_label(url), None, "{url:?}");
         }
+    }
+
+    #[test]
+    fn strip_rows_fit_inside_the_strip_for_every_line_count() {
+        use musicat_core::music::module::{lyric_strip_height, LYRIC_STRIP_ROW_HEIGHT};
+        // 列高就是 12 pt 字加 4 的行高（跑馬燈用同一個值）。
+        assert_eq!(LYRIC_STRIP_ROW_HEIGHT, STRIP_FONT_SIZE + 4.0);
+        for lines in 1u8..=3 {
+            let rows = f64::from(lines) * LYRIC_STRIP_ROW_HEIGHT;
+            let height = lyric_strip_height(lines);
+            // 上下各至少留 4 pt，字不會貼到下方圓角。
+            assert!(height - rows >= 8.0, "lines = {lines}");
+            assert!(STRIP_CORNER_RADIUS <= height);
+        }
+        const { assert!(STRIP_CONTEXT_OPACITY < STRIP_TITLE_OPACITY) };
     }
 
     #[test]

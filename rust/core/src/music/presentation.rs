@@ -35,6 +35,70 @@ pub fn strip_content(s: Option<&TrackSnapshot>, lyrics: Option<&Lyrics>, now: f6
     StripContent::Title(s.title.clone())
 }
 
+/// 歌詞條最多一次顯示的行數。
+pub const STRIP_MAX_LINES: u8 = 3;
+
+/// 歌詞條多行時的一列。
+#[derive(Clone, PartialEq, Debug)]
+pub struct StripRow {
+    /// 這一列的文字；沒有對應的歌詞行（第一行之前、最後一行之後）時為空字串，列仍佔位，目前行才不會跳動。
+    pub text: String,
+    /// 是否為目前行（最亮、跑馬燈）。
+    pub current: bool,
+}
+
+/// 歌詞條要畫什麼（多行版）。
+#[derive(Clone, PartialEq, Debug)]
+pub enum StripView {
+    /// 沒有曲目。
+    None,
+    /// 沒有目前行可顯示：單列曲名（畫面垂直置中）。
+    Title(String),
+    /// 歌詞列，恰好 `lines` 列。
+    Rows(Vec<StripRow>),
+}
+
+/// 依 `lines`（夾在 `1..=`[`STRIP_MAX_LINES`]）決定歌詞條的列：
+/// 1 列 = 目前行；2 列 = 目前行＋下一行；3 列 = 前一行＋目前行＋下一行（目前行在中間）。
+/// 何時退回曲名同 [`strip_content`]。
+pub fn strip_view(
+    s: Option<&TrackSnapshot>,
+    lyrics: Option<&Lyrics>,
+    now: f64,
+    lines: u8,
+) -> StripView {
+    let lines = lines.clamp(1, STRIP_MAX_LINES) as usize;
+    match strip_content(s, lyrics, now) {
+        StripContent::None => StripView::None,
+        StripContent::Title(t) => StripView::Title(t),
+        StripContent::Line(_) => {
+            // `strip_content` 回 `Line` 就代表有帶時間軸的歌詞、位置已知且已到第一行。
+            let (Some(s), Some(lyrics @ Lyrics::Synced(all))) = (s, lyrics) else {
+                return StripView::None;
+            };
+            let Some(index) = playback_position(s, now).and_then(|p| lyrics.line_index(p)) else {
+                return StripView::None;
+            };
+            // 目前行所在的列：3 列時在中間，其餘在最上面。
+            let current_row = usize::from(lines == 3);
+            let rows = (0..lines)
+                .map(|row| {
+                    let text = (index + row)
+                        .checked_sub(current_row)
+                        .and_then(|i| all.get(i))
+                        .map(|l| l.text.clone())
+                        .unwrap_or_default();
+                    StripRow {
+                        text,
+                        current: row == current_row,
+                    }
+                })
+                .collect();
+            StripView::Rows(rows)
+        }
+    }
+}
+
 /// 進度條能不能畫：需要「有限且大於 0 的曲長」加上位置 anchor，否則比例只是猜的。
 /// （相對 Swift 多要求有限：NaN 本來就不大於 0，無限大曲長則會讓比例變成 NaN。）
 pub fn has_progress(s: &TrackSnapshot) -> bool {
@@ -294,6 +358,96 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+    fn row(text: &str, current: bool) -> StripRow {
+        StripRow {
+            text: text.into(),
+            current,
+        }
+    }
+
+    #[test]
+    fn strip_view_one_line_is_the_current_line() {
+        let s = snapshot(Some(anchor(22.0, 1.0)));
+        assert_eq!(
+            strip_view(Some(&s), Some(&synced()), T0, 1),
+            StripView::Rows(vec![row("second", true)])
+        );
+    }
+
+    #[test]
+    fn strip_view_two_lines_is_current_then_next() {
+        let s = snapshot(Some(anchor(22.0, 1.0)));
+        assert_eq!(
+            strip_view(Some(&s), Some(&synced()), T0, 2),
+            StripView::Rows(vec![row("second", true), row("third", false)])
+        );
+        // 最後一行：下一列留空。
+        let s = snapshot(Some(anchor(35.0, 1.0)));
+        assert_eq!(
+            strip_view(Some(&s), Some(&synced()), T0, 2),
+            StripView::Rows(vec![row("third", true), row("", false)])
+        );
+    }
+
+    #[test]
+    fn strip_view_three_lines_keeps_current_in_the_middle() {
+        let s = snapshot(Some(anchor(22.0, 1.0)));
+        assert_eq!(
+            strip_view(Some(&s), Some(&synced()), T0, 3),
+            StripView::Rows(vec![
+                row("first", false),
+                row("second", true),
+                row("third", false)
+            ])
+        );
+        // 第一行：前一列留空；最後一行：後一列留空。
+        let s = snapshot(Some(anchor(12.0, 1.0)));
+        assert_eq!(
+            strip_view(Some(&s), Some(&synced()), T0, 3),
+            StripView::Rows(vec![
+                row("", false),
+                row("first", true),
+                row("second", false)
+            ])
+        );
+        let s = snapshot(Some(anchor(35.0, 1.0)));
+        assert_eq!(
+            strip_view(Some(&s), Some(&synced()), T0, 3),
+            StripView::Rows(vec![
+                row("second", false),
+                row("third", true),
+                row("", false)
+            ])
+        );
+    }
+
+    #[test]
+    fn strip_view_clamps_the_line_count() {
+        let s = snapshot(Some(anchor(22.0, 1.0)));
+        let count = |n| match strip_view(Some(&s), Some(&synced()), T0, n) {
+            StripView::Rows(r) => r.len(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!((count(0), count(1), count(3), count(200)), (1, 1, 3, 3));
+    }
+
+    #[test]
+    fn strip_view_falls_back_exactly_like_strip_content() {
+        // 尚未到第一行、純文字、位置未知、沒有歌詞：曲名；沒有曲目：None。
+        let early = snapshot(Some(anchor(3.0, 1.0)));
+        let unknown = snapshot(None);
+        let title = || StripView::Title("Song".into());
+        for n in 1..=3 {
+            assert_eq!(strip_view(Some(&early), Some(&synced()), T0, n), title());
+            assert_eq!(strip_view(Some(&unknown), Some(&synced()), T0, n), title());
+            assert_eq!(
+                strip_view(Some(&early), Some(&Lyrics::Plain("x".into())), T0, n),
+                title()
+            );
+            assert_eq!(strip_view(Some(&early), None, T0, n), title());
+            assert_eq!(strip_view(None, Some(&synced()), T0, n), StripView::None);
         }
     }
 }

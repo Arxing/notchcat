@@ -51,9 +51,9 @@ use gpui::{
 use musicat_core::lyrics::LyricLine;
 use musicat_core::modules::{ModuleManager, ModuleState};
 use musicat_core::music::controller::{MusicController, MusicState};
-use musicat_core::music::module::{MusicModuleState, LYRIC_STRIP_HEIGHT, LYRIC_STRIP_OPACITY};
+use musicat_core::music::module::{MusicModuleState, LYRIC_STRIP_OPACITY, LYRIC_STRIP_ROW_HEIGHT};
 use musicat_core::music::presentation::{
-    has_progress, progress_fraction, strip_content, StripContent,
+    has_progress, progress_fraction, strip_view, StripRow, StripView,
 };
 use musicat_core::nowplaying::PlaybackCommand;
 use musicat_core::runtime::{Clock, Subscription};
@@ -507,33 +507,73 @@ impl MusicView {
 
         let mut root = div().size_full().flex().flex_col().child(wings);
         if extra > 0.0 {
-            let content = strip_content(Some(snapshot), state.lyrics.as_ref(), s.clock.now());
-            let (text, opacity) = match content {
-                StripContent::Line(t) => (t, STRIP_LINE_OPACITY),
-                StripContent::Title(t) => (t, STRIP_TITLE_OPACITY),
-                StripContent::None => (String::new(), STRIP_TITLE_OPACITY),
+            let view = strip_view(
+                Some(snapshot),
+                state.lyrics.as_ref(),
+                s.clock.now(),
+                s.module_state.strip_lines(),
+            );
+            let style = |opacity: f64| MarqueeStyle {
+                font_size: STRIP_FONT_SIZE as f32,
+                weight: FontWeight::MEDIUM,
+                color: white_a(opacity),
+                line_height: LYRIC_STRIP_ROW_HEIGHT as f32,
+            };
+            // 每一列固定高度；目前行與曲名用跑馬燈（太長會捲動），前後文只截斷（不捲動，避免多行同時動）。
+            let row_box = || {
+                div()
+                    .w_full()
+                    .h(px(LYRIC_STRIP_ROW_HEIGHT as f32))
+                    .flex_none()
+                    .overflow_hidden()
+            };
+            let rows: Vec<AnyElement> = match view {
+                StripView::Rows(rows) => rows
+                    .into_iter()
+                    .map(|StripRow { text, current }| {
+                        if current {
+                            row_box()
+                                .child(marquee(&s.strip_marquee, text, style(STRIP_LINE_OPACITY)))
+                                .into_any_element()
+                        } else {
+                            row_box()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .text_center()
+                                .text_size(px(STRIP_FONT_SIZE as f32))
+                                .line_height(px(LYRIC_STRIP_ROW_HEIGHT as f32))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(white_a(STRIP_CONTEXT_OPACITY))
+                                .child(text)
+                                .into_any_element()
+                        }
+                    })
+                    .collect(),
+                StripView::Title(t) => vec![row_box()
+                    .child(marquee(&s.strip_marquee, t, style(STRIP_TITLE_OPACITY)))
+                    .into_any_element()],
+                StripView::None => vec![row_box()
+                    .child(marquee(
+                        &s.strip_marquee,
+                        String::new(),
+                        style(STRIP_TITLE_OPACITY),
+                    ))
+                    .into_any_element()],
             };
             // 歌詞條：外殼在這一段不塗黑，由內容畫 0.6 不透明的黑底與下方圓角（Swift LyricStripView）。
+            // 高度就是模組回報的額外高度（隨行數變），列在其中垂直置中。
             root = root.child(
                 div()
                     .w_full()
-                    .h(px(LYRIC_STRIP_HEIGHT as f32))
+                    .h(px(extra as f32))
                     .flex_none()
                     .bg(black().opacity(LYRIC_STRIP_OPACITY as f32))
                     .rounded_b(px(STRIP_CORNER_RADIUS as f32))
                     .px(px(STRIP_HORIZONTAL_PADDING as f32))
                     .flex()
-                    .items_center()
-                    .child(marquee(
-                        &s.strip_marquee,
-                        text,
-                        MarqueeStyle {
-                            font_size: STRIP_FONT_SIZE as f32,
-                            weight: FontWeight::MEDIUM,
-                            color: white_a(opacity),
-                            line_height: (STRIP_FONT_SIZE + 4.0) as f32,
-                        },
-                    )),
+                    .flex_col()
+                    .justify_center()
+                    .children(rows),
             );
         }
         root.into_any_element()

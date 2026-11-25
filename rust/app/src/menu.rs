@@ -26,6 +26,12 @@ use crate::config::{Config, Os};
 pub const TOGGLE_LRCLIB: &str = "lyrics.lrclib";
 /// 歌詞來源網易雲音樂的開關 id。
 pub const TOGGLE_NETEASE: &str = "lyrics.netease";
+/// 歌詞條顯示 1／2／3 行的選項 id（三個互斥的勾選項，順序即行數 1、2、3）。
+pub const TOGGLE_LYRIC_LINES: [&str; 3] = [
+    "music.lyric_lines.1",
+    "music.lyric_lines.2",
+    "music.lyric_lines.3",
+];
 /// macOS perl 宿主的開關 id。
 pub const TOGGLE_PERL_HOST: &str = "macos.perl_host";
 /// 歌詞條顯示的開關 id。
@@ -57,6 +63,8 @@ pub enum Effect {
     SetPerlHost(bool),
     /// 歌詞條顯示變了：新狀態。
     SetLyricStripVisible(bool),
+    /// 歌詞條一次顯示的行數變了：新行數（1..=3）。
+    SetLyricStripLines(u8),
     /// 面板要移到這個螢幕；`None` = 自動（交給 `choose_screen`）。
     MoveToScreen(Option<String>),
     Quit,
@@ -101,6 +109,14 @@ pub fn build_menu(cfg: &Config, screens: &[ScreenInfo], platform: MenuPlatform) 
         "顯示歌詞條",
         cfg.lyric_strip_visible,
     ));
+    // 歌詞條行數：三個互斥的勾選項（點已勾的那個沒有作用，見 `apply_event`）。
+    for (n, id) in (1u8..).zip(TOGGLE_LYRIC_LINES) {
+        items.push(toggle(
+            id,
+            &format!("歌詞條顯示 {n} 行"),
+            cfg.lyric_strip_lines == n,
+        ));
+    }
     if platform == MenuPlatform::MacOs {
         items.push(toggle(
             TOGGLE_PERL_HOST,
@@ -140,6 +156,18 @@ pub fn apply_event(cfg: &mut Config, event: MenuEvent) -> Vec<Effect> {
             v,
             Effect::SetLyricStripVisible,
         ),
+        // 行數是互斥選項：只有「要選它」（true）才有作用；點已勾的那個回報 false，維持原樣。
+        MenuEvent::Toggled(id, true) if TOGGLE_LYRIC_LINES.contains(&id) => {
+            let lines = (1u8..)
+                .zip(TOGGLE_LYRIC_LINES)
+                .find_map(|(n, candidate)| (candidate == id).then_some(n))
+                .unwrap_or(cfg.lyric_strip_lines);
+            if cfg.lyric_strip_lines == lines {
+                return Vec::new();
+            }
+            cfg.lyric_strip_lines = lines;
+            vec![Effect::SetLyricStripLines(lines)]
+        }
         MenuEvent::Toggled(..) => Vec::new(),
         MenuEvent::ScreenChosen(id) => {
             if cfg.screen == id {
@@ -206,11 +234,24 @@ mod tests {
     }
 
     fn tail(perl: Option<bool>, lrclib: bool, netease: bool, strip: bool) -> Vec<MenuItem> {
+        tail_with_lines(perl, lrclib, netease, strip, 1)
+    }
+
+    fn tail_with_lines(
+        perl: Option<bool>,
+        lrclib: bool,
+        netease: bool,
+        strip: bool,
+        lines: u8,
+    ) -> Vec<MenuItem> {
         let mut v = vec![
             MenuItem::Separator,
             toggle(TOGGLE_LRCLIB, "歌詞來源：LRCLIB", lrclib),
             toggle(TOGGLE_NETEASE, "歌詞來源：網易雲音樂", netease),
             toggle(TOGGLE_LYRIC_STRIP, "顯示歌詞條", strip),
+            toggle(TOGGLE_LYRIC_LINES[0], "歌詞條顯示 1 行", lines == 1),
+            toggle(TOGGLE_LYRIC_LINES[1], "歌詞條顯示 2 行", lines == 2),
+            toggle(TOGGLE_LYRIC_LINES[2], "歌詞條顯示 3 行", lines == 3),
         ];
         if let Some(p) = perl {
             v.push(toggle(
@@ -230,6 +271,14 @@ mod tests {
         assert_eq!(TOGGLE_NETEASE, "lyrics.netease");
         assert_eq!(TOGGLE_PERL_HOST, "macos.perl_host");
         assert_eq!(TOGGLE_LYRIC_STRIP, "music.lyric_strip");
+        assert_eq!(
+            TOGGLE_LYRIC_LINES,
+            [
+                "music.lyric_lines.1",
+                "music.lyric_lines.2",
+                "music.lyric_lines.3"
+            ]
+        );
     }
 
     #[test]
@@ -315,6 +364,50 @@ mod tests {
         let mut expected = vec![choice(None, "自動", true)];
         expected.extend(tail(Some(false), false, true, false));
         assert_eq!(m.items, expected);
+    }
+
+    #[test]
+    fn the_line_count_options_show_exactly_the_configured_one() {
+        for n in 1u8..=3 {
+            let cfg = Config {
+                lyric_strip_lines: n,
+                ..Config::default()
+            };
+            let m = build_menu(&cfg, &[], MenuPlatform::MacOs);
+            let mut expected = vec![choice(None, "自動", true)];
+            expected.extend(tail_with_lines(Some(true), true, true, true, n));
+            assert_eq!(m.items, expected, "lines = {n}");
+        }
+    }
+
+    #[test]
+    fn choosing_a_line_count_updates_the_config_and_reports_the_effect() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            apply_event(&mut cfg, MenuEvent::Toggled(TOGGLE_LYRIC_LINES[2], true)),
+            vec![Effect::SetLyricStripLines(3)]
+        );
+        assert_eq!(cfg.lyric_strip_lines, 3);
+        assert_eq!(
+            apply_event(&mut cfg, MenuEvent::Toggled(TOGGLE_LYRIC_LINES[1], true)),
+            vec![Effect::SetLyricStripLines(2)]
+        );
+        assert_eq!(cfg.lyric_strip_lines, 2);
+    }
+
+    #[test]
+    fn choosing_the_current_line_count_again_changes_nothing() {
+        let mut cfg = Config::default();
+        // 已勾選的項目被點：選單回報「想要的新狀態」false。
+        assert_eq!(
+            apply_event(&mut cfg, MenuEvent::Toggled(TOGGLE_LYRIC_LINES[0], false)),
+            vec![]
+        );
+        assert_eq!(
+            apply_event(&mut cfg, MenuEvent::Toggled(TOGGLE_LYRIC_LINES[0], true)),
+            vec![]
+        );
+        assert_eq!(cfg.lyric_strip_lines, 1);
     }
 
     #[test]
@@ -477,6 +570,12 @@ mod tests {
             let mut cfg = base.clone();
             let effects = apply_event(&mut cfg, ev.clone());
             match item {
+                // 行數是互斥選項：目前勾選的那個（預設 1 行）再點一次沒有作用，其餘各改一個欄位。
+                MenuItem::Toggle { id, .. } if *id == TOGGLE_LYRIC_LINES[0] => {
+                    toggles += 1;
+                    assert!(effects.is_empty(), "{ev:?}");
+                    assert_eq!(cfg, base);
+                }
                 MenuItem::Toggle { .. } => {
                     toggles += 1;
                     assert_eq!(effects.len(), 1, "{ev:?}");
@@ -490,6 +589,6 @@ mod tests {
                 MenuItem::Separator => unreachable!(),
             }
         }
-        assert_eq!(toggles, 4);
+        assert_eq!(toggles, 7);
     }
 }
