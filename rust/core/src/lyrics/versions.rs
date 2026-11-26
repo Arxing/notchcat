@@ -12,6 +12,8 @@ use super::{LyricLine, Lyrics, LyricsHit};
 
 /// 同版本配對行時間差中位數的上限（秒）。
 const MAX_MEDIAN_GAP: f64 = 1.0;
+/// 比較時間差時容許的浮點誤差（秒），遠小於 LRC 時間戳的最小單位（毫秒）。
+const TIME_EPSILON: f64 = 1e-6;
 
 /// 比對用的形式：（行的比對鍵，第幾次出現）對到該行時間。
 type LineKeys = HashMap<(String, usize), f64>;
@@ -52,7 +54,7 @@ fn keys_match(a: &LineKeys, b: &LineKeys) -> bool {
     } else {
         (gaps[middle - 1] + gaps[middle]) / 2.0
     };
-    median <= MAX_MEDIAN_GAP
+    median <= MAX_MEDIAN_GAP + TIME_EPSILON
 }
 
 /// 兩份時間軸歌詞是否算同一個版本（規則見模組說明）。沒有可比的行時一律不算。
@@ -153,6 +155,13 @@ mod tests {
         assert!(same_version(&lines(0.0, &A), &lines(1.0, &A)));
         assert!(!same_version(&lines(0.0, &A), &lines(1.1, &A)));
         assert!(!same_version(&lines(0.0, &A), &lines(5.0, &A)));
+    }
+
+    /// 時間戳是十進位小數，相減有浮點誤差（`4.4 - 3.4 > 1.0`）：寫起來剛好差 1 秒的仍算同一版本。
+    #[test]
+    fn exactly_one_second_apart_survives_floating_point_error() {
+        assert!(same_version(&lines(3.4, &A[..1]), &lines(4.4, &A[..1])));
+        assert!(!same_version(&lines(3.4, &A[..1]), &lines(4.41, &A[..1])));
     }
 
     #[test]
