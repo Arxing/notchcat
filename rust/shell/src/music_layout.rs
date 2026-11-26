@@ -333,6 +333,53 @@ pub fn lyrics_status_label(status: LyricsStatus) -> &'static str {
 /// Expanded 狀態標籤的不透明度：比下面的來源連結亮一點。
 pub const STATUS_LABEL_OPACITY: f64 = 0.7;
 
+// ---------------------------------------------------------------- 版本切換與時間微調（本版，Swift 沒有）
+
+/// 偏移按鈕點一下的秒數；按住 Option 點是 [`OFFSET_BIG_STEP`]。
+pub const OFFSET_STEP: f64 = 0.5;
+/// 按住 Option 點的秒數（MV 前面有長劇情時用）。
+pub const OFFSET_BIG_STEP: f64 = 5.0;
+/// `−`／`＋` 按鈕與中間數值的寬。三者排在控制列右側、折疊開關左邊的彈性區：瀏海 185 點時那裡寬 86.5，
+/// 放得下合計的 76。字級與來源標籤相同（[`SOURCE_LABEL_FONT_SIZE`]），文字不透明度同狀態標籤。
+pub const OFFSET_BUTTON_WIDTH: f64 = 18.0;
+pub const OFFSET_VALUE_WIDTH: f64 = 40.0;
+/// 按鈕字樣：U+2212（減號）與 U+FF0B（全形加號）。
+pub const OFFSET_MINUS_GLYPH: &str = "\u{2212}";
+pub const OFFSET_PLUS_GLYPH: &str = "\u{FF0B}";
+
+/// 顯示時間軸歌詞時控制列左側上行的文字：有兩個以上版本時是「時間軸版 1/3 ›」（`index` 從 0 起算，
+/// `›` 表示點一下換下一個），只有一個時就是「時間軸版」。
+pub fn version_label(index: usize, count: usize) -> String {
+    let status = lyrics_status_label(LyricsStatus::Synced);
+    if count >= 2 {
+        format!("{status} {}/{count} \u{203A}", index + 1)
+    } else {
+        status.to_string()
+    }
+}
+
+/// 目前偏移的文字：取到小數一位，`+0.5s`、`−1.0s`（減號是 U+2212）；顯示起來是零的不帶正負號。
+pub fn offset_label(offset: f64) -> String {
+    // 先取整再看正負：-0.04 與 -0.0 都顯示 `0.0s`。
+    let rounded = (offset * 10.0).round() / 10.0;
+    if rounded > 0.0 {
+        format!("+{rounded:.1}s")
+    } else if rounded < 0.0 {
+        format!("{OFFSET_MINUS_GLYPH}{:.1}s", -rounded)
+    } else {
+        "0.0s".to_string()
+    }
+}
+
+/// 偏移按鈕這一下要加減的秒數。
+pub fn offset_step(option_held: bool) -> f64 {
+    if option_held {
+        OFFSET_BIG_STEP
+    } else {
+        OFFSET_STEP
+    }
+}
+
 /// 歌詞來源標籤的文字：網址的主機加上 ` ↗`（例如 `lrclib.net ↗`）。
 ///
 /// 不用 `url` crate：取 `https://` 之後到第一個 `/`、`?`、`#` 之前的部分，去掉 `userinfo@` 與 `:埠號`
@@ -1158,5 +1205,43 @@ mod tests {
         assert!(l == 0.0 && r == 0.0);
         let (l, r) = control_side_widths(10.0);
         assert!(l == 0.0 && r == 0.0);
+    }
+
+    #[test]
+    fn version_label_counts_only_when_there_is_a_choice() {
+        assert_eq!(version_label(0, 3), "時間軸版 1/3 ›");
+        assert_eq!(version_label(2, 3), "時間軸版 3/3 ›");
+        assert_eq!(version_label(0, 1), "時間軸版");
+    }
+
+    #[test]
+    fn offset_label_is_signed() {
+        assert_eq!(offset_label(0.0), "0.0s");
+        assert_eq!(offset_label(-0.0), "0.0s");
+        assert_eq!(offset_label(0.5), "+0.5s");
+        assert_eq!(offset_label(-1.0), "\u{2212}1.0s");
+        // 紀錄檔裡的偏移可以是任意值：顯示成 0.0 的不帶正負號。
+        assert_eq!(offset_label(0.04), "0.0s");
+        assert_eq!(offset_label(-0.04), "0.0s");
+        assert_eq!(offset_label(-120.0), "\u{2212}120.0s");
+    }
+
+    #[test]
+    fn option_click_takes_the_big_step() {
+        assert_eq!((offset_step(false), offset_step(true)), (0.5, 5.0));
+    }
+
+    #[test]
+    fn offset_controls_fit_beside_the_fold_button() {
+        for notch in [185.0, 200.0] {
+            // 資訊欄寬 = 外形寬（瀏海 + WIDTH_PADDING）− 左右內距 − 封面 − 間距。
+            let info = notch + WIDTH_PADDING
+                - 2.0 * PAGE_HORIZONTAL_PADDING
+                - EXPANDED_COVER_SIDE
+                - HEADER_SPACING;
+            let free = control_side_widths(info).1 - CONTROL_ROW_HEIGHT;
+            let needed = 2.0 * OFFSET_BUTTON_WIDTH + OFFSET_VALUE_WIDTH;
+            assert!(free >= needed, "{notch}: {free} < {needed}");
+        }
     }
 }

@@ -17,6 +17,8 @@
 //! - `plain`：播放中、只有純文字歌詞（歌詞條只顯示「純文字版」、Expanded 是靜態全文）。
 //! - `nolyrics`：播放中、沒有歌詞（歌詞條只顯示「沒有歌詞」、Expanded 標頭垂直置中）。
 //! - `longtitle`：播放中、很長的曲名與演出者（跑馬燈），歌詞裡有很長的一行。
+//! - `versions`：同 `playing`，但歌詞有兩個時間軸版本（第二個整份晚 5 秒，來源網址也不同），用來試版本切換
+//!   與時間偏移。版本與偏移只記在記憶體裡，示範不寫任何檔案。
 //!
 //! 環境變數：
 //! - `MUSICAT_DEMO_SECS`：幾秒後自動結束（預設 60）。
@@ -102,6 +104,7 @@ mod demo {
         Plain,
         NoLyrics,
         LongTitle,
+        Versions,
     }
 
     impl Scene {
@@ -121,6 +124,7 @@ mod demo {
                     "plain" => Scene::Plain,
                     "nolyrics" => Scene::NoLyrics,
                     "longtitle" => Scene::LongTitle,
+                    "versions" => Scene::Versions,
                     other => return Err(format!("unknown scene {other:?}")),
                 };
             }
@@ -226,6 +230,22 @@ mod demo {
                 })
                 .collect(),
         )
+    }
+
+    /// 整份晚 `seconds` 秒的同一份歌詞（`versions` 場景的第二個版本）。
+    fn delayed(lyrics: Lyrics, seconds: f64) -> Lyrics {
+        match lyrics {
+            Lyrics::Synced(lines) => Lyrics::Synced(
+                lines
+                    .into_iter()
+                    .map(|line| LyricLine {
+                        time: line.time + seconds,
+                        ..line
+                    })
+                    .collect(),
+            ),
+            plain => plain,
+        }
     }
 
     fn plain_lyrics() -> Lyrics {
@@ -357,8 +377,14 @@ mod demo {
                 _ if track.title.contains("Morning") || track.title.contains("晨光") => None,
                 scene => Some(synced_lyrics(scene == Scene::LongTitle)),
             };
-            let hit = lyrics.map(|l| LyricsHit::new(l, "https://lrclib.net/api/get/1"));
-            Box::pin(std::future::ready(hit.into_iter().collect()))
+            let second = lyrics
+                .clone()
+                .filter(|_| self.scene == Scene::Versions)
+                .map(|l| LyricsHit::new(delayed(l, 5.0), "https://music.163.com/song?id=2"));
+            let first = lyrics.map(|l| LyricsHit::new(l, "https://lrclib.net/api/get/1"));
+            Box::pin(std::future::ready(
+                first.into_iter().chain(second).collect(),
+            ))
         }
     }
 
@@ -371,7 +397,7 @@ mod demo {
             Ok(scene) => scene,
             Err(e) => {
                 eprintln!(
-                    "music_demo: {e}; usage: --scene playing|paused|none|plain|nolyrics|longtitle"
+                    "music_demo: {e}; usage: --scene playing|paused|none|plain|nolyrics|longtitle|versions"
                 );
                 std::process::exit(2);
             }
