@@ -170,7 +170,7 @@ struct LyricScroll {
     from: f64,
     to: f64,
     started: Option<Instant>,
-    /// 下一次直接跳到位置（剛展開）。
+    /// 下一次直接跳到位置（剛展開，或剛切換歌詞版本）。
     jump: bool,
 }
 
