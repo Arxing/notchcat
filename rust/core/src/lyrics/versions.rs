@@ -247,6 +247,11 @@ mod tests {
     fn repeated_lines_pair_in_order() {
         let chorus = ["啦", "啦", "啦", "啦"];
         assert!(same_version(&lines(0.0, &chorus), &lines(0.5, &chorus)));
+        // 重複行要逐次計數才湊得到六成：按次序配到 3/5，只用文字當鍵只剩 1/3。
+        assert!(same_version(
+            &lines(0.0, &["啦", "啦", "啦", "甲", "乙"]),
+            &lines(0.0, &["啦", "啦", "啦", "丙", "丁"])
+        ));
     }
 
     #[test]
