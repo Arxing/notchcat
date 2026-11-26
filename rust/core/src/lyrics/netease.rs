@@ -48,6 +48,22 @@ struct Song {
     name: Option<String>,
     /// 毫秒。
     duration: Option<f64>,
+    artists: Option<Vec<Option<Artist>>>,
+}
+
+#[derive(Deserialize)]
+struct Artist {
+    name: Option<String>,
+}
+
+/// 搜尋結果裡挑中、要取歌詞的一首歌。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SelectedSong {
+    pub id: i64,
+    /// 曲長（秒）。
+    pub seconds: Option<f64>,
+    /// 任一位演出者和曲目相符（見 [`TrackIdentity::matches_artist`]）。
+    pub artist_matches: bool,
 }
 
 #[derive(Deserialize)]
@@ -121,18 +137,19 @@ impl NetEaseProvider {
         data: &[u8],
         track: &TrackIdentity,
     ) -> Result<Option<i64>, ProviderError> {
-        Ok(Self::select_songs(data, track)?.first().map(|&(id, _)| id))
+        Ok(Self::select_songs(data, track)?.first().map(|song| song.id))
     }
 
-    /// 歌名相符、曲長在放寬容忍內（或未知）的搜尋結果，最多 [`MAX_SONGS`] 首：曲長吻合的排在放寬的前面，
-    /// 兩類各自保留搜尋順序。歌名不同的結果永遠不收：錯的歌詞比沒有更糟。歌名寬鬆比對，
-    /// 因為這個服務會對繁體查詢回簡體歌名。回傳歌曲編號與它的曲長（秒）。
+    /// 歌名相符、曲長在放寬容忍內（或未知）的搜尋結果，最多 [`MAX_SONGS`] 首：演出者相符的排在前面，
+    /// 其次曲長吻合的排在放寬的前面，同類保留搜尋順序。歌名不同的結果永遠不收：錯的歌詞比沒有更糟。
+    /// 歌名寬鬆比對，因為這個服務會對繁體查詢回簡體歌名。演出者不相符的仍可能入選（播放器回報的
+    /// 演出者常是頻道名稱），由 `LyricsRepository` 決定去留。
     ///
     /// 本體不是成功的搜尋回應時回 `Err`。
     pub(crate) fn select_songs(
         data: &[u8],
         track: &TrackIdentity,
-    ) -> Result<Vec<(i64, Option<f64>)>, ProviderError> {
+    ) -> Result<Vec<SelectedSong>, ProviderError> {
         let response: SearchResponse = decode_object(data)?;
         if response.code.is_some_and(|code| code != 200) {
             return Err(ProviderError::BadResponse);
@@ -144,23 +161,36 @@ impl NetEaseProvider {
 
         let wanted = track.normalized().title;
         let songs = response.result.and_then(|r| r.songs).unwrap_or_default();
-        let mut close = Vec::new();
-        let mut loose = Vec::new();
+        // 每首合格的歌連同它的排序鍵：（演出者不相符，曲長只在放寬容忍內），小的在前。
+        let mut eligible = Vec::new();
         for song in songs {
             let Some(name) = song.name else { continue };
             if !TrackIdentity::loosely_matches(&candidate_title(&name), &wanted) {
                 continue;
             }
             let seconds = song.duration.map(|ms| ms / 1000.0);
-            match track.duration_fit(seconds) {
-                Some(DurationFit::Close) => close.push((song.id, seconds)),
-                Some(DurationFit::Loose) => loose.push((song.id, seconds)),
-                None => {}
-            }
+            let Some(fit) = track.duration_fit(seconds) else {
+                continue;
+            };
+            let artists = song.artists.iter().flatten().flatten();
+            let artist_matches =
+                track.matches_artist(artists.filter_map(|artist| artist.name.as_deref()));
+            eligible.push((
+                (!artist_matches, fit == DurationFit::Loose),
+                SelectedSong {
+                    id: song.id,
+                    seconds,
+                    artist_matches,
+                },
+            ));
         }
-        close.append(&mut loose);
-        close.truncate(MAX_SONGS);
-        Ok(close)
+        // 穩定排序：同類維持搜尋順序。
+        eligible.sort_by_key(|&(order, _)| order);
+        Ok(eligible
+            .into_iter()
+            .take(MAX_SONGS)
+            .map(|(_, song)| song)
+            .collect())
     }
 
     /// 歌詞回應中的歌詞；沒有原文歌詞時為 `None`。
@@ -196,9 +226,7 @@ impl NetEaseProvider {
         let search = request(Self::search_url(track), &REFERER, SEARCH_TIMEOUT);
         let search_body = success_body(&self.http, search).await?;
         let songs = Self::select_songs(&search_body, track)?;
-        let lyrics = songs
-            .into_iter()
-            .map(|(id, seconds)| self.song_hit(track, id, seconds));
+        let lyrics = songs.into_iter().map(|song| self.song_hit(track, song));
         Candidates::collect(join_all(lyrics).await)
     }
 
@@ -206,14 +234,16 @@ impl NetEaseProvider {
     async fn song_hit(
         &self,
         track: &TrackIdentity,
-        song_id: i64,
-        seconds: Option<f64>,
+        song: SelectedSong,
     ) -> Result<Option<LyricsHit>, ProviderError> {
-        let lyric = request(Self::lyric_url(song_id), &REFERER, LYRIC_TIMEOUT);
+        let lyric = request(Self::lyric_url(song.id), &REFERER, LYRIC_TIMEOUT);
         let lyric_body = success_body(&self.http, lyric).await?;
         let lyrics = Self::parse_lyric(&lyric_body)?;
         Ok(lyrics.and_then(|lyrics| {
-            LyricsHit::new(lyrics, Self::song_url(song_id)).matched(track, seconds)
+            let mut hit =
+                LyricsHit::new(lyrics, Self::song_url(song.id)).matched(track, song.seconds)?;
+            hit.artist_matches = song.artist_matches;
+            Some(hit)
         }))
     }
 }
@@ -717,6 +747,12 @@ mod tests {
         assert!(hit.lyrics.is_synced());
     }
 
+    /// 挑中的歌曲編號與曲長（秒）。
+    fn picked(json: &str) -> Result<Vec<(i64, Option<f64>)>, ProviderError> {
+        NetEaseProvider::select_songs(json.as_bytes(), &track())
+            .map(|songs| songs.iter().map(|s| (s.id, s.seconds)).collect())
+    }
+
     #[test]
     fn net_ease_orders_close_songs_ahead_of_loose_ones() {
         let mixed = search_json(
@@ -724,21 +760,18 @@ mod tests {
             {"id":6,"name":"T","duration":207000},{"id":7,"name":"T","duration":209000}"#,
         );
         assert_eq!(
-            NetEaseProvider::select_songs(mixed.as_bytes(), &track()),
+            picked(&mixed),
             Ok(vec![(2, Some(201.0)), (1, Some(208.0)), (6, Some(207.0))])
         );
         let loose_only = search_json(
             r#"{"id":3,"name":"T","duration":209000},{"id":4,"name":"T","duration":207000}"#,
         );
         assert_eq!(
-            NetEaseProvider::select_songs(loose_only.as_bytes(), &track()),
+            picked(&loose_only),
             Ok(vec![(3, Some(209.0)), (4, Some(207.0))])
         );
         let far = search_json(r#"{"id":5,"name":"T","duration":211000}"#);
-        assert_eq!(
-            NetEaseProvider::select_songs(far.as_bytes(), &track()),
-            Ok(Vec::new())
-        );
+        assert_eq!(picked(&far), Ok(Vec::new()));
     }
 
     #[test]
@@ -836,5 +869,86 @@ mod tests {
         assert!(provider.fetch(&t).now_or_never().is_none());
 
         assert_eq!(http.requests().len(), 4);
+    }
+
+    // MARK: song artists (Rust only)
+
+    /// 搜尋回 `songs`、每首歌都有歌詞；回傳（歌詞請求的歌曲順序，各命中的演出者是否相符）。
+    fn fetch_by_artist(songs: &str, ids: &[i64]) -> (Vec<String>, Vec<bool>) {
+        let (http, provider) = setup();
+        let t = query_track("T", "周杰倫 Jay Chou", Some(200.0));
+        http.respond(NetEaseProvider::search_url(&t), 200, search_json(songs));
+        for &id in ids {
+            http.respond(NetEaseProvider::lyric_url(id), 200, TWO_LINE_LYRIC);
+        }
+        let found = block_on(provider.fetch(&t)).unwrap();
+        (
+            http.requests().into_iter().skip(1).map(|r| r.url).collect(),
+            found.hits.iter().map(|h| h.artist_matches).collect(),
+        )
+    }
+
+    fn song_by(id: i64, millis: u32, artists: &str) -> String {
+        format!(r#"{{"id":{id},"name":"T","duration":{millis},"artists":{artists}}}"#)
+    }
+
+    #[test]
+    fn net_ease_takes_artist_matching_songs_first_then_close_before_loose() {
+        let other = r#"[{"id":9,"name":"恶童ETON"}]"#;
+        let jay = r#"[{"id":6452,"name":"周杰伦"}]"#;
+        let songs = [
+            song_by(1, 200_000, other),
+            song_by(2, 208_000, jay),
+            song_by(3, 208_000, other),
+            song_by(4, 201_000, jay),
+            song_by(5, 202_000, jay),
+        ]
+        .join(",");
+
+        let (requests, matched) = fetch_by_artist(&songs, &[1, 2, 3, 4, 5]);
+
+        assert_eq!(requests, [4, 5, 2].map(NetEaseProvider::lyric_url));
+        assert_eq!(matched, [true, true, true]);
+
+        // 相符的不夠三首時由不相符的補上，一樣是曲長吻合的優先。
+        let songs = [
+            song_by(1, 208_000, other),
+            song_by(2, 200_000, other),
+            song_by(3, 208_000, jay),
+        ]
+        .join(",");
+        let (requests, matched) = fetch_by_artist(&songs, &[1, 2, 3]);
+        assert_eq!(requests, [3, 2, 1].map(NetEaseProvider::lyric_url));
+        assert_eq!(matched, [true, false, false]);
+    }
+
+    #[test]
+    fn net_ease_matches_any_of_the_song_artists() {
+        let songs = [
+            song_by(1, 200_000, r#"[{"name":"费玉清"},{"name":"周杰伦"}]"#),
+            song_by(2, 200_000, r#"[{"name":"费玉清"},{"name":"陈奕迅"}]"#),
+        ]
+        .join(",");
+
+        let (_, matched) = fetch_by_artist(&songs, &[1, 2]);
+
+        assert_eq!(matched, [true, false]);
+    }
+
+    #[test]
+    fn net_ease_song_without_artist_information_counts_as_matching() {
+        for artists in [
+            "null",
+            "[]",
+            "[null]",
+            "[{}]",
+            r#"[{"name":null}]"#,
+            r#"[{"name":""}]"#,
+        ] {
+            let (_, matched) = fetch_by_artist(&song_by(1, 200_000, artists), &[1]);
+            assert_eq!(matched, [true], "{artists}");
+        }
+        let (_, matched) = fetch_by_artist(r#"{"id":1,"name":"T","duration":200000}"#, &[1]);
+        assert_eq!(matched, [true]);
     }
 }

@@ -3,7 +3,9 @@
 //! 所有來源同時查、全部回來（或逾時）才有結果：同一首歌的時間軸版本散在各來源，少問一個就可能少一個版本。
 //! 每個來源最多問一次，且各有時間上限；逾時或錯誤都算失敗，只答出一部分（不完整的候選清單）也按失敗計。
 //!
-//! 結果只用時間軸可信（[`super::Lyrics::is_plausible`]）的候選：有時間軸歌詞就回合併後的版本清單
+//! 結果只用時間軸可信（[`super::Lyrics::is_plausible`]）的候選；其中只要有任何一筆（不分來源）演出者相符
+//! （[`LyricsHit::artist_matches`]），不相符的就全部丟掉，同名的別首歌不會混進來；一筆都不相符則全部保留，
+//! 因為播放器回報的「演出者」常是頻道名稱。剩下的有時間軸歌詞就回合併後的版本清單
 //! （[`merge_versions`]，預設版本在前）；一份都沒有才回至多一筆純文字（曲長吻合的勝過放寬的）；
 //! 什麼都沒有就是空清單。候選依來源順序串接，所以同序時由前面的來源勝出，和誰先回答無關。
 //!
@@ -180,7 +182,7 @@ impl Inner {
                     .filter(|hit| hit.lyrics.is_plausible(track.duration)),
             );
         }
-        let hits = versions_or_plain(candidates);
+        let hits = versions_or_plain(preferring_artist_matches(candidates));
 
         // 走到這裡代表查詢沒被放棄（被放棄的 future 已被 drop，不會執行以下任何一行）。
         let now = self.clock.now();
@@ -218,6 +220,14 @@ impl Inner {
     }
 }
 
+/// 有演出者相符的候選時只留相符的；一筆都沒有就原樣保留。
+fn preferring_artist_matches(mut candidates: Vec<LyricsHit>) -> Vec<LyricsHit> {
+    if candidates.iter().any(|hit| hit.artist_matches) {
+        candidates.retain(|hit| hit.artist_matches);
+    }
+    candidates
+}
+
 /// 有時間軸歌詞就回合併後的版本清單（預設在前）；否則回最好的那筆純文字（至多一筆）。
 fn versions_or_plain(candidates: Vec<LyricsHit>) -> Vec<LyricsHit> {
     if candidates.iter().any(|hit| hit.lyrics.is_synced()) {
@@ -241,11 +251,13 @@ mod tests {
     //! `FakeClock` + `LocalSpawner`：`run_until_stalled` 之後的狀態就是「所有能前進的都前進了」。
 
     use super::*;
+    use crate::lyrics::lrclib::LrclibProvider;
     use crate::lyrics::provider::test_support::urls;
     use crate::lyrics::provider::{Candidates, ProviderError};
     use crate::lyrics::{LyricLine, Lyrics, LyricsHit};
+    use crate::music::choices::{apply_choice, SavedChoice};
     use crate::runtime::{Spawner, TaskHandle};
-    use crate::testing::{FakeClock, LocalSpawner};
+    use crate::testing::{FakeClock, FakeHttp, LocalSpawner};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::task::{Poll, Waker};
@@ -1905,5 +1917,176 @@ mod tests {
         h.advance(secs(2));
         h.ask(&repo, track());
         assert_eq!(source.call_count(), 2);
+    }
+
+    // ------------------------------------------------------------ 演出者把關（Rust 版新增）
+
+    /// 演出者不相符的命中。
+    fn mismatched(lyrics: Lyrics, url: &str) -> LyricsHit {
+        let mut hit = hit_at(lyrics, url);
+        hit.artist_matches = false;
+        hit
+    }
+
+    #[test]
+    fn mismatched_artists_are_dropped_when_any_source_has_a_matching_one() {
+        let h = Harness::new();
+        // 不相符的紀錄比較多、來源又在前面，仍然整批丟掉。
+        let others = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                mismatched(shifted(5.0), "https://a.example/1"),
+                mismatched(shifted(5.0), "https://a.example/2"),
+            ],
+            true,
+        );
+        let right =
+            FakeProvider::result_hit("b", &h.clock, Some(hit_at(synced(), "https://b.example/1")));
+        let repo = h.repo(vec![dynp(&others), dynp(&right)]);
+
+        assert_eq!(
+            urls(&h.ask_versions(&repo, track())),
+            ["https://b.example/1"]
+        );
+    }
+
+    #[test]
+    fn all_hits_are_kept_when_no_artist_matches() {
+        let h = Harness::new();
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                mismatched(synced(), "https://a.example/1"),
+                mismatched(shifted(5.0), "https://a.example/2"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+
+        assert_eq!(
+            urls(&h.ask_versions(&repo, track())),
+            ["https://a.example/1", "https://a.example/2"]
+        );
+    }
+
+    /// 不可信的紀錄先被丟掉：它的演出者相符也不能把其他紀錄擠掉。
+    #[test]
+    fn the_artist_filter_runs_after_the_plausibility_filter() {
+        let h = Harness::new();
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                hit_at(implausible(), "https://a.example/1"),
+                mismatched(synced(), "https://a.example/2"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+
+        assert_eq!(
+            urls(&h.ask_versions(&repo, track())),
+            ["https://a.example/2"]
+        );
+    }
+
+    #[test]
+    fn a_matching_plain_hit_beats_a_mismatched_synced_one() {
+        let h = Harness::new();
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                mismatched(synced(), "https://a.example/1"),
+                hit_at(plain("words"), "https://a.example/2"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+
+        assert_eq!(
+            h.ask_versions(&repo, track()),
+            [hit_at(plain("words"), "https://a.example/2")]
+        );
+    }
+
+    /// 使用者選過的版本不受演出者把關影響：查詢結果裡被丟掉了，仍用存下的內容並選中它。
+    #[test]
+    fn a_saved_choice_survives_the_artist_filter() {
+        let h = Harness::new();
+        let chosen = "https://a.example/chosen";
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                mismatched(shifted(5.0), chosen),
+                hit_at(synced(), "https://a.example/1"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+        let found = h.ask_versions(&repo, track());
+        assert_eq!(urls(&found), ["https://a.example/1"]);
+        let Lyrics::Synced(lines) = shifted(5.0) else {
+            unreachable!()
+        };
+        let saved = SavedChoice {
+            key: track().cache_key(),
+            duration: track().duration,
+            url: chosen.into(),
+            lines,
+            offsets: Default::default(),
+        };
+
+        let (versions, index) = apply_choice(found, Some(&saved));
+
+        assert_eq!(versions[index].url, chosen);
+        assert_eq!(versions[index].lyrics, shifted(5.0));
+    }
+
+    /// 用真的提供者走完整條路：播放器回報的「演出者」是頻道名稱時沒有任何紀錄相符，全部保留；
+    /// 是歌手名時另一位歌手的同名歌被丟掉。
+    #[test]
+    fn a_channel_name_as_artist_keeps_every_record_but_a_real_artist_filters() {
+        let h = Harness::new();
+        let ask = |artist: &str| {
+            let track = TrackIdentity {
+                artist: artist.into(),
+                ..identity("晴天", 200.0)
+            };
+            let http = Arc::new(FakeHttp::new());
+            http.respond(LrclibProvider::exact_url(&track), 404, "{}");
+            let record = |id: u32, by: &str, start: u32| {
+                format!(
+                    r#"{{"id":{id},"trackName":"晴天","artistName":"{by}","duration":200,"syncedLyrics":"[00:{start:02}.00]a\n[00:50.00]b"}}"#
+                )
+            };
+            let found = format!(
+                "[{},{}]",
+                record(1, "周杰伦", 10),
+                record(2, "恶童ETON", 20)
+            );
+            http.respond(LrclibProvider::search_url(&track), 200, found.clone());
+            if let Some(retry) = track.simplified_chinese() {
+                http.respond(LrclibProvider::search_url(&retry), 200, "[]");
+            }
+            let source = Arc::new(LrclibProvider::new(http));
+            let repo = h.repo(vec![dynp(&source)]);
+            urls(&h.ask_versions(&repo, track))
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            ask("華語音樂精選頻道"),
+            [
+                "https://lrclib.net/api/get/1",
+                "https://lrclib.net/api/get/2"
+            ]
+        );
+        assert_eq!(ask("周杰倫 Jay Chou"), ["https://lrclib.net/api/get/1"]);
     }
 }

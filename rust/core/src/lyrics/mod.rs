@@ -40,6 +40,9 @@ pub struct LyricsHit {
     pub loose_duration: bool,
     /// 紀錄曲長和查詢曲長差幾秒；任一邊未知時為 `None`。
     pub duration_gap: Option<f64>,
+    /// 紀錄的演出者和查詢的演出者寬鬆相符（見 [`TrackIdentity::matches_artist`]）。
+    /// 來源沒有提供演出者、或由服務端自己比對過演出者（LRCLIB 精確查詢）時也是 `true`。
+    pub artist_matches: bool,
 }
 
 impl LyricsHit {
@@ -51,6 +54,7 @@ impl LyricsHit {
             url,
             loose_duration: false,
             duration_gap: None,
+            artist_matches: true,
         }
     }
 

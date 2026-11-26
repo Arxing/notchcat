@@ -249,6 +249,33 @@ impl TrackIdentity {
         (simplified != n).then_some(simplified)
     }
 
+    /// 紀錄列出的演出者（一首歌可以有好幾位）是否和查詢的演出者寬鬆相符；任一位相符即可。
+    ///
+    /// 查詢端用正規化後的演出者（和送給來源、當快取鍵的相同：多位時取第一位）。兩邊和歌名一樣摺疊
+    /// （簡繁、全半形、大小寫），去掉空白與標點，再比三種部分：整個名字、其中的漢字、漢字以外的字；
+    /// 不足兩個字的部分不比，任一對部分一方包含另一方就算相符。
+    /// 紀錄沒有任何帶文字的名字（空清單、空字串）時沒有資訊可判斷，算相符。
+    pub fn matches_artist<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> bool {
+        let wanted = artist_parts(&artist_text(&self.normalized().artist));
+        let mut informed = false;
+        for name in names {
+            let name = artist_text(name);
+            if name.is_empty() {
+                continue;
+            }
+            informed = true;
+            let found = artist_parts(&name).iter().any(|theirs| {
+                wanted
+                    .iter()
+                    .any(|ours| ours.contains(theirs.as_str()) || theirs.contains(ours.as_str()))
+            });
+            if found {
+                return true;
+            }
+        }
+        !informed
+    }
+
     /// 不要用 `==` 比對提供者回來的歌名：同一首歌可能以簡體、不同大小寫或全形字元回來。
     /// 兩邊先折成同一種文字再比。
     pub fn loosely_matches(a: &str, b: &str) -> bool {
@@ -267,6 +294,21 @@ pub(super) fn fold(raw: &str) -> String {
     fold_text(&simplified)
         .trim_matches(char::is_whitespace)
         .to_string()
+}
+
+/// 演出者名的比對形式：同歌名的摺疊，再只留文字與數字。摺疊結果是分解形式，重新組合（NFC）
+/// 讓帶濁點的假名、韓文音節各算一個字。
+fn artist_text(raw: &str) -> String {
+    fold(raw).nfc().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// [`artist_text`] 結果裡拿來比的部分：整個名字、漢字、漢字以外；不足兩個字的丟掉。
+fn artist_parts(text: &str) -> Vec<String> {
+    let (han, other): (String, String) = text.chars().partition(|c| is_han(*c));
+    [text.to_string(), han, other]
+        .into_iter()
+        .filter(|part| part.chars().count() >= 2)
+        .collect()
 }
 
 #[cfg(test)]
@@ -589,5 +631,74 @@ mod tests {
             make("Song (Live)", "A & B", None).simplified_chinese(),
             None
         );
+    }
+
+    // ---- 演出者比對（Rust 版新增）
+
+    fn artist_matches(query: &str, record: &str) -> bool {
+        make("T", query, None).matches_artist([record])
+    }
+
+    #[test]
+    fn artist_matching_compares_the_whole_name_and_its_han_and_non_han_parts() {
+        let query = "周杰倫 Jay Chou";
+        for record in [
+            "周杰伦",
+            "Jay Chou",
+            "周杰倫 (Jay Chou)",
+            "ＪＡＹ　ＣＨＯＵ",
+            "jay-chou",
+            "周 杰 倫",
+        ] {
+            assert!(artist_matches(query, record), "{record}");
+        }
+        for record in ["恶童ETON", "Jay Park", "陈奕迅"] {
+            assert!(!artist_matches(query, record), "{record}");
+        }
+    }
+
+    #[test]
+    fn artist_matching_is_containment_either_way() {
+        assert!(artist_matches("周杰倫", "周杰倫 Jay Chou"));
+        assert!(artist_matches("Jay Chou", "周杰伦 (Jay Chou)"));
+        assert!(artist_matches("周杰倫 Official Channel", "周杰伦 Jay"));
+        assert!(artist_matches("鄧紫棋 G.E.M.", "GEM"));
+        assert!(artist_matches("宇多田ヒカル", "宇多田ヒカル"));
+    }
+
+    /// 單一字母或單一漢字的部分幾乎什麼都包含得到，所以不拿來比。
+    #[test]
+    fn artist_parts_shorter_than_two_characters_are_ignored() {
+        // 非漢字部分只剩「x」：不能因此配上任何含 x 的名字。
+        assert!(!artist_matches("周杰倫 X", "X Japan"));
+        assert!(!artist_matches("周杰倫", "周"));
+        assert!(!artist_matches("A", "Abba"));
+    }
+
+    #[test]
+    fn a_record_without_artist_information_counts_as_matching() {
+        let query = make("T", "周杰倫", None);
+        assert!(query.matches_artist([]));
+        for blank in ["", "  ", " - / ", "　"] {
+            assert!(query.matches_artist([blank]), "{blank:?}");
+        }
+        // 空白名字不是資訊：和不相符的名字並列時，仍以有內容的名字判斷。
+        assert!(!query.matches_artist(["", "恶童ETON"]));
+    }
+
+    #[test]
+    fn any_listed_artist_may_match() {
+        let query = make("T", "周杰倫", None);
+        assert!(query.matches_artist(["费玉清", "周杰伦"]));
+        assert!(!query.matches_artist(["费玉清", "陈奕迅"]));
+    }
+
+    /// 和歌名一樣用正規化後的查詢：多位演出者以第一位為準，寫法不同的合作名單也認得。
+    #[test]
+    fn artist_matching_uses_the_primary_query_artist() {
+        let query = "Taylor Swift, Ed Sheeran";
+        assert!(artist_matches(query, "Taylor Swift feat. Ed Sheeran"));
+        assert!(artist_matches(query, "Taylor Swift"));
+        assert!(!artist_matches(query, "Ed Sheeran"));
     }
 }

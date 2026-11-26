@@ -4,6 +4,9 @@
 //! 只靠精確查詢不夠：它可能只因為系統回報的標題少了資料庫帶有的 `(feat. …)` 後綴而落空，
 //! 而且同一首歌常有好幾筆時間軸不同的紀錄。精確端點回 404 是乾淨的「沒有」；
 //! 其他非 2xx 或看不懂的回應算那個請求失敗（見 [`Candidates`]）。
+//!
+//! 搜尋的紀錄會標記演出者是否和曲目相符（`LyricsHit::artist_matches`）；精確查詢的演出者由服務端比對，
+//! 一律算相符。要不要丟掉不相符的由 `LyricsRepository` 決定。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,6 +38,7 @@ struct Payload {
     #[serde(default, deserialize_with = "lenient_positive_id")]
     id: Option<i64>,
     track_name: Option<String>,
+    artist_name: Option<String>,
     duration: Option<f64>,
     plain_lyrics: Option<String>,
     synced_lyrics: Option<String>,
@@ -101,7 +105,7 @@ impl LrclibProvider {
     #[cfg(test)]
     fn decode_search(data: &[u8], track: &TrackIdentity) -> Option<Lyrics> {
         let payloads = decode_array::<Payload>(data).ok()?;
-        let hits = Self::search_candidates(&payloads, track);
+        let hits = Self::search_candidates(&payloads, track, track);
         super::provider::test_support::best_of(hits).map(|hit| hit.lyrics)
     }
 
@@ -111,7 +115,7 @@ impl LrclibProvider {
         let queries = std::iter::once(track).chain(simplified.as_ref());
         let (exact, searches) = join(
             self.exact(track),
-            join_all(queries.map(|query| self.search(query))),
+            join_all(queries.map(|query| self.search(query, track))),
         )
         .await;
         Candidates::collect(std::iter::once(exact).chain(searches))
@@ -134,20 +138,31 @@ impl LrclibProvider {
             .collect())
     }
 
-    async fn search(&self, track: &TrackIdentity) -> Result<Vec<LyricsHit>, ProviderError> {
-        let search = request(Self::search_url(track), &[], REQUEST_TIMEOUT);
+    /// 以 `query`（原本的曲目或它的簡體形式）搜尋；`track` 是原本的曲目。
+    async fn search(
+        &self,
+        query: &TrackIdentity,
+        track: &TrackIdentity,
+    ) -> Result<Vec<LyricsHit>, ProviderError> {
+        let search = request(Self::search_url(query), &[], REQUEST_TIMEOUT);
         let found = success_body(&self.http, search).await?;
         let payloads = decode_array::<Payload>(&found)?;
-        Ok(Self::search_candidates(&payloads, track))
+        Ok(Self::search_candidates(&payloads, query, track))
     }
 
     /// 搜尋是模糊的，可能回來另一首歌、混音或翻唱；不像精確查詢（伺服器自己比對名稱），
     /// 每個候選都必須帶有與查詢寬鬆相符的歌名。寧可沒有歌詞，也不要錯的歌詞。
     ///
     /// 命中的網址是候選自己的紀錄頁；候選沒有可用編號時退回搜尋請求的位址。
-    fn search_candidates(payloads: &[Payload], track: &TrackIdentity) -> Vec<LyricsHit> {
-        let wanted = track.normalized().title;
-        let search_url = Self::search_url(track);
+    /// 歌名相符不代表是同一首歌，所以每筆命中另外標記演出者是否相符；比的是原本曲目 `track` 的演出者，
+    /// 簡體查詢 `query` 可能已經拿掉英文名。
+    fn search_candidates(
+        payloads: &[Payload],
+        query: &TrackIdentity,
+        track: &TrackIdentity,
+    ) -> Vec<LyricsHit> {
+        let wanted = query.normalized().title;
+        let search_url = Self::search_url(query);
         payloads
             .iter()
             .filter(|payload| {
@@ -156,7 +171,11 @@ impl LrclibProvider {
                         && TrackIdentity::loosely_matches(&candidate_title(name), &wanted)
                 })
             })
-            .filter_map(|payload| Self::payload_hit(payload, track, &search_url))
+            .filter_map(|payload| {
+                let mut hit = Self::payload_hit(payload, query, &search_url)?;
+                hit.artist_matches = track.matches_artist(payload.artist_name.as_deref());
+                Some(hit)
+            })
             .collect()
     }
 
@@ -994,5 +1013,69 @@ mod tests {
 
         let sent: Vec<String> = http.requests().into_iter().map(|r| r.url).collect();
         assert_eq!(sent, expected);
+    }
+
+    // MARK: record artist (Rust only)
+
+    fn by_artist(id: i64, artist: &str) -> String {
+        format!(
+            r#"{{"id":{id},"trackName":"爸 我回來了","artistName":{artist},"duration":230,"syncedLyrics":"[00:01.00]x"}}"#
+        )
+    }
+
+    fn artist_flags(provider: &LrclibProvider) -> Vec<(String, bool)> {
+        let found = block_on(provider.fetch(&mv_track())).unwrap();
+        found
+            .hits
+            .into_iter()
+            .map(|h| {
+                let id = h.url.rsplit('/').next().unwrap().to_string();
+                (id, h.artist_matches)
+            })
+            .collect()
+    }
+
+    fn flags(expected: &[(&str, bool)]) -> Vec<(String, bool)> {
+        expected
+            .iter()
+            .map(|&(id, m)| (id.to_string(), m))
+            .collect()
+    }
+
+    #[test]
+    fn lrclib_search_records_whether_the_record_artist_matches() {
+        let original = [
+            by_artist(1, r#""恶童ETON""#),
+            by_artist(2, r#""周杰伦""#),
+            by_artist(3, "null"),
+            record(4, "爸 我回來了", 230.0, "no artist field"),
+            by_artist(5, r#""""#),
+        ]
+        .join(",");
+        // 簡體搜尋用只剩中文名的查詢，但演出者仍和原本的查詢比：英文名也算相符。
+        let (_, provider) = mv_setup(&original, &by_artist(6, r#""Jay Chou""#));
+
+        assert_eq!(
+            artist_flags(&provider),
+            flags(&[
+                ("1", false),
+                ("2", true),
+                ("3", true),
+                ("4", true),
+                ("5", true),
+                ("6", true),
+            ])
+        );
+    }
+
+    /// 精確查詢的演出者是服務端自己比對的，回來的寫法不管長怎樣都算相符；
+    /// 搜尋又回同一筆時也不改變這個結論。
+    #[test]
+    fn lrclib_exact_hit_counts_as_matching() {
+        let same = by_artist(1, r#""Someone Else""#);
+        let (http, provider) = mv_setup(&same, "");
+        http.respond(LrclibProvider::exact_url(&mv_track()), 200, same.clone());
+
+        assert_eq!(artist_flags(&provider), flags(&[("1", true)]));
     }
 }
