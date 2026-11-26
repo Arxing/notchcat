@@ -25,9 +25,10 @@
 //! # 存檔規則
 //!
 //! - 原子：同目錄寫暫存檔、`sync_all`、再改名覆蓋（同設定檔，見 [`crate::config`]）；會建立缺少的上層資料夾。
-//! - 整份讀不了的原檔在第一次存檔時先改名為 `lyric-choices.json.bak`（蓋掉更舊的 `.bak`）；備份失敗就不寫。
-//!   備份成功後即使最後一步失敗，之後也不再備份。
-//! - 略過的單筆不另外備份：下一次存檔後就不在檔案裡了。
+//! - 有讀不進來的內容（整份讀不了，或略過了任何一筆）的原檔，在第一次存檔時先改名備份；備份失敗就不寫。
+//!   讀得進來的紀錄照常使用，之後從記憶體寫回新檔。備份成功後即使最後一步失敗，之後也不再備份。
+//! - 備份**不覆蓋**任何既有檔案（和設定檔不同）：用 `lyric-choices.json.bak`，已存在就依序用 `.bak2`、`.bak3`…
+//!   到 `.bak99`；全部被佔用時回 `Err`、原檔不動。舊備份要由使用者自己清掉。
 //! - 讀入時會略過的紀錄不寫出，非有限的曲長寫成 `null`，偏移先限制範圍，所以寫出的檔案一定整份讀得回來。
 //! - 路徑是資料夾、或內容超過 [`MAX_CHOICE_BYTES`] → 回 `Err`，什麼都不動。
 
@@ -46,6 +47,9 @@ use crate::config::{sibling_with_suffix, write_temp};
 
 /// 紀錄檔大小上限（讀與寫相同）；一首歌約幾 KB，正常使用到不了。
 pub const MAX_CHOICE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// 備份最多保留幾份（`.bak`、`.bak2`…）。
+const MAX_BACKUPS: u32 = 99;
 
 const FILE_NAME: &str = "lyric-choices.json";
 const FORMAT_VERSION: u64 = 1;
@@ -187,11 +191,35 @@ fn serialize(book: &ChoiceBook) -> io::Result<String> {
     Ok(serde_json::to_string(&document)?)
 }
 
-/// 紀錄檔的位置，加上「損毀的原檔是否還等著備份」。
+/// 第一個沒被佔用的備份路徑：`.bak`，然後 `.bak2`…`.bak{MAX_BACKUPS}`。
+///
+/// 改名會覆蓋目標，所以先確認名字是空的。檢查和改名之間沒有別人寫這些檔案（App 只有一個執行個體，
+/// 存檔之間以鎖排隊）。
+fn free_backup_path(path: &Path) -> io::Result<PathBuf> {
+    for n in 1..=MAX_BACKUPS {
+        let suffix = match n {
+            1 => ".bak".to_string(),
+            _ => format!(".bak{n}"),
+        };
+        let candidate = sibling_with_suffix(path, &suffix)?;
+        // 不跟隨連結：指向不存在目標的符號連結也算被佔用。
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(candidate),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "歌詞紀錄檔的備份名稱都用完了",
+    ))
+}
+
+/// 紀錄檔的位置，加上「原檔是否還等著備份」。
 #[derive(Debug)]
 pub struct ChoiceFile {
     path: PathBuf,
-    /// 整份讀不了的原檔還沒備份。鎖在整次存檔期間持有，同時存檔也只會備份一次。
+    /// 原檔有讀不進來的內容、還沒備份。鎖在整次存檔期間持有，同時存檔也只會備份一次。
     backup_pending: Mutex<bool>,
     /// 改名函式；只有測試會換掉它（讓存檔的最後一步失敗）。
     rename: fn(&Path, &Path) -> io::Result<()>,
@@ -200,20 +228,28 @@ pub struct ChoiceFile {
 impl ChoiceFile {
     /// 開紀錄檔（永遠成功、不修改檔案；規則見模組說明）。回傳讀到的紀錄與給呼叫端寫日誌的警告。
     pub fn open(path: PathBuf) -> (ChoiceFile, ChoiceBook, Vec<String>) {
-        let (book, warnings, broken) = match load(&path) {
-            Ok((book, 0)) => (book, Vec::new(), false),
+        // `problem`：原檔裡有讀不進來的內容時的說明；有它就要先備份才能覆蓋。
+        let (book, problem) = match load(&path) {
+            Ok((book, 0)) => (book, None),
             Ok((book, skipped)) => {
-                let warning = format!("歌詞紀錄檔有 {skipped} 筆紀錄無法使用，已略過");
-                (book, vec![warning], false)
+                let problem = format!("歌詞紀錄檔有 {skipped} 筆紀錄無法使用，已略過");
+                (book, Some(problem))
             }
-            Err(reason) => {
-                let warning = format!("{reason}；當作沒有紀錄，第一次儲存時會把原檔備份為 .bak");
-                (ChoiceBook::default(), vec![warning], true)
-            }
+            Err(reason) => (
+                ChoiceBook::default(),
+                Some(format!("{reason}；當作沒有紀錄")),
+            ),
         };
+        let needs_backup = problem.is_some();
+        let warnings = problem
+            .map(|p| {
+                format!("{p}；第一次儲存時會先把原檔改名備份（.bak，已存在就用 .bak2、.bak3…）")
+            })
+            .into_iter()
+            .collect();
         let file = ChoiceFile {
             path,
-            backup_pending: Mutex::new(broken),
+            backup_pending: Mutex::new(needs_backup),
             rename: |from, to| fs::rename(from, to),
         };
         (file, book, warnings)
@@ -245,9 +281,9 @@ impl ChoiceFile {
         // 1. 先把新內容完整寫進同目錄的暫存檔：失敗時原檔原封不動。
         let tmp = write_temp(&self.path, &contents)?;
 
-        // 2. 損毀的原檔先備份（蓋掉更舊的 .bak）。備份失敗就放棄，不能毀掉使用者的檔案。
+        // 2. 有讀不進來內容的原檔先備份到空的名字。備份失敗就放棄，不能毀掉使用者的檔案。
         if *backup_pending {
-            let backup = sibling_with_suffix(&self.path, ".bak").and_then(|bak| {
+            let backup = free_backup_path(&self.path).and_then(|bak| {
                 match (self.rename)(&self.path, &bak) {
                     Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()), // 載入後被刪掉了
                     other => other,
@@ -299,7 +335,12 @@ mod tests {
         }
 
         fn bak(&self) -> PathBuf {
-            self.0.join("lyric-choices.json.bak")
+            self.sibling(".bak")
+        }
+
+        /// 紀錄檔名加上 `suffix` 的檔案。
+        fn sibling(&self, suffix: &str) -> PathBuf {
+            self.0.join(format!("lyric-choices.json{suffix}"))
         }
 
         fn entries(&self) -> Vec<String> {
@@ -475,7 +516,6 @@ mod tests {
             let shown = String::from_utf8_lossy(original);
             let dir = TempDir::new();
             fs::write(dir.file(), original).unwrap();
-            fs::write(dir.bak(), "older backup").unwrap();
 
             let (file, book, warnings) = ChoiceFile::open(dir.file());
             assert_eq!(book, ChoiceBook::default(), "{shown}");
@@ -483,7 +523,7 @@ mod tests {
             assert_no_content_leak(&warnings);
             // 開檔本身不動檔案。
             assert_eq!(fs::read(dir.file()).unwrap(), original, "{shown}");
-            assert_eq!(fs::read(dir.bak()).unwrap(), b"older backup");
+            assert_eq!(dir.entries(), ["lyric-choices.json"], "{shown}");
 
             let first = book_of(vec![choice("t\u{1}a")]);
             file.save(&first).unwrap();
@@ -567,10 +607,137 @@ mod tests {
         assert!(warnings[0].contains(&bad.len().to_string()), "{warnings:?}");
         assert_no_content_leak(&warnings);
 
-        // 整份檔案沒壞：存檔直接覆蓋，不做備份。
+        // 有略過的紀錄：第一次存檔前原檔先備份。
         file.save(&book).unwrap();
-        assert_eq!(dir.entries(), ["lyric-choices.json"]);
+        assert_eq!(fs::read(dir.bak()).unwrap(), text.as_bytes());
+        assert_eq!(
+            dir.entries(),
+            ["lyric-choices.json", "lyric-choices.json.bak"]
+        );
         assert_eq!(reload(&dir.file()), book);
+    }
+
+    /// 開一個有單筆讀不進來的檔案、存兩次：原檔一個位元組不差地留在 `.bak`，而且只備份一次。
+    fn assert_backed_up_once(original: &str, kept: &[&str], skipped: usize) {
+        let dir = TempDir::new();
+        fs::write(dir.file(), original).unwrap();
+        let (file, mut book, warnings) = ChoiceFile::open(dir.file());
+        let keys: Vec<&str> = book.songs.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, kept);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains(&format!("{skipped} 筆")),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains(".bak"), "{warnings:?}");
+        assert_no_content_leak(&warnings);
+        // 開檔本身不動檔案。
+        assert_eq!(dir.entries(), ["lyric-choices.json"]);
+        assert_eq!(fs::read(dir.file()).unwrap(), original.as_bytes());
+
+        // 讀得進來的紀錄之後由記憶體寫回。
+        for added in ["added", "added again"] {
+            book.upsert(choice(added));
+            file.save(&book).unwrap();
+            assert_eq!(fs::read(dir.bak()).unwrap(), original.as_bytes());
+            assert_eq!(reload(&dir.file()), book);
+            assert_eq!(
+                dir.entries(),
+                ["lyric-choices.json", "lyric-choices.json.bak"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_with_one_bad_entry_is_preserved_in_the_backup() {
+        let original = concat!(
+            r#"{"version":1,"songs":["#,
+            r#"{"song":"good","duration":200.0,"url":"https://test.example/1","offsets":{},"lines":[[1.0,"a"]]},"#,
+            "\n  ",
+            r#"{"song":"SECRET-TITLE","duration":null,"url":"http://test.example/2","offsets":{},"lines":[[1.0,"SECRET-LYRIC"]]}]}"#,
+            "\n",
+        );
+        assert_backed_up_once(original, &["good"], 1);
+    }
+
+    #[test]
+    fn a_file_whose_entries_are_all_bad_is_preserved_in_the_backup() {
+        // 例如之後的版本改了單筆的形狀、版本號卻還是 1。
+        let original = r#"{"version":1,"songs":[{"song":"SECRET-TITLE","urls":["https://test.example/1"]},{"song":"SECRET-ARTIST","urls":[]}]}"#;
+        assert_backed_up_once(original, &[], 2);
+    }
+
+    #[test]
+    fn an_existing_backup_is_left_intact_and_the_next_name_is_used() {
+        let dir = TempDir::new();
+        let book = book_of(vec![choice("t\u{1}a")]);
+        fs::write(dir.bak(), "older backup").unwrap();
+        // 整份讀不了的、和只有單筆讀不進來的都一樣。
+        let originals = [
+            ("broken original", ".bak2"),
+            (r#"{"version":1,"songs":[null]}"#, ".bak3"),
+        ];
+        for (original, suffix) in originals {
+            fs::write(dir.file(), original).unwrap();
+            let (file, _, _) = ChoiceFile::open(dir.file());
+            file.save(&book).unwrap();
+            assert_eq!(
+                fs::read(dir.sibling(suffix)).unwrap(),
+                original.as_bytes(),
+                "{suffix}"
+            );
+            assert_eq!(reload(&dir.file()), book);
+        }
+        assert_eq!(fs::read(dir.bak()).unwrap(), b"older backup");
+        assert_eq!(fs::read(dir.sibling(".bak2")).unwrap(), b"broken original");
+        assert_eq!(
+            dir.entries(),
+            [
+                "lyric-choices.json",
+                "lyric-choices.json.bak",
+                "lyric-choices.json.bak2",
+                "lyric-choices.json.bak3",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_counts_as_an_existing_backup() {
+        let dir = TempDir::new();
+        std::os::unix::fs::symlink(dir.0.join("nowhere"), dir.bak()).unwrap();
+        fs::write(dir.file(), "broken original").unwrap();
+        let (file, _, _) = ChoiceFile::open(dir.file());
+        file.save(&book_of(vec![choice("t\u{1}a")])).unwrap();
+        assert!(fs::symlink_metadata(dir.bak()).unwrap().is_symlink());
+        assert_eq!(fs::read(dir.sibling(".bak2")).unwrap(), b"broken original");
+    }
+
+    #[test]
+    fn saving_fails_once_every_backup_name_is_taken() {
+        let dir = TempDir::new();
+        fs::write(dir.file(), "broken original").unwrap();
+        let mut taken = vec![dir.bak()];
+        taken.extend((2..=99).map(|n| dir.sibling(&format!(".bak{n}"))));
+        for path in &taken {
+            fs::write(path, "older backup").unwrap();
+        }
+        let (file, _, _) = ChoiceFile::open(dir.file());
+        let book = book_of(vec![choice("t\u{1}a")]);
+
+        assert!(file.save(&book).is_err());
+        assert_eq!(fs::read(dir.file()).unwrap(), b"broken original");
+        for path in &taken {
+            assert_eq!(fs::read(path).unwrap(), b"older backup", "{path:?}");
+        }
+        assert_eq!(dir.entries().len(), 100, "no temp file or extra backup");
+
+        // 空出一個名字後，下一次存檔就用它。
+        fs::remove_file(dir.sibling(".bak57")).unwrap();
+        file.save(&book).unwrap();
+        assert_eq!(fs::read(dir.sibling(".bak57")).unwrap(), b"broken original");
+        assert_eq!(reload(&dir.file()), book);
+        assert_eq!(dir.entries().len(), 100);
     }
 
     #[test]
@@ -659,29 +826,34 @@ mod tests {
         assert_eq!(reload(&dir.file()), book);
     }
 
+    /// 只讓備份那一步失敗的改名函式。
+    fn rename_failing_the_backup(from: &Path, to: &Path) -> io::Result<()> {
+        if to.to_string_lossy().contains(".bak") {
+            Err(io::Error::other("injected failure"))
+        } else {
+            fs::rename(from, to)
+        }
+    }
+
     #[test]
     fn nothing_is_written_while_the_backup_fails() {
-        let dir = TempDir::new();
-        fs::write(dir.file(), "broken original").unwrap();
-        // 一個非空資料夾佔住 .bak 的位置：備份的改名一定失敗。
-        fs::create_dir(dir.bak()).unwrap();
-        fs::write(dir.bak().join("keep"), "x").unwrap();
-        let (file, _, _) = ChoiceFile::open(dir.file());
-        let book = book_of(vec![choice("t\u{1}a")]);
-        for _ in 0..2 {
-            assert!(file.save(&book).is_err());
-            assert_eq!(fs::read(dir.file()).unwrap(), b"broken original");
-            assert_eq!(
-                dir.entries(),
-                ["lyric-choices.json", "lyric-choices.json.bak"],
-                "no temp file left"
-            );
+        for original in ["broken original", r#"{"version":1,"songs":[null]}"#] {
+            let dir = TempDir::new();
+            fs::write(dir.file(), original).unwrap();
+            let (mut file, _, _) = ChoiceFile::open(dir.file());
+            file.rename = rename_failing_the_backup;
+            let book = book_of(vec![choice("t\u{1}a")]);
+            for _ in 0..2 {
+                assert!(file.save(&book).is_err(), "{original}");
+                assert_eq!(fs::read(dir.file()).unwrap(), original.as_bytes());
+                assert_eq!(dir.entries(), ["lyric-choices.json"], "no temp file left");
+            }
+            // 障礙排除後，下一次存檔照樣先備份。
+            file.rename = |from, to| fs::rename(from, to);
+            file.save(&book).unwrap();
+            assert_eq!(fs::read(dir.bak()).unwrap(), original.as_bytes());
+            assert_eq!(reload(&dir.file()), book);
         }
-        // 障礙排除後，下一次存檔照樣先備份。
-        fs::remove_dir_all(dir.bak()).unwrap();
-        file.save(&book).unwrap();
-        assert_eq!(fs::read(dir.bak()).unwrap(), b"broken original");
-        assert_eq!(reload(&dir.file()), book);
     }
 
     #[test]
