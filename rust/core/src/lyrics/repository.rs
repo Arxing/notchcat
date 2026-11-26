@@ -10,7 +10,9 @@
 //! 有來源失敗時清單可能缺版本，所以不論查到什麼都只快取 `failure_ttl`；否則查到的永久有效、
 //! 「查無」記 `negative_ttl`。
 //!
-//! 非同步模型見 ADR-0001：同一首歌的併發呼叫以 `Coalescer` 共用一次查詢；快取寫入位於被合併的
+//! 快取與併發合併以「正規化後的歌名與演出者，加上取整到秒的曲長」辨認一次查詢（見 `LookupKey`）。
+//!
+//! 非同步模型見 ADR-0001：同一鍵的併發呼叫以 `Coalescer` 共用一次查詢；快取寫入位於被合併的
 //! future 內部的結尾，所以被放棄（所有呼叫者都 drop）的查詢根本跑不到寫入那一行，不會被記成「查無」。
 
 use std::collections::HashMap;
@@ -55,6 +57,18 @@ pub trait LyricsResolving: Send + Sync {
     fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Vec<LyricsHit>>;
 }
 
+/// 快取與合併查詢用的鍵：[`TrackIdentity::cache_key`] 加整數秒曲長；曲長未知（沒有、非有限值、
+/// 不大於 0）為 `None`。版本清單按曲長把關與排序，同名但長度不同的曲目（MV 與專輯版）不能共用。
+type LookupKey = (String, Option<u64>);
+
+fn lookup_key(track: &TrackIdentity) -> LookupKey {
+    let seconds = track
+        .duration
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .map(|d| d.round() as u64);
+    (track.cache_key(), seconds)
+}
+
 /// `until`（Unix epoch 秒）為 `None` 表示永不過期。
 #[derive(Clone)]
 enum CacheEntry {
@@ -70,7 +84,7 @@ enum CacheEntry {
 /// 跨來源解析歌詞並快取結果（見模組說明）。
 pub struct LyricsRepository {
     inner: Arc<Inner>,
-    flights: Coalescer<String, Vec<LyricsHit>>,
+    flights: Coalescer<LookupKey, Vec<LyricsHit>>,
 }
 
 /// 被合併的查詢 future 需要 `'static`，所以它用到的狀態放在 `Arc` 裡。
@@ -78,7 +92,7 @@ struct Inner {
     providers: Vec<Arc<dyn LyricsProvider>>,
     clock: Arc<dyn Clock>,
     cfg: RepositoryConfig,
-    cache: Mutex<HashMap<String, CacheEntry>>,
+    cache: Mutex<HashMap<LookupKey, CacheEntry>>,
 }
 
 impl LyricsRepository {
@@ -100,19 +114,20 @@ impl LyricsRepository {
         }
     }
 
-    /// 正在等待 `track` 那次查詢的呼叫者數；沒有進行中的查詢時為 0（測試用）。
+    /// 正在等待 `track` 那次查詢（歌名、演出者與取整曲長都相同者共用）的呼叫者數；
+    /// 沒有進行中的查詢時為 0（測試用）。
     pub fn in_flight_waiters(&self, track: &TrackIdentity) -> usize {
-        self.flights.waiters(&track.cache_key())
+        self.flights.waiters(&lookup_key(track))
     }
 }
 
 impl LyricsResolving for LyricsRepository {
     fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Vec<LyricsHit>> {
-        let key = track.cache_key();
+        let key = lookup_key(&track);
         if let Some(hits) = self.inner.cached(&key) {
             return Box::pin(std::future::ready(hits));
         }
-        // 同一首歌的呼叫者共用一次查詢，所以來回快速切歌不會把同一個來源問兩次。
+        // 同一鍵的呼叫者共用一次查詢，所以來回快速切歌不會把同一個來源問兩次。
         // 呼叫者 drop 自己的 future 即離開；最後一個離開時查詢被 drop（放棄）。
         let inner = self.inner.clone();
         let run_key = key.clone();
@@ -124,7 +139,7 @@ impl LyricsResolving for LyricsRepository {
 
 impl Inner {
     /// 未過期的快取結果：非空清單是命中歌詞、空清單是命中「查無」、`None` 沒有可用的快取。
-    fn cached(&self, key: &str) -> Option<Vec<LyricsHit>> {
+    fn cached(&self, key: &LookupKey) -> Option<Vec<LyricsHit>> {
         let now = self.clock.now();
         match lock(&self.cache).get(key)? {
             CacheEntry::Found { hits, until } if until.is_none_or(|u| now < u) => {
@@ -135,7 +150,7 @@ impl Inner {
         }
     }
 
-    async fn resolve(&self, track: TrackIdentity, key: String) -> Vec<LyricsHit> {
+    async fn resolve(&self, track: TrackIdentity, key: LookupKey) -> Vec<LyricsHit> {
         // 多執行緒競態：呼叫者查快取沒命中之後、本查詢第一次被輪詢之前，另一條執行緒的查詢可能
         // 已經寫好快取並移除了它的表項（快取一律先寫、表項後移除），於是這裡成了第二輪查詢。
         // 開頭重查一次快取即可擋下，不必再問一輪來源。
@@ -778,7 +793,7 @@ mod tests {
         );
     }
 
-    /// 快取鍵來自正規化後的識別，所以同一首歌帶 feat. 後綴、長度略有不同時不得重查。
+    /// 快取鍵來自正規化後的識別，所以同一首歌帶 feat. 後綴、大小寫不同、曲長取整後相同時不得重查。
     #[test]
     fn cache_is_keyed_on_normalized_identity() {
         let h = Harness::new();
@@ -786,7 +801,7 @@ mod tests {
         let repo = h.repo(vec![dynp(&provider)]);
 
         h.ask(&repo, track());
-        let result = h.ask(&repo, identity("T (feat. X)", 203.0));
+        let result = h.ask(&repo, identity("t (feat. X)", 200.4));
 
         assert_eq!(result, Some(synced()));
         assert_eq!(provider.call_count(), 1);
@@ -845,7 +860,7 @@ mod tests {
         let repo = h.repo(vec![dynp(&provider)]);
 
         let a = h.start(&repo, track());
-        let b = h.start(&repo, identity("T (feat. X)", 201.0));
+        let b = h.start(&repo, identity("T (feat. X)", 200.4));
         h.run();
         h.advance(millis(100));
 
@@ -1533,7 +1548,7 @@ mod tests {
         let caller = repo.lyrics(track());
         assert_eq!(repo.in_flight_waiters(&track()), 1);
         lock(&repo.inner.cache).insert(
-            track().cache_key(),
+            lookup_key(&track()),
             CacheEntry::Found {
                 hits: vec![hit(synced())],
                 until: None,
@@ -1567,21 +1582,95 @@ mod tests {
         assert_eq!(provider.call_count(), 1);
     }
 
-    /// 快取鍵不含曲長：同一首歌回報不同長度（或沒有長度）時直接命中快取。
+    // ------------------------------------------------------------ 快取鍵含曲長（Rust 版新增）
+
+    /// 版本清單按曲長把關與排序，所以同名但長度不同的曲目（MV 與專輯版）各查各的、各拿自己的清單。
     #[test]
-    fn cache_key_ignores_duration() {
+    fn tracks_of_different_lengths_get_their_own_version_lists() {
+        let h = Harness::new();
+        // 第二份的最後一行在 260 秒：放得進 298 秒的曲子，放不進 238 秒的。
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                hit_at(synced(), "https://a.example/1"),
+                hit_at(shifted(250.0), "https://a.example/2"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+
+        let short = h.ask_versions(&repo, identity("T", 238.0));
+        let long = h.ask_versions(&repo, identity("T", 298.0));
+
+        assert_eq!(source.call_count(), 2);
+        assert_eq!(urls(&short), ["https://a.example/1"]);
+        assert_eq!(urls(&long), ["https://a.example/1", "https://a.example/2"]);
+        // 兩份清單各自留在快取裡。
+        assert_eq!(h.ask_versions(&repo, identity("T", 238.0)), short);
+        assert_eq!(h.ask_versions(&repo, identity("T", 298.0)), long);
+        assert_eq!(source.call_count(), 2);
+    }
+
+    #[test]
+    fn lengths_rounding_to_the_same_second_share_a_cache_entry() {
         let h = Harness::new();
         let provider = FakeProvider::result("p", &h.clock, Some(synced()));
         let repo = h.repo(vec![dynp(&provider)]);
 
-        h.ask(&repo, identity("T", 200.0));
-        assert_eq!(h.ask(&repo, identity("T", 260.0)), Some(synced()));
-        let unknown = TrackIdentity {
-            duration: None,
+        for duration in [238.2, 238.4, 237.6] {
+            assert_eq!(h.ask(&repo, identity("T", duration)), Some(synced()));
+        }
+        assert_eq!(provider.call_count(), 1);
+
+        // 四捨五入到 239 秒：另一個項目。
+        h.ask(&repo, identity("T", 238.6));
+        assert_eq!(provider.call_count(), 2);
+    }
+
+    /// 沒有曲長、非有限值、不大於 0 都算「未知」：彼此共用，和已知長度分開。
+    #[test]
+    fn an_unknown_length_is_cached_apart_from_known_ones() {
+        let h = Harness::new();
+        let provider = FakeProvider::result("p", &h.clock, Some(synced()));
+        let repo = h.repo(vec![dynp(&provider)]);
+        let with_duration = |duration| TrackIdentity {
+            duration,
             ..track()
         };
-        assert_eq!(h.ask(&repo, unknown), Some(synced()));
-        assert_eq!(provider.call_count(), 1);
+
+        h.ask(&repo, track());
+        h.ask(&repo, with_duration(None));
+        assert_eq!(provider.call_count(), 2);
+
+        for unknown in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            h.ask(&repo, with_duration(Some(unknown)));
+            assert_eq!(provider.call_count(), 2, "{unknown}");
+        }
+        // 不到半秒的已知長度取整是 0，仍不算未知。
+        h.ask(&repo, with_duration(Some(0.2)));
+        assert_eq!(provider.call_count(), 3);
+    }
+
+    #[test]
+    fn concurrent_lookups_share_a_flight_only_within_the_same_rounded_length() {
+        let h = Harness::new();
+        let provider = FakeProvider::slow("p", &h.clock, Some(synced()), secs(1));
+        let repo = h.repo(vec![dynp(&provider)]);
+
+        let a = h.start(&repo, identity("T", 238.2));
+        let b = h.start(&repo, identity("T", 238.4));
+        let c = h.start(&repo, identity("T", 298.0));
+        h.run();
+
+        assert_eq!(provider.call_count(), 2);
+        assert_eq!(repo.in_flight_waiters(&identity("T", 238.0)), 2);
+        assert_eq!(repo.in_flight_waiters(&identity("T", 298.0)), 1);
+        h.advance(secs(1));
+        for lookup in [&a, &b, &c] {
+            assert_eq!(lookup.finished(), Some(synced()));
+        }
+        assert_eq!(provider.call_count(), 2);
     }
 
     // ------------------------------------------------------------ 來源網址（LyricsHit）
