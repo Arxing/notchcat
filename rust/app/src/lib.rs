@@ -2,6 +2,7 @@
 //!
 //! 這裡沒有任何 OS 專屬程式碼，Windows 也能編譯。
 
+pub mod choice_file;
 pub mod composition;
 pub mod config;
 pub mod gated_source;

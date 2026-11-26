@@ -22,6 +22,11 @@ futures-channel = { version = "0.3", default-features = false, features = ["std"
 # 設定檔（TOML）。只用 parse（讀）與 display（寫字串值時的跳脫）；不用 serde 衍生，欄位以寬鬆的手動擷取讀出，
 # 好讓單一欄位的型別錯誤只影響該欄位。純 Rust，MIT OR Apache-2.0。
 toml = { version = "0.8", default-features = false, features = ["parse", "display"] }
+# 歌詞紀錄檔（choice_file）的 JSON。raw_value：逐筆解碼，一筆壞掉只略過那筆；
+# float_roundtrip：寫出的小數讀回來完全相同（預設的解析可能差一個最小單位）。
+# core 已用同兩個 crate；皆為純 Rust，MIT OR Apache-2.0。
+serde = { version = "1", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["std", "raw_value", "float_roundtrip"] }
 
 [dev-dependencies]
 # FakeHttp／FakeClock（switchable 的測試用）。

@@ -3326,6 +3326,8 @@ dependencies = [
  "musicat-core",
  "musicat-platform-macos",
  "musicat-shell",
+ "serde",
+ "serde_json",
  "toml 0.8.23",
  "ureq",
 ]

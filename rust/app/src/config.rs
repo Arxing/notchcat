@@ -581,10 +581,11 @@ fn sanitize_size(value: f64, default: f64, range: (f64, f64)) -> f64 {
     }
 }
 
-fn sibling_with_suffix(path: &Path, suffix: &str) -> io::Result<PathBuf> {
+/// 同目錄、檔名加上 `suffix` 的路徑（設定檔與歌詞紀錄檔共用）。
+pub(crate) fn sibling_with_suffix(path: &Path, suffix: &str) -> io::Result<PathBuf> {
     let mut name = path
         .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "設定檔路徑沒有檔名"))?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "路徑沒有檔名"))?
         .to_os_string();
     name.push(suffix);
     Ok(path.with_file_name(name))
@@ -651,7 +652,8 @@ fn save_with(
     SaveOutcome { result, backed_up }
 }
 
-fn write_temp(path: &Path, contents: &str) -> io::Result<PathBuf> {
+/// 把 `contents` 完整寫進 `path` 旁的新暫存檔並回傳它的路徑；失敗時不留下檔案。
+pub(crate) fn write_temp(path: &Path, contents: &str) -> io::Result<PathBuf> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let suffix = format!(
         ".tmp-{}-{}",
