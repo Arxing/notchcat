@@ -393,15 +393,17 @@ mod tests {
         let t = track();
 
         // 用戶端回報 TooLarge：兩個提供者都是失敗。
+        // LRCLIB 的搜尋要排成乾淨的「沒有」，否則沒排程的網址本身就會造成失敗。
         let http = Arc::new(FakeHttp::new());
         http.fail(LrclibProvider::exact_url(&t), HttpError::TooLarge);
-        let lrclib = LrclibProvider::new(http.clone());
-        assert!(block_on(lrclib.fetch(&t)).is_err());
+        http.respond(LrclibProvider::search_url(&t), 200, "[]");
+        let lrclib = LrclibProvider::new(http);
+        assert_eq!(block_on(lrclib.fetch(&t)), Err(ProviderError::BadResponse));
 
         let http = Arc::new(FakeHttp::new());
         http.fail(NetEaseProvider::search_url(&t), HttpError::TooLarge);
-        let netease = NetEaseProvider::new(http.clone());
-        assert!(block_on(netease.fetch(&t)).is_err());
+        let netease = NetEaseProvider::new(http);
+        assert_eq!(block_on(netease.fetch(&t)), Err(ProviderError::BadResponse));
 
         // 用戶端沒擋住：合法 JSON 後面接滿空白，本體超過上限；解碼得出命中，但仍須失敗。
         let http = Arc::new(FakeHttp::new());
