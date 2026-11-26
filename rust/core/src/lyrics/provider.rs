@@ -1,6 +1,6 @@
 //! 歌詞提供者介面與共用的請求管線（移植自 Swift `LyricsProvider`／`LyricsHTTP`）。
 //!
-//! 提供者必須區分「失敗」（回傳 `Err`）與「乾淨地沒有」（回傳 `Ok(None)`）：
+//! 提供者必須區分「失敗」（回傳 `Err`，或把清單標成不完整）與「乾淨地沒有」（完整的空清單）：
 //! `LyricsRepository` 對兩者的快取策略截然不同。
 
 use std::sync::Arc;
@@ -31,17 +31,62 @@ impl std::fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+/// 一個來源這次查到的所有合格候選。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidates {
+    /// 依請求順序、同一請求內依回應順序排列；同一網址只出現一次。
+    pub hits: Vec<LyricsHit>,
+    /// `false`：有請求失敗，清單可能缺候選。
+    pub complete: bool,
+}
+
+impl Candidates {
+    /// 依請求順序收攏各請求的結果。一個候選都沒有且有請求失敗時回第一個錯誤；
+    /// 有候選但有請求失敗時標成不完整。網址相同的候選只留優先序最高的那筆（同序留先到的），
+    /// 位置是該網址第一次出現的地方。
+    pub(crate) fn collect<H: IntoIterator<Item = LyricsHit>>(
+        requests: impl IntoIterator<Item = Result<H, ProviderError>>,
+    ) -> Result<Self, ProviderError> {
+        let mut hits: Vec<LyricsHit> = Vec::new();
+        let mut first_error = None;
+        for request in requests {
+            match request {
+                Ok(found) => {
+                    for hit in found {
+                        match hits.iter_mut().find(|kept| kept.url == hit.url) {
+                            Some(kept) if kept.rank() < hit.rank() => *kept = hit,
+                            Some(_) => {}
+                            None => hits.push(hit),
+                        }
+                    }
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) if hits.is_empty() => Err(error),
+            error => Ok(Self {
+                hits,
+                complete: error.is_none(),
+            }),
+        }
+    }
+}
+
 /// 一個歌詞來源。
 ///
-/// 回傳 `Err` 表示請求失敗（傳輸錯誤、非 2xx、2xx 但看不懂的本體）；
-/// `Ok(None)` 只用於服務乾淨地回答「沒有」。兩者的快取策略不同，不可混用。
-/// 命中的 `LyricsHit` 帶著這筆歌詞在來源服務上的 `https://` 網址。
+/// 一次查詢可能發多個請求。請求失敗指傳輸錯誤、非 2xx、或 2xx 但看不懂的本體：
+/// 一個候選都沒有且有請求失敗時回 `Err`；有候選但有請求失敗時回不完整的 [`Candidates`]。
+/// 完整的空清單只用於服務乾淨地回答「沒有」。三者的快取策略不同，不可混用。
+/// 每筆 `LyricsHit` 帶著這筆歌詞在來源服務上的 `https://` 網址。
 pub trait LyricsProvider: Send + Sync {
     fn id(&self) -> &str;
     fn fetch<'a>(
         &'a self,
         track: &'a TrackIdentity,
-    ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>>;
+    ) -> BoxFuture<'a, Result<Candidates, ProviderError>>;
 }
 
 /// 固定、不帶任何使用者資料。
@@ -176,6 +221,22 @@ pub(crate) mod test_support {
     use std::task::{Context, Poll};
 
     use futures_util::task::noop_waker;
+
+    use crate::lyrics::LyricsHit;
+
+    /// 候選裡最好的一筆（與 `LyricsRepository` 挑選的規則相同）。
+    pub fn best_of(hits: Vec<LyricsHit>) -> Option<LyricsHit> {
+        let mut best = None;
+        for hit in hits {
+            LyricsHit::keep_better(&mut best, hit);
+        }
+        best
+    }
+
+    /// 結果裡各筆命中的網址，依清單順序。
+    pub fn urls(hits: &[LyricsHit]) -> Vec<&str> {
+        hits.iter().map(|hit| hit.url.as_str()).collect()
+    }
 
     /// FakeHttp 的回應都是立即就緒，所以不需要真的執行器。
     pub fn block_on<F: Future>(f: F) -> F::Output {
@@ -349,9 +410,9 @@ mod tests {
             200,
             padded(LRCLIB_HIT, MAX_BODY_BYTES + 1),
         );
-        let lrclib = LrclibProvider::new(http.clone());
+        http.respond(LrclibProvider::search_url(&t), 200, "[]");
+        let lrclib = LrclibProvider::new(http);
         assert_eq!(block_on(lrclib.fetch(&t)), Err(ProviderError::BadResponse));
-        assert_eq!(http.requests().len(), 1, "不得退回搜尋");
 
         let http = Arc::new(FakeHttp::new());
         http.respond(LrclibProvider::exact_url(&t), 404, "{}");
@@ -406,9 +467,11 @@ mod tests {
             200,
             padded(LRCLIB_HIT, MAX_BODY_BYTES),
         );
+        http.respond(LrclibProvider::search_url(&t), 200, "[]");
         let lrclib = LrclibProvider::new(http);
         let got = block_on(lrclib.fetch(&t)).unwrap();
-        assert!(got.is_some());
+        assert_eq!(got.hits.len(), 1);
+        assert!(got.complete);
     }
 
     #[test]

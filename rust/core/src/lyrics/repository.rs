@@ -4,7 +4,7 @@
 //! 低順位來源卻有完整的時間軸版本；時間軸歌詞才是這個模組的目的，所以「先到先贏」是錯的規則。
 //!
 //! 這是單趟走訪，不是兩趟：純文字結果邊走邊留著，退回它不必多打任何網路請求。
-//! 每個來源最多問一次，且各有時間上限；逾時或錯誤都算失敗。
+//! 每個來源最多問一次，且各有時間上限；逾時或錯誤都算失敗，只答出一部分（不完整的候選清單）也按失敗計。
 //!
 //! 非同步模型見 ADR-0001：同一首歌的併發呼叫以 `Coalescer` 共用一次查詢；快取寫入位於被合併的
 //! future 內部的結尾，所以被放棄（所有呼叫者都 drop）的查詢根本跑不到寫入那一行，不會被記成「查無」。
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::identity::TrackIdentity;
-use super::provider::LyricsProvider;
+use super::provider::{Candidates, LyricsProvider};
 use super::LyricsHit;
 use crate::runtime::{lock, BoxFuture, Clock};
 use crate::timing::{with_timeout, Coalescer};
@@ -24,7 +24,7 @@ use crate::timing::{with_timeout, Coalescer};
 pub struct RepositoryConfig {
     /// 「每個來源都答了、而且都沒有」要記多久。
     pub negative_ttl: Duration,
-    /// 至少一個來源失敗或逾時、且沒找到同步歌詞時，結果要記多久。涵蓋「沒有」與「純文字保底」，
+    /// 至少一個來源失敗、逾時或只答出一部分，且沒找到同步歌詞時，結果要記多久。涵蓋「沒有」與「純文字保底」，
     /// 讓稍後重試仍有機會找到同步歌詞。遠短於 `negative_ttl`，因為離線與這首歌無關。
     pub failure_ttl: Duration,
     /// 每個來源的上限；超過即算失敗。可以是 `Duration::MAX`（永不逾時）。
@@ -65,15 +65,6 @@ struct Inner {
     clock: Arc<dyn Clock>,
     cfg: RepositoryConfig,
     cache: Mutex<HashMap<String, CacheEntry>>,
-}
-
-/// 單一來源的結果。
-enum FetchOutcome {
-    Hit(LyricsHit),
-    /// 來源答了，而且沒有。
-    Empty,
-    /// 錯誤或逾時。
-    Failed,
 }
 
 impl LyricsRepository {
@@ -140,20 +131,20 @@ impl Inner {
         let mut any_failed = false;
 
         for provider in &self.providers {
-            match self.fetch(provider.as_ref(), &track).await {
-                FetchOutcome::Failed => any_failed = true,
-                FetchOutcome::Empty => {}
-                FetchOutcome::Hit(result) => {
-                    // 來源答了，但時間軸不可信：等同沒有——不是失敗，也不當保底，網址也一併丟掉。
-                    if !result.lyrics.is_plausible(track.duration) {
-                        continue;
-                    }
-                    // 同序保留較前面來源的那筆（連同它自己的網址），由優先序決定。
-                    LyricsHit::keep_better(&mut best, result);
-                    if best.as_ref().is_some_and(LyricsHit::is_best_possible) {
-                        break;
-                    }
+            let Some(candidates) = self.fetch(provider.as_ref(), &track).await else {
+                any_failed = true;
+                continue;
+            };
+            any_failed |= !candidates.complete;
+            for hit in candidates.hits {
+                // 時間軸不可信的候選等同沒有：不是失敗，也不當保底，網址也一併丟掉。
+                if hit.lyrics.is_plausible(track.duration) {
+                    // 同序保留較前面的那筆（連同它自己的網址），由來源優先序與來源內的順序決定。
+                    LyricsHit::keep_better(&mut best, hit);
                 }
+            }
+            if best.as_ref().is_some_and(LyricsHit::is_best_possible) {
+                break;
             }
         }
 
@@ -183,17 +174,18 @@ impl Inner {
     }
 
     /// 讓來源與逾時賽跑；輸家直接 drop，所以不理會取消的來源也卡不住走訪。
-    async fn fetch(&self, provider: &dyn LyricsProvider, track: &TrackIdentity) -> FetchOutcome {
+    /// 錯誤或逾時為 `None`。
+    async fn fetch(
+        &self,
+        provider: &dyn LyricsProvider,
+        track: &TrackIdentity,
+    ) -> Option<Candidates> {
         let attempt = with_timeout(
             self.clock.as_ref(),
             self.cfg.provider_timeout,
             provider.fetch(track),
         );
-        match attempt.await {
-            Ok(Ok(Some(hit))) => FetchOutcome::Hit(hit),
-            Ok(Ok(None)) => FetchOutcome::Empty,
-            Ok(Err(_)) | Err(_) => FetchOutcome::Failed,
-        }
+        attempt.await.ok()?.ok()
     }
 }
 
@@ -206,7 +198,7 @@ mod tests {
     //! `FakeClock` + `LocalSpawner`：`run_until_stalled` 之後的狀態就是「所有能前進的都前進了」。
 
     use super::*;
-    use crate::lyrics::provider::ProviderError;
+    use crate::lyrics::provider::{Candidates, ProviderError};
     use crate::lyrics::{LyricLine, Lyrics, LyricsHit};
     use crate::runtime::{Spawner, TaskHandle};
     use crate::testing::{FakeClock, LocalSpawner};
@@ -220,7 +212,7 @@ mod tests {
     /// 可在中途改答案（例如來源恢復）。延遲之後才讀取答案，與 Swift 相同。
     struct FakeProvider {
         id: String,
-        response: Mutex<(Option<LyricsHit>, bool)>,
+        response: Mutex<(Candidates, bool)>,
         delay: Duration,
         clock: Arc<FakeClock>,
         calls: AtomicUsize,
@@ -242,6 +234,14 @@ mod tests {
         lyrics.map(|l| hit_at(l, &format!("https://test.example/{id}")))
     }
 
+    /// 完整的回答：至多一筆候選。
+    fn answer(result: Option<LyricsHit>) -> Candidates {
+        Candidates {
+            hits: result.into_iter().collect(),
+            complete: true,
+        }
+    }
+
     impl FakeProvider {
         fn new(
             id: &str,
@@ -252,7 +252,7 @@ mod tests {
         ) -> Arc<Self> {
             Arc::new(Self {
                 id: id.to_string(),
-                response: Mutex::new((result, fails)),
+                response: Mutex::new((answer(result), fails)),
                 delay,
                 clock: clock.clone(),
                 calls: AtomicUsize::new(0),
@@ -266,6 +266,18 @@ mod tests {
         /// 明確指定整個命中（含網址）。
         fn result_hit(id: &str, clock: &Arc<FakeClock>, result: Option<LyricsHit>) -> Arc<Self> {
             Self::new(id, clock, result, false, Duration::ZERO)
+        }
+
+        /// 明確指定整份回答：多筆候選，或不完整。
+        fn candidates(
+            id: &str,
+            clock: &Arc<FakeClock>,
+            hits: Vec<LyricsHit>,
+            complete: bool,
+        ) -> Arc<Self> {
+            let provider = Self::new(id, clock, None, false, Duration::ZERO);
+            *provider.response.lock().unwrap() = (Candidates { hits, complete }, false);
+            provider
         }
 
         fn failing(id: &str, clock: &Arc<FakeClock>) -> Arc<Self> {
@@ -288,7 +300,7 @@ mod tests {
 
         /// 改變之後呼叫的答案。
         fn respond(&self, result: Option<Lyrics>, fails: bool) {
-            *self.response.lock().unwrap() = (hit_for(&self.id, result), fails);
+            *self.response.lock().unwrap() = (answer(hit_for(&self.id, result)), fails);
         }
 
         fn call_count(&self) -> usize {
@@ -304,17 +316,17 @@ mod tests {
         fn fetch<'a>(
             &'a self,
             _track: &'a TrackIdentity,
-        ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>> {
+        ) -> BoxFuture<'a, Result<Candidates, ProviderError>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 if self.delay > Duration::ZERO {
                     self.clock.sleep(self.delay).await;
                 }
-                let (result, fails) = self.response.lock().unwrap().clone();
+                let (candidates, fails) = self.response.lock().unwrap().clone();
                 if fails {
                     return Err(ProviderError::Transport("provider failure".into()));
                 }
-                Ok(result)
+                Ok(candidates)
             })
         }
     }
@@ -344,13 +356,13 @@ mod tests {
         fn fetch<'a>(
             &'a self,
             _track: &'a TrackIdentity,
-        ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>> {
+        ) -> BoxFuture<'a, Result<Candidates, ProviderError>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let flag = DropFlag(self.dropped.clone());
             Box::pin(async move {
                 let _flag = flag;
                 self.clock.sleep(self.delay).await;
-                Ok(self.result.clone())
+                Ok(answer(self.result.clone()))
             })
         }
     }
@@ -393,7 +405,7 @@ mod tests {
         fn fetch<'a>(
             &'a self,
             _track: &'a TrackIdentity,
-        ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>> {
+        ) -> BoxFuture<'a, Result<Candidates, ProviderError>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 std::future::poll_fn(|cx| {
@@ -406,7 +418,7 @@ mod tests {
                     }
                 })
                 .await;
-                Ok(self.result.clone())
+                Ok(answer(self.result.clone()))
             })
         }
     }
@@ -1579,5 +1591,56 @@ mod tests {
         h.advance(secs(61));
 
         assert!(!h.ask_hit(&repo, track()).unwrap().loose_duration);
+    }
+
+    // ------------------------------------------------------------ 一個來源多筆候選（Rust 版新增）
+
+    #[test]
+    fn the_best_plausible_candidate_of_a_source_is_used() {
+        let h = Harness::new();
+        let loose_one = loose(synced(), "https://a.example/2").expect("within tolerance");
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                hit_at(implausible(), "https://a.example/0"),
+                hit_at(plain("words"), "https://a.example/1"),
+                loose_one,
+                hit_at(synced(), "https://a.example/3"),
+                hit_at(synced(), "https://a.example/4"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+
+        let got = h.ask_hit(&repo, track()).expect("a hit");
+
+        assert_eq!(got.url, "https://a.example/3");
+    }
+
+    #[test]
+    fn an_incomplete_answer_is_retried_like_a_failure() {
+        // 只有純文字：短暫記住。
+        let h = Harness::new();
+        let words = vec![hit_at(plain("words"), "https://a.example/1")];
+        let source = FakeProvider::candidates("a", &h.clock, words, false);
+        let repo = h.make_repo(vec![dynp(&source)], secs(5));
+        assert_eq!(h.ask(&repo, track()), Some(plain("words")));
+        h.advance(secs(59));
+        h.ask(&repo, track());
+        assert_eq!(source.call_count(), 1);
+        h.advance(secs(2));
+        h.ask(&repo, track());
+        assert_eq!(source.call_count(), 2);
+
+        // 沒有可用的候選：不能當成「查無」記到 negative_ttl。
+        let h = Harness::new();
+        let unusable = vec![hit_at(implausible(), "https://a.example/1")];
+        let source = FakeProvider::candidates("a", &h.clock, unusable, false);
+        let repo = h.make_repo(vec![dynp(&source)], secs(5));
+        assert_eq!(h.ask(&repo, track()), None);
+        h.advance(secs(61));
+        h.ask(&repo, track());
+        assert_eq!(source.call_count(), 2);
     }
 }
