@@ -5,8 +5,8 @@
 //!
 //! # 行為與已知限制
 //!
-//! - 提供者順序固定為 `[LRCLIB, NetEase]`，再依開關過濾；兩個都關 → 沒有任何提供者的 repository，
-//!   查詢直接回 `None`，不發任何網路請求。
+//! - 提供者順序固定為 `[LRCLIB, NetEase]`，再依開關過濾；啟用的來源同時查，順序只決定同序版本誰在前。
+//!   兩個都關 → 沒有任何提供者的 repository，查詢直接回空清單，不發任何網路請求。
 //! - 切換來源會**重建** repository，所以**快取從空的開始**（舊快取不會帶過去）。
 //! - **目前正在播放的曲目不會重新查詢**，要等下一次換曲：`MusicController` 沒有「重新整理歌詞」的入口。
 //!   已經顯示的歌詞（來自舊來源）會一直顯示到換曲為止。
@@ -52,7 +52,7 @@ impl SwitchableResolver {
 }
 
 impl LyricsResolving for SwitchableResolver {
-    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
+    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Vec<LyricsHit>> {
         let resolver = lock(&self.current).clone();
         // future 自己擁有那一份 Arc：之後被 swap 掉也不影響它。
         Box::pin(async move { resolver.lyrics(track).await })
@@ -60,7 +60,7 @@ impl LyricsResolving for SwitchableResolver {
 }
 
 /// 依開關組出歌詞解析器：提供者順序固定為 [LRCLIB, NetEase]，關掉的略過。
-/// 全部關掉時是沒有提供者的 repository（查詢回 `None`，不發請求）。
+/// 全部關掉時是沒有提供者的 repository（查詢回空清單，不發請求）。
 pub fn build_repository(
     sources: &Sources,
     http: Arc<dyn HttpClient>,
@@ -115,10 +115,16 @@ mod tests {
 
     fn lookup_hit(resolver: &dyn LyricsResolving) -> Option<LyricsHit> {
         futures_executor::block_on(resolver.lyrics(track()))
+            .into_iter()
+            .next()
     }
 
     fn lookup(resolver: &dyn LyricsResolving) -> Option<Lyrics> {
         lookup_hit(resolver).map(|hit| hit.lyrics)
+    }
+
+    fn first_lyrics(versions: Vec<LyricsHit>) -> Option<Lyrics> {
+        versions.into_iter().next().map(|hit| hit.lyrics)
     }
 
     fn repo(sources: Sources, http: &Arc<FakeHttp>) -> Arc<dyn LyricsResolving> {
@@ -150,17 +156,17 @@ mod tests {
     }
 
     impl LyricsResolving for Stub {
-        fn lyrics(&self, _track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
+        fn lyrics(&self, _track: TrackIdentity) -> BoxFuture<'_, Vec<LyricsHit>> {
             let gate = lock(&self.gate).take();
             let label = self.label;
             Box::pin(async move {
                 if let Some(rx) = gate {
                     let _ = rx.await;
                 }
-                Some(LyricsHit::new(
+                vec![LyricsHit::new(
                     Lyrics::Plain(label.into()),
                     format!("https://test.example/{label}"),
-                ))
+                )]
             })
         }
     }
@@ -207,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn both_sources_off_returns_none_without_any_http_call() {
+    fn both_sources_off_returns_nothing_without_any_http_call() {
         let http = Arc::new(FakeHttp::new());
         let sources = Sources {
             lrclib: false,
@@ -260,7 +266,7 @@ mod tests {
         release.send(()).unwrap();
 
         assert_eq!(
-            futures_executor::block_on(in_flight).map(|h| h.lyrics),
+            first_lyrics(futures_executor::block_on(in_flight)),
             plain("old")
         );
         assert_eq!(lookup(&sw), plain("new"));
@@ -272,7 +278,7 @@ mod tests {
         let not_yet_polled = sw.lyrics(track());
         sw.swap(Stub::fixed("new"));
         assert_eq!(
-            futures_executor::block_on(not_yet_polled).map(|h| h.lyrics),
+            first_lyrics(futures_executor::block_on(not_yet_polled)),
             plain("old")
         );
     }

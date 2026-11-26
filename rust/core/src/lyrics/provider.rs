@@ -95,9 +95,6 @@ pub const USER_AGENT: &str = "MusiCat";
 /// 2xx 回應本體的上限。超過視為失敗而非命中，避免惡意或出錯的服務吃光記憶體。
 pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 
-/// 每個來源的請求逾時；逾時視同失敗。
-pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// 以嚴格百分比編碼組出 URL：只保留 `A-Za-z0-9-._~`，其餘（包含 `+`、`&`、空白與非 ASCII）
 /// 逐位元組編成大寫十六進位。通用的 query 編碼會放過 `+` 與 `&`，
 /// 而伺服器把前者讀成空白、後者讀成分隔符。
@@ -125,8 +122,12 @@ fn encode_into(out: &mut String, text: &str) {
     }
 }
 
-/// 帶固定 User-Agent 與 5 秒逾時的 GET 請求。
-pub(crate) fn request(url: String, extra_headers: &[(&str, &str)]) -> HttpRequest {
+/// 帶固定 User-Agent 的 GET 請求；`timeout` 到了視同請求失敗。各提供者自訂逾時值。
+pub(crate) fn request(
+    url: String,
+    extra_headers: &[(&str, &str)],
+    timeout: Duration,
+) -> HttpRequest {
     let mut headers = vec![("User-Agent".to_string(), USER_AGENT.to_string())];
     headers.extend(
         extra_headers
@@ -136,7 +137,7 @@ pub(crate) fn request(url: String, extra_headers: &[(&str, &str)]) -> HttpReques
     HttpRequest {
         url,
         headers,
-        timeout: REQUEST_TIMEOUT,
+        timeout,
     }
 }
 
@@ -224,7 +225,7 @@ pub(crate) mod test_support {
 
     use crate::lyrics::LyricsHit;
 
-    /// 候選裡最好的一筆（與 `LyricsRepository` 挑選的規則相同）。
+    /// 候選裡優先序最高的一筆（時間軸勝過純文字、曲長吻合勝過放寬，同序取先到的）。
     pub fn best_of(hits: Vec<LyricsHit>) -> Option<LyricsHit> {
         let mut best = None;
         for hit in hits {
@@ -305,8 +306,9 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
-    use crate::lyrics::lrclib::LrclibProvider;
-    use crate::lyrics::netease::NetEaseProvider;
+    use crate::lyrics::lrclib::{self, LrclibProvider};
+    use crate::lyrics::netease::{self, NetEaseProvider};
+    use crate::lyrics::repository::RepositoryConfig;
     use crate::testing::FakeHttp;
 
     fn track() -> TrackIdentity {
@@ -350,12 +352,23 @@ mod tests {
     #[test]
     fn user_agent_is_the_bare_app_name() {
         assert_eq!(USER_AGENT, "MusiCat");
-        let req = request("https://x.test".into(), &[("Referer", "r")]);
+        let timeout = Duration::from_millis(1_234);
+        let req = request("https://x.test".into(), &[("Referer", "r")], timeout);
         assert_eq!(req.url, "https://x.test");
-        assert_eq!(req.timeout, Duration::from_secs(5));
+        assert_eq!(req.timeout, timeout);
         assert_eq!(header(&req, "User-Agent"), Some("MusiCat"));
         assert_eq!(header(&req, "Referer"), Some("r"));
         assert_eq!(req.headers.len(), 2);
+    }
+
+    /// 來源超過自己的上限會整個丟掉；每個請求（階段）要在上限內逾時，已收到的候選才留得住。
+    #[test]
+    fn request_timeouts_fit_inside_the_provider_limit() {
+        let limit = RepositoryConfig::default().provider_timeout;
+        // LRCLIB 的請求同時發出，只有一個階段。
+        assert!(lrclib::REQUEST_TIMEOUT < limit);
+        // 網易雲先搜尋、再同時取歌詞，兩個階段相加。
+        assert!(netease::SEARCH_TIMEOUT + netease::LYRIC_TIMEOUT < limit);
     }
 
     #[test]

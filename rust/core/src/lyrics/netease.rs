@@ -4,6 +4,7 @@
 //! 只用原文歌詞（`lrc`）。回應也帶翻譯（`tlyric`），併進來的話，與原文同時間戳的翻譯行會蓋掉原文。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::future::join_all;
 use serde::{Deserialize, Deserializer};
@@ -16,6 +17,12 @@ use super::provider::{
 use super::{parse_lrc, Lyrics, LyricsHit, TrackIdentity};
 use crate::http::HttpClient;
 use crate::runtime::BoxFuture;
+
+/// 搜尋請求的逾時；逾時視同該請求失敗。搜尋與歌詞是先後兩個階段，兩個逾時加起來要比來源上限
+/// （`RepositoryConfig::provider_timeout`）短，一個卡住的歌詞請求才不會連累其他首歌已到手的歌詞。
+pub(crate) const SEARCH_TIMEOUT: Duration = Duration::from_millis(2_500);
+/// 單一歌詞請求的逾時（各首同時發出）。
+pub(crate) const LYRIC_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub struct NetEaseProvider {
     http: Arc<dyn HttpClient>,
@@ -78,8 +85,8 @@ const REFERER: [(&str, &str); 1] = [("Referer", "https://music.163.com/")];
 /// 一次查詢最多取幾首歌的歌詞。
 const MAX_SONGS: usize = 3;
 
-/// 單行「歌詞」的佔位通知。純音樂與未收錄的歌會拿它當歌詞；帶了時間軸就會被當成同步歌詞
-/// 而中止提供者的輪詢，所以視為沒有歌詞。
+/// 單行「歌詞」的佔位通知。純音樂與未收錄的歌會拿它當歌詞，但它不是歌詞
+/// （不帶時間軸的還會被當成純文字保底顯示），所以視為沒有歌詞。
 const PLACEHOLDERS: [&str; 4] = ["纯音乐，请欣赏", "纯音乐, 请欣赏", "暂无歌词", "没有歌词"];
 
 impl NetEaseProvider {
@@ -186,7 +193,7 @@ impl NetEaseProvider {
 
     /// 搜尋一次，再同時取各首合格歌曲的歌詞。搜尋失敗就是整個查詢失敗。
     async fn fetch_candidates(&self, track: &TrackIdentity) -> Result<Candidates, ProviderError> {
-        let search = request(Self::search_url(track), &REFERER);
+        let search = request(Self::search_url(track), &REFERER, SEARCH_TIMEOUT);
         let search_body = success_body(&self.http, search).await?;
         let songs = Self::select_songs(&search_body, track)?;
         let lyrics = songs
@@ -202,7 +209,7 @@ impl NetEaseProvider {
         song_id: i64,
         seconds: Option<f64>,
     ) -> Result<Option<LyricsHit>, ProviderError> {
-        let lyric = request(Self::lyric_url(song_id), &REFERER);
+        let lyric = request(Self::lyric_url(song_id), &REFERER, LYRIC_TIMEOUT);
         let lyric_body = success_body(&self.http, lyric).await?;
         let lyrics = Self::parse_lyric(&lyric_body)?;
         Ok(lyrics.and_then(|lyrics| {
@@ -247,7 +254,6 @@ mod tests {
     use crate::testing::FakeHttp;
     use futures_util::FutureExt;
     use std::collections::BTreeMap;
-    use std::time::Duration;
 
     const TWO_LINE_LYRIC: &str = r#"{"lrc":{"lyric":"[00:01.00]a\n[00:02.00]b"}}"#;
 
@@ -551,8 +557,9 @@ mod tests {
         for request in &requests {
             assert_eq!(header(request, "Referer"), Some("https://music.163.com/"));
             assert_eq!(header(request, "User-Agent"), Some("MusiCat"));
-            assert_eq!(request.timeout, Duration::from_secs(5));
         }
+        assert_eq!(requests[0].timeout, Duration::from_millis(2_500));
+        assert_eq!(requests[1].timeout, Duration::from_secs(2));
     }
 
     #[test]

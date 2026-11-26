@@ -71,11 +71,6 @@ impl LyricsHit {
         u8::from(self.lyrics.is_synced()) * 2 + u8::from(!self.loose_duration)
     }
 
-    /// 時間軸且曲長吻合：不必再找更好的。
-    pub(crate) fn is_best_possible(&self) -> bool {
-        self.lyrics.is_synced() && !self.loose_duration
-    }
-
     /// 只在 `candidate` 的優先序更高時換掉 `best`；同序保留先找到的。
     pub(crate) fn keep_better(best: &mut Option<Self>, candidate: Self) {
         if best.as_ref().is_none_or(|b| b.rank() < candidate.rank()) {

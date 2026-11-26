@@ -349,7 +349,7 @@ mod demo {
     }
 
     impl LyricsResolving for DemoLyrics {
-        fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
+        fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Vec<LyricsHit>> {
             let lyrics = match self.scene {
                 Scene::Plain => Some(plain_lyrics()),
                 Scene::NoLyrics => None,
@@ -358,7 +358,7 @@ mod demo {
                 scene => Some(synced_lyrics(scene == Scene::LongTitle)),
             };
             let hit = lyrics.map(|l| LyricsHit::new(l, "https://lrclib.net/api/get/1"));
-            Box::pin(std::future::ready(hit))
+            Box::pin(std::future::ready(hit.into_iter().collect()))
         }
     }
 

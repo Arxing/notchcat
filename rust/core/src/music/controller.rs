@@ -213,7 +213,8 @@ impl MusicController {
         let weak: Weak<Self> = Arc::downgrade(self);
         let task_key = key.clone();
         let handle = self.spawner.spawn(Box::pin(async move {
-            let result = resolver.lyrics(identity).await;
+            // 目前只顯示預設版本，也就是清單的第一筆。
+            let result = resolver.lyrics(identity).await.into_iter().next();
             if let Some(controller) = weak.upgrade() {
                 controller.finish_lookup(&task_key, generation, result);
             }
@@ -327,15 +328,15 @@ mod tests {
 
     #[derive(Default)]
     struct GateSlot {
-        answer: Option<Option<LyricsHit>>,
+        answer: Option<Vec<LyricsHit>>,
         waker: Option<Waker>,
     }
 
     impl Gate {
-        fn answer(&self, hit: Option<LyricsHit>) {
+        fn answer(&self, versions: Vec<LyricsHit>) {
             let waker = {
                 let mut slot = lock(&self.slot);
-                slot.answer = Some(hit);
+                slot.answer = Some(versions);
                 slot.waker.take()
             };
             if let Some(w) = waker {
@@ -351,7 +352,7 @@ mod tests {
     }
 
     impl Future for GatedLookup {
-        type Output = Option<LyricsHit>;
+        type Output = Vec<LyricsHit>;
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             let mut slot = lock(&self.gate.slot);
             match slot.answer.take() {
@@ -393,13 +394,17 @@ mod tests {
         }
 
         fn respond_hit(&self, index: usize, hit: Option<LyricsHit>) {
+            self.respond_versions(index, hit.into_iter().collect());
+        }
+
+        fn respond_versions(&self, index: usize, versions: Vec<LyricsHit>) {
             let gate = lock(&self.gates)[index].clone();
-            gate.answer(hit);
+            gate.answer(versions);
         }
     }
 
     impl LyricsResolving for GatedResolver {
-        fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
+        fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Vec<LyricsHit>> {
             let gate = Arc::new(Gate::default());
             lock(&self.tracks).push(track);
             lock(&self.gates).push(gate.clone());
@@ -504,6 +509,26 @@ mod tests {
             self.0.spawn(f).detach();
             TaskHandle::new(|| {})
         }
+    }
+
+    /// 解析器回傳版本清單；控制器目前只顯示第一個（預設版本）。
+    #[test]
+    fn shows_the_first_of_the_resolved_versions() {
+        let fx = Fixture::new();
+        let controller = fx.controller(None);
+        fx.emit(song("Song A"));
+
+        let versions = vec![
+            LyricsHit::new(Lyrics::Plain("one".into()), "https://test.example/1"),
+            LyricsHit::new(Lyrics::Plain("two".into()), "https://test.example/2"),
+        ];
+        fx.resolver.respond_versions(0, versions);
+        fx.spawner.run_until_stalled();
+
+        let state = controller.state();
+        assert_eq!(state.lyrics, plain("one"));
+        assert_eq!(state.lyrics_url.as_deref(), Some("https://test.example/1"));
+        assert!(!state.searching);
     }
 
     #[test]

@@ -6,6 +6,7 @@
 //! 其他非 2xx 或看不懂的回應算那個請求失敗（見 [`Candidates`]）。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::future::{join, join_all};
 use serde::{Deserialize, Deserializer};
@@ -17,6 +18,10 @@ use super::provider::{
 use super::{parse_lrc, Lyrics, LyricsHit, TrackIdentity};
 use crate::http::HttpClient;
 use crate::runtime::BoxFuture;
+
+/// 每個請求的逾時；逾時視同該請求失敗。各請求同時發出，只要比來源上限
+/// （`RepositoryConfig::provider_timeout`）短，一個卡住的請求就不會連累其他請求已到手的紀錄。
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 
 pub struct LrclibProvider {
     http: Arc<dyn HttpClient>,
@@ -115,7 +120,8 @@ impl LrclibProvider {
     /// 精確查詢的候選（至多一筆）。
     async fn exact(&self, track: &TrackIdentity) -> Result<Vec<LyricsHit>, ProviderError> {
         let url = Self::exact_url(track);
-        let (status, body) = send(&self.http, request(url.clone(), &[])).await?;
+        let exact = request(url.clone(), &[], REQUEST_TIMEOUT);
+        let (status, body) = send(&self.http, exact).await?;
         if status == 404 {
             return Ok(Vec::new());
         }
@@ -129,7 +135,7 @@ impl LrclibProvider {
     }
 
     async fn search(&self, track: &TrackIdentity) -> Result<Vec<LyricsHit>, ProviderError> {
-        let search = request(Self::search_url(track), &[]);
+        let search = request(Self::search_url(track), &[], REQUEST_TIMEOUT);
         let found = success_body(&self.http, search).await?;
         let payloads = decode_array::<Payload>(&found)?;
         Ok(Self::search_candidates(&payloads, track))
@@ -393,7 +399,7 @@ mod tests {
         .collect();
         assert_eq!(query_values(&request.url), expected);
         assert_eq!(header(request, "User-Agent"), Some("MusiCat"));
-        assert_eq!(request.timeout, std::time::Duration::from_secs(5));
+        assert_eq!(request.timeout, Duration::from_secs(4));
     }
 
     #[test]
@@ -487,7 +493,7 @@ mod tests {
         assert_eq!(q.len(), 1);
         assert_eq!(q["q"], "T A");
         assert_eq!(header(&requests[1], "User-Agent"), Some("MusiCat"));
-        assert_eq!(requests[1].timeout, std::time::Duration::from_secs(5));
+        assert_eq!(requests[1].timeout, Duration::from_secs(4));
     }
 
     #[test]

@@ -267,8 +267,8 @@ mod tests {
     struct NoLyrics;
 
     impl LyricsResolving for NoLyrics {
-        fn lyrics(&self, _track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
-            Box::pin(std::future::ready(None))
+        fn lyrics(&self, _track: TrackIdentity) -> BoxFuture<'_, Vec<LyricsHit>> {
+            Box::pin(std::future::ready(Vec::new()))
         }
     }
 

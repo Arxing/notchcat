@@ -1,4 +1,5 @@
-//! R1 示範：用真實網路與真實時鐘，經 `LyricsRepository`（LRCLIB 然後 NetEase）查歌詞。
+//! R1 示範：用真實網路與真實時鐘，經 `LyricsRepository`（LRCLIB 與 NetEase 同時查）查歌詞，
+//! 逐一印出查到的版本（序號、第一行時間、網址），再以預設版本（第一個）示範歌詞條。
 //!
 //! 用法：`cargo run -p musicat-app --example lyrics_demo -- [TITLE ARTIST [DURATION_SECS]]`
 //! 不帶參數時跑內建的三首公開歌曲。除了提供者本來就會送的歌名／演出者／專輯／曲長查詢外，不送任何資料。
@@ -38,6 +39,15 @@ fn mmss(t: f64) -> String {
 
 fn ms(d: Duration) -> String {
     format!("{:.1} ms", d.as_secs_f64() * 1000.0)
+}
+
+fn first_line(lyrics: &Lyrics) -> String {
+    match lyrics {
+        Lyrics::Synced(lines) => lines.first().map_or("no lines".to_string(), |l| {
+            format!("first line at {}", mmss(l.time))
+        }),
+        Lyrics::Plain(_) => "plain text".to_string(),
+    }
 }
 
 fn describe(lyrics: &Option<Lyrics>) -> String {
@@ -85,13 +95,19 @@ fn run_song(
     );
 
     let start = Instant::now();
-    let hit = block_on(repo.lyrics(identity.clone()));
+    let versions = block_on(repo.lyrics(identity.clone()));
     println!("  1st lookup: {}", ms(start.elapsed()));
-    let lyrics = hit.as_ref().map(|h| h.lyrics.clone());
-    println!("  result: {}", describe(&lyrics));
-    if let Some(h) = &hit {
-        println!("  url: {}", h.url);
+    println!("  versions: {}", versions.len());
+    for (index, hit) in versions.iter().enumerate() {
+        println!(
+            "    #{} {}  {}",
+            index + 1,
+            first_line(&hit.lyrics),
+            hit.url
+        );
     }
+    let lyrics = versions.first().map(|h| h.lyrics.clone());
+    println!("  default: {}", describe(&lyrics));
     if let Some(l) = &lyrics {
         println!("  is_plausible({duration:?}): {}", l.is_plausible(duration));
     }
@@ -101,7 +117,7 @@ fn run_song(
     println!(
         "  2nd lookup (cache): {}  same result: {}",
         ms(start.elapsed()),
-        again == hit
+        again == versions
     );
 
     // 與控制器一致：不可信的歌詞不進歌詞條。
