@@ -9,6 +9,7 @@ pub mod normalizer;
 pub mod provider;
 pub mod repository;
 pub mod traditional;
+pub mod versions;
 
 pub use identity::TrackIdentity;
 pub use normalizer::identity_from;
@@ -37,6 +38,8 @@ pub struct LyricsHit {
     pub url: String,
     /// 曲長只在放寬的容忍內（見 [`identity::DurationFit::Loose`]）。
     pub loose_duration: bool,
+    /// 紀錄曲長和查詢曲長差幾秒；任一邊未知時為 `None`。
+    pub duration_gap: Option<f64>,
 }
 
 impl LyricsHit {
@@ -47,13 +50,20 @@ impl LyricsHit {
             lyrics,
             url,
             loose_duration: false,
+            duration_gap: None,
         }
     }
 
-    /// 依曲長的吻合程度標記。
-    pub(crate) fn with_fit(mut self, fit: identity::DurationFit) -> Self {
+    /// 依紀錄曲長和查詢的吻合程度標記；差超過放寬的容忍時為 `None`。
+    pub(crate) fn matched(
+        mut self,
+        track: &TrackIdentity,
+        record_duration: Option<f64>,
+    ) -> Option<Self> {
+        let fit = track.duration_fit(record_duration)?;
         self.loose_duration = fit == identity::DurationFit::Loose;
-        self
+        self.duration_gap = track.duration_gap(record_duration);
+        Some(self)
     }
 
     /// 挑選用的優先序，越大越好：時間軸勝過純文字；同類之中曲長吻合的勝過放寬的。
@@ -329,6 +339,25 @@ mod tests {
         let hit = LyricsHit::new(Lyrics::Plain("words".into()), "https://x.example/1");
         assert_eq!(hit.lyrics, Lyrics::Plain("words".into()));
         assert_eq!(hit.url, "https://x.example/1");
+    }
+
+    #[test]
+    fn matched_records_how_far_off_the_duration_is() {
+        let track = TrackIdentity {
+            title: "T".into(),
+            artist: "A".into(),
+            album: None,
+            duration: Some(200.0),
+        };
+        let matched = |record| {
+            LyricsHit::new(Lyrics::Plain("words".into()), "https://x.example/1")
+                .matched(&track, record)
+                .map(|h| (h.loose_duration, h.duration_gap))
+        };
+        assert_eq!(matched(Some(197.0)), Some((false, Some(3.0))));
+        assert_eq!(matched(Some(208.0)), Some((true, Some(8.0))));
+        assert_eq!(matched(None), Some((false, None)));
+        assert_eq!(matched(Some(211.0)), None);
     }
 
     fn texts(lines: &[LyricLine]) -> Vec<&str> {

@@ -198,17 +198,19 @@ impl TrackIdentity {
         format!("{}\u{1}{}", n.title.to_lowercase(), n.artist.to_lowercase())
     }
 
-    /// 容忍而非相等：一首歌的另一個版本常與原版差幾秒。任一邊缺少或不大於 0
-    /// 都視為「未知」，算吻合。NaN 同樣視為未知。差太多時為 `None`。
+    /// 兩邊曲長差幾秒（絕對值）。任一邊缺少、不大於 0 或是 NaN 都視為「未知」，回 `None`。
+    pub fn duration_gap(&self, other: Option<f64>) -> Option<f64> {
+        let (duration, other) = (self.duration?, other?);
+        // NaN 的比較一律為 false，因此也落入「未知」。
+        (duration > 0.0 && other > 0.0).then(|| (duration - other).abs())
+    }
+
+    /// 容忍而非相等：一首歌的另一個版本常與原版差幾秒。曲長未知（見 [`Self::duration_gap`]）
+    /// 算吻合。差太多時為 `None`。
     pub fn duration_fit(&self, other: Option<f64>) -> Option<DurationFit> {
-        let (Some(duration), Some(other)) = (self.duration, other) else {
+        let Some(gap) = self.duration_gap(other) else {
             return Some(DurationFit::Close);
         };
-        // 用否定的 `>` 寫法讓 NaN 也落入「未知」。
-        if !(duration > 0.0 && other > 0.0) {
-            return Some(DurationFit::Close);
-        }
-        let gap = (duration - other).abs();
         if gap <= DURATION_TOLERANCE {
             Some(DurationFit::Close)
         } else if gap <= LOOSE_DURATION_TOLERANCE {
@@ -254,7 +256,8 @@ impl TrackIdentity {
     }
 }
 
-fn fold(raw: &str) -> String {
+/// [`TrackIdentity::loosely_matches`] 的比對形式；歌詞版本合併也用它比對行文字。
+pub(super) fn fold(raw: &str) -> String {
     // 先 NFKC 再轉簡體：NFKC 會把相容漢字（如 U+F900 區）併到統一漢字，讓字典查得到。
     let composed: String = raw.nfkc().collect();
     let simplified = match T2S.as_ref() {
@@ -540,6 +543,22 @@ mod tests {
             make("T", "A", None).duration_fit(Some(400.0)),
             Some(DurationFit::Close)
         );
+    }
+
+    #[test]
+    fn duration_gap_is_the_absolute_difference_or_unknown() {
+        let track = make("T", "A", Some(200.0));
+        assert_eq!(track.duration_gap(Some(197.0)), Some(3.0));
+        assert_eq!(track.duration_gap(Some(450.0)), Some(250.0));
+        assert_eq!(track.duration_gap(Some(200.0)), Some(0.0));
+        for unknown in [None, Some(0.0), Some(-1.0), Some(f64::NAN)] {
+            assert_eq!(track.duration_gap(unknown), None, "{unknown:?}");
+            assert_eq!(
+                make("T", "A", unknown).duration_gap(Some(200.0)),
+                None,
+                "{unknown:?}"
+            );
+        }
     }
 
     #[test]

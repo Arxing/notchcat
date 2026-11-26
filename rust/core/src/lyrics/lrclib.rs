@@ -173,10 +173,9 @@ impl LrclibProvider {
         track: &TrackIdentity,
         request_url: &str,
     ) -> Option<LyricsHit> {
-        let fit = track.duration_fit(payload.duration)?;
         let lyrics = Self::payload_lyrics(payload)?;
         let url = Self::record_url(payload.id, request_url);
-        Some(LyricsHit::new(lyrics, url).with_fit(fit))
+        LyricsHit::new(lyrics, url).matched(track, payload.duration)
     }
 
     /// 帶時間軸的優先於純文字。
@@ -672,6 +671,7 @@ mod tests {
         );
         assert_eq!(hit.url, "https://lrclib.net/api/get/3396226");
         assert!(hit.lyrics.is_synced());
+        assert_eq!(hit.duration_gap, Some(0.0));
     }
 
     #[test]

@@ -1529,10 +1529,9 @@ mod tests {
 
     // ------------------------------------------------------------ 曲長放寬的命中（Rust 版新增）
 
-    use crate::lyrics::identity::DurationFit;
-
+    /// 紀錄比查詢的曲子長 8 秒。
     fn loose(lyrics: Lyrics, url: &str) -> Option<LyricsHit> {
-        Some(hit_at(lyrics, url).with_fit(DurationFit::Loose))
+        hit_at(lyrics, url).matched(&track(), Some(208.0))
     }
 
     #[test]

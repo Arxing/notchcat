@@ -114,12 +114,13 @@ impl NetEaseProvider {
 
     /// 第一個歌名相符、曲長吻合的搜尋結果；沒有吻合的就取第一個曲長在放寬容忍內的；都沒有時為 `None`。
     /// 歌名不同的結果永遠不收：錯的歌詞比沒有更糟。歌名寬鬆比對，因為這個服務會對繁體查詢回簡體歌名。
+    /// 回傳歌曲編號與它的曲長（秒）。
     ///
     /// 本體不是成功的搜尋回應時回 `Err`。
     pub(crate) fn select_song(
         data: &[u8],
         track: &TrackIdentity,
-    ) -> Result<Option<(i64, DurationFit)>, ProviderError> {
+    ) -> Result<Option<(i64, Option<f64>)>, ProviderError> {
         let response: SearchResponse = decode_object(data)?;
         if response.code.is_some_and(|code| code != 200) {
             return Err(ProviderError::BadResponse);
@@ -139,9 +140,9 @@ impl NetEaseProvider {
             }
             let seconds = song.duration.map(|ms| ms / 1000.0);
             match track.duration_fit(seconds) {
-                Some(DurationFit::Close) => return Ok(Some((song.id, DurationFit::Close))),
+                Some(DurationFit::Close) => return Ok(Some((song.id, seconds))),
                 Some(DurationFit::Loose) => {
-                    loose.get_or_insert((song.id, DurationFit::Loose));
+                    loose.get_or_insert((song.id, seconds));
                 }
                 None => {}
             }
@@ -183,14 +184,16 @@ impl NetEaseProvider {
     ) -> Result<Option<LyricsHit>, ProviderError> {
         let search = request(Self::search_url(track), &REFERER);
         let search_body = success_body(&self.http, search).await?;
-        let Some((song_id, fit)) = Self::select_song(&search_body, track)? else {
+        let Some((song_id, seconds)) = Self::select_song(&search_body, track)? else {
             return Ok(None);
         };
 
         let lyric = request(Self::lyric_url(song_id), &REFERER);
         let lyric_body = success_body(&self.http, lyric).await?;
         let lyrics = Self::parse_lyric(&lyric_body)?;
-        Ok(lyrics.map(|lyrics| LyricsHit::new(lyrics, Self::song_url(song_id)).with_fit(fit)))
+        Ok(lyrics.and_then(|lyrics| {
+            LyricsHit::new(lyrics, Self::song_url(song_id)).matched(track, seconds)
+        }))
     }
 }
 
@@ -225,7 +228,6 @@ impl LyricsProvider for NetEaseProvider {
 mod tests {
     use super::*;
     use crate::http::HttpError;
-    use crate::lyrics::identity::DurationFit;
     use crate::lyrics::provider::test_support::*;
     use crate::lyrics::LyricLine;
     use crate::testing::FakeHttp;
@@ -683,14 +685,14 @@ mod tests {
         );
         assert_eq!(
             NetEaseProvider::select_song(loose_then_close.as_bytes(), &track()),
-            Ok(Some((2, DurationFit::Close)))
+            Ok(Some((2, Some(201.0))))
         );
         let loose_only = search_json(
             r#"{"id":3,"name":"T","duration":209000},{"id":4,"name":"T","duration":207000}"#,
         );
         assert_eq!(
             NetEaseProvider::select_song(loose_only.as_bytes(), &track()),
-            Ok(Some((3, DurationFit::Loose)))
+            Ok(Some((3, Some(209.0))))
         );
         let far = search_json(r#"{"id":5,"name":"T","duration":211000}"#);
         assert_eq!(
@@ -717,5 +719,6 @@ mod tests {
         let hit = block_on(provider.fetch(&t)).unwrap().unwrap();
 
         assert!(hit.loose_duration);
+        assert_eq!(hit.duration_gap, Some(8.0));
     }
 }
