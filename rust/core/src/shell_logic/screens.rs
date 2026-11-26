@@ -265,10 +265,10 @@ mod tests {
         let s = screen("ext", 0.0, None, true, false);
         let g = geometry_for(&s, VirtualNotch { w: 240.0, h: 40.0 });
         assert_eq!(g.notch, Size { w: 240.0, h: 40.0 });
-        // 寬度 = 虛擬瀏海寬 + 160。
+        // 寬度 = 虛擬瀏海寬 + 260。
         assert_eq!(
             crate::shell_logic::mode_size(crate::shell_logic::ShellMode::Preview, &g, 0.0).w,
-            400.0
+            500.0
         );
     }
 

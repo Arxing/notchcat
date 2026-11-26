@@ -14,8 +14,8 @@
 //! - `playing`：180 秒的曲目從 0 秒開始即時前進，有同步歌詞與封面。
 //! - `paused`：同一首停在 42 秒。Preview 保留封面與靜止的音柱、沒有歌詞條；Expanded 直接是音樂頁。
 //! - `none`：沒有曲目。
-//! - `plain`：播放中、只有純文字歌詞（歌詞條顯示曲名與「純文字版」、Expanded 是靜態全文）。
-//! - `nolyrics`：播放中、沒有歌詞（歌詞條顯示曲名與「沒有歌詞」、Expanded 標頭垂直置中）。
+//! - `plain`：播放中、只有純文字歌詞（歌詞條只顯示「純文字版」、Expanded 是靜態全文）。
+//! - `nolyrics`：播放中、沒有歌詞（歌詞條只顯示「沒有歌詞」、Expanded 標頭垂直置中）。
 //! - `longtitle`：播放中、很長的曲名與演出者（跑馬燈），歌詞裡有很長的一行。
 //!
 //! 環境變數：
@@ -353,7 +353,7 @@ mod demo {
             let lyrics = match self.scene {
                 Scene::Plain => Some(plain_lyrics()),
                 Scene::NoLyrics => None,
-                // 第二首（晨光）沒有歌詞：切歌時歌詞條改顯示曲名。
+                // 第二首（晨光）沒有歌詞：切歌時歌詞條改顯示「沒有歌詞」。
                 _ if track.title.contains("Morning") || track.title.contains("晨光") => None,
                 scene => Some(synced_lyrics(scene == Scene::LongTitle)),
             };

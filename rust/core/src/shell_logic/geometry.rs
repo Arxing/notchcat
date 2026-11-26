@@ -15,7 +15,8 @@ use crate::modules::{clamped_preview_extra, MAX_PREVIEW_EXTRA_HEIGHT};
 
 /// 外殼比實體瀏海寬多少：讓它看起來是貼著瀏海的刻意長條，而不是剛好描出缺口（boring.notch 風格）。
 /// Preview 與 Expanded 同寬，只有高度往下長。
-pub const WIDTH_PADDING: f64 = 160.0;
+/// Swift 版是 160（每側 80）；本版 260（每側 130），讓兩翼放得下曲名與演出者。
+pub const WIDTH_PADDING: f64 = 260.0;
 /// Expanded 的高度（含模組切換列與內容）。
 pub const EXPANDED_HEIGHT: f64 = 180.0;
 /// Preview 下方兩角的圓角半徑（上方兩角為直角）。
@@ -283,14 +284,14 @@ mod tests {
 
     #[test]
     fn width_is_notch_width_plus_padding_for_real_and_virtual_notch() {
-        assert_eq!(WIDTH_PADDING, 160.0);
+        assert_eq!(WIDTH_PADDING, 260.0);
         let real = geometry_with(185.0, 32.0);
-        assert_eq!(mode_size(ShellMode::Preview, &real, 0.0).w, 345.0);
-        assert_eq!(mode_size(ShellMode::Expanded, &real, 0.0).w, 345.0);
+        assert_eq!(mode_size(ShellMode::Preview, &real, 0.0).w, 445.0);
+        assert_eq!(mode_size(ShellMode::Expanded, &real, 0.0).w, 445.0);
 
         let virtual_notch = geometry_with(200.0, 32.0);
-        assert_eq!(mode_size(ShellMode::Preview, &virtual_notch, 0.0).w, 360.0);
-        assert_eq!(mode_size(ShellMode::Expanded, &virtual_notch, 0.0).w, 360.0);
+        assert_eq!(mode_size(ShellMode::Preview, &virtual_notch, 0.0).w, 460.0);
+        assert_eq!(mode_size(ShellMode::Expanded, &virtual_notch, 0.0).w, 460.0);
     }
 
     #[test]
@@ -310,7 +311,7 @@ mod tests {
         for extra in [-5.0, 0.0, 24.0, 99.0, f64::NAN] {
             let size = mode_size(ShellMode::Expanded, &g, extra);
             assert_eq!(size.h, 180.0);
-            assert_eq!(size.w, 360.0);
+            assert_eq!(size.w, 460.0);
         }
     }
 
@@ -326,7 +327,7 @@ mod tests {
         let container = container_size(&g);
         let max_preview = mode_size(ShellMode::Preview, &g, MAX_PREVIEW_EXTRA_HEIGHT);
         let expanded = mode_size(ShellMode::Expanded, &g, 0.0);
-        assert_eq!(container.w, 360.0);
+        assert_eq!(container.w, 460.0);
         assert_eq!(container.h, 180.0);
         assert!(container.w >= max_preview.w && container.w >= expanded.w);
         assert!(container.h >= max_preview.h && container.h >= expanded.h);
@@ -357,9 +358,9 @@ mod tests {
         let g = geometry();
         let container = container_size(&g);
         let preview = local_rect(ShellMode::Preview, &g, 24.0);
-        assert_eq!(preview.x, (container.w - 360.0) / 2.0);
+        assert_eq!(preview.x, (container.w - 460.0) / 2.0);
         assert_eq!(preview.y, 0.0);
-        assert_eq!(preview.w, 360.0);
+        assert_eq!(preview.w, 460.0);
         assert_eq!(preview.h, 56.0);
 
         let expanded = local_rect(ShellMode::Expanded, &g, 24.0);
@@ -511,7 +512,7 @@ mod tests {
     #[test]
     fn shape_layout_preview_without_extra_is_fully_black_with_radius_10() {
         let s = shape_layout(ShellMode::Preview, &g185(), 0.0);
-        assert_eq!(s.outer, Size { w: 345.0, h: 32.0 });
+        assert_eq!(s.outer, Size { w: 445.0, h: 32.0 });
         assert_eq!(s.fill, s.outer);
         assert_eq!(s.radius, PREVIEW_CORNER_RADIUS);
     }
@@ -519,8 +520,8 @@ mod tests {
     #[test]
     fn shape_layout_preview_with_extra_fills_only_the_notch_band_with_square_corners() {
         let s = shape_layout(ShellMode::Preview, &g185(), 24.0);
-        assert_eq!(s.outer, Size { w: 345.0, h: 56.0 });
-        assert_eq!(s.fill, Size { w: 345.0, h: 32.0 });
+        assert_eq!(s.outer, Size { w: 445.0, h: 56.0 });
+        assert_eq!(s.fill, Size { w: 445.0, h: 32.0 });
         assert_eq!(s.radius, 0.0);
         // 額外高度被夾到 56。
         let s = shape_layout(ShellMode::Preview, &g185(), 99.0);
@@ -545,7 +546,7 @@ mod tests {
     fn shape_layout_expanded_is_fully_black_with_radius_24_regardless_of_extra() {
         for extra in [0.0, 24.0, f64::NAN] {
             let s = shape_layout(ShellMode::Expanded, &g185(), extra);
-            assert_eq!(s.outer, Size { w: 345.0, h: 180.0 });
+            assert_eq!(s.outer, Size { w: 445.0, h: 180.0 });
             assert_eq!(s.fill, s.outer);
             assert_eq!(s.radius, EXPANDED_CORNER_RADIUS);
         }

@@ -65,8 +65,8 @@ pub const STRIP_HORIZONTAL_PADDING: f64 = 12.0;
 pub const STRIP_FONT_SIZE: f64 = 12.0;
 /// 顯示歌詞行時的文字不透明度（`isLine ? 0.95 : 0.7`）。
 pub const STRIP_LINE_OPACITY: f64 = 0.95;
-/// 顯示曲名時的文字不透明度。
-pub const STRIP_TITLE_OPACITY: f64 = 0.7;
+/// 沒有歌詞行、顯示命中狀態時的文字不透明度。
+pub const STRIP_STATUS_OPACITY: f64 = 0.7;
 /// 多行歌詞條裡，前後文行（非目前行）的文字不透明度。
 pub const STRIP_CONTEXT_OPACITY: f64 = 0.45;
 /// 歌詞條某一列的文字不透明度：依強調程度在前後文與目前行之間內插。
@@ -301,7 +301,27 @@ pub fn control_side_widths(info_width: f64) -> (f64, f64) {
     }
 }
 
-/// 歌詞命中狀態的標籤（歌詞條顯示曲名時的小標，與 Expanded 控制列左側）。
+/// Preview 兩翼文字（曲名、演出者）的字級與行高。
+pub const PREVIEW_TEXT_FONT_SIZE: f64 = 11.0;
+pub const PREVIEW_TEXT_LINE_HEIGHT: f64 = 14.0;
+/// 文字與封面／音柱的間距。
+pub const PREVIEW_TEXT_SPACING: f64 = 6.0;
+/// 文字與瀏海邊緣的距離。
+pub const PREVIEW_TEXT_NOTCH_INSET: f64 = 4.0;
+pub const PREVIEW_TITLE_OPACITY: f64 = 0.95;
+pub const PREVIEW_ARTIST_OPACITY: f64 = 0.65;
+
+/// Preview 兩翼要顯示的文字：左翼曲名、右翼演出者（沒有或只有空白時為 `None`）。
+/// 沒在播放時整個是 `None`：暫停時兩翼只留封面和靜止的音柱。
+pub fn preview_labels(s: &TrackSnapshot) -> Option<(&str, Option<&str>)> {
+    if !s.is_playing {
+        return None;
+    }
+    let artist = s.artist.as_deref().filter(|a| !a.trim().is_empty());
+    Some((s.title.as_str(), artist))
+}
+
+/// 歌詞命中狀態的標籤（歌詞條沒有歌詞行可顯示時的文字，與 Expanded 控制列左側）。
 pub fn lyrics_status_label(status: LyricsStatus) -> &'static str {
     match status {
         LyricsStatus::Searching => "查詢中…",
@@ -310,8 +330,6 @@ pub fn lyrics_status_label(status: LyricsStatus) -> &'static str {
         LyricsStatus::Synced => "時間軸版",
     }
 }
-/// 歌詞條上曲名與狀態小標的間距。
-pub const STRIP_TAG_SPACING: f64 = 6.0;
 /// Expanded 狀態標籤的不透明度：比下面的來源連結亮一點。
 pub const STATUS_LABEL_OPACITY: f64 = 0.7;
 
@@ -542,7 +560,7 @@ pub fn glyph_shapes(glyph: Glyph, size: f64) -> Vec<GlyphShape> {
 mod tests {
     use super::*;
     use musicat_core::lyrics::LyricLine;
-    use musicat_core::shell_logic::geometry::EXPANDED_CORNER_RADIUS;
+    use musicat_core::shell_logic::geometry::{EXPANDED_CORNER_RADIUS, WIDTH_PADDING};
     use musicat_core::types::PositionAnchor;
 
     fn close(a: f64, b: f64) {
@@ -833,6 +851,24 @@ mod tests {
     }
 
     #[test]
+    fn preview_labels_show_title_and_artist_only_while_playing() {
+        let mut s = snapshot(None);
+        s.title = "Song".into();
+        s.artist = Some("Singer".into());
+        s.is_playing = true;
+        assert_eq!(preview_labels(&s), Some(("Song", Some("Singer"))));
+        // 沒有演出者（或只有空白）：右翼不放文字。
+        s.artist = Some("  ".into());
+        assert_eq!(preview_labels(&s), Some(("Song", None)));
+        s.artist = None;
+        assert_eq!(preview_labels(&s), Some(("Song", None)));
+        // 暫停時兩翼只留封面和音柱。
+        s.artist = Some("Singer".into());
+        s.is_playing = false;
+        assert_eq!(preview_labels(&s), None);
+    }
+
+    #[test]
     fn each_lyrics_status_has_its_own_label() {
         assert_eq!(
             [
@@ -1020,7 +1056,7 @@ mod tests {
             assert!(height - rows >= 8.0, "lines = {lines}");
             assert!(STRIP_CORNER_RADIUS <= height);
         }
-        const { assert!(STRIP_CONTEXT_OPACITY < STRIP_TITLE_OPACITY) };
+        const { assert!(STRIP_CONTEXT_OPACITY < STRIP_STATUS_OPACITY) };
     }
 
     fn strip_key(lines: u8) -> (String, usize, u8) {
@@ -1099,8 +1135,8 @@ mod tests {
         // 按鈕群：3 顆 28 寬加 2 個 14 間距。
         close(control_buttons_width(), 112.0);
         for notch in [185.0, 200.0, 150.0] {
-            // 資訊欄寬 = 外形寬（瀏海 + 160）− 左右內距 − 封面 − 間距。
-            let info = notch + 160.0
+            // 資訊欄寬 = 外形寬（瀏海 + WIDTH_PADDING）− 左右內距 − 封面 − 間距。
+            let info = notch + WIDTH_PADDING
                 - 2.0 * PAGE_HORIZONTAL_PADDING
                 - EXPANDED_COVER_SIDE
                 - HEADER_SPACING;
