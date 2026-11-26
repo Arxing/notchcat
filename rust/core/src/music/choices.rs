@@ -40,10 +40,14 @@ pub struct ChoiceBook {
     pub songs: Vec<SavedChoice>,
 }
 
+/// 已知的曲長：非有限值與不大於 0 都當作沒有。
+pub(super) fn known_duration(duration: Option<f64>) -> Option<f64> {
+    duration.filter(|d| d.is_finite() && *d > 0.0)
+}
+
 /// 兩個曲長算同一首歌時回傳差幾秒（兩邊都未知算 0），否則 `None`。
-fn duration_distance(a: Option<f64>, b: Option<f64>) -> Option<f64> {
-    let known = |d: Option<f64>| d.filter(|d| d.is_finite() && *d > 0.0);
-    match (known(a), known(b)) {
+pub(super) fn duration_distance(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+    match (known_duration(a), known_duration(b)) {
         (Some(a), Some(b)) => {
             Some((a - b).abs()).filter(|gap| *gap <= DURATION_TOLERANCE + TIME_EPSILON)
         }

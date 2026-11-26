@@ -2,18 +2,30 @@
 //! （移植自 Swift `MusicViewModel.swift`）。
 //!
 //! 歌詞在**曲目改變**時才查（以 `TrackIdentity::cache_key` 判斷），只有播放狀態或位置錨點改變時不重查、
-//! 也不清掉歌詞。曲目改變時：丟掉舊查詢的 [`TaskHandle`]（drop 即取消）、清空歌詞，
+//! 也不清掉歌詞。同一個 key 的**曲長**改變也算換曲：查詢發出時不知道曲長、現在知道了，或和查詢發出時的
+//! 曲長差超過 2 秒（版本清單是按曲長把關的，記住的選擇也按曲長分開）。比的是查詢發出時的曲長而不是
+//! 上一個快照，所以一點一點漂移也會超過上限；沒有曲長（或非有限值、不大於 0）的快照沿用目前的查詢。
+//! 換曲時：丟掉舊查詢的 [`TaskHandle`]（drop 即取消）、清空歌詞與本曲的版本和偏移，
 //! 有 identity 才用 [`Spawner`] 起新查詢。查詢完成時只在控制器「目前的 key」仍等於該查詢的 key 時才寫入
 //! （過期結果守門）：即使舊查詢沒有被取消（例如執行器沒有原生取消），晚到的結果也不會蓋掉新歌。
 //! 守門同時比對世代計數（[`Core::generation`]）：A→B→A 時，第一個 A 的查詢與第二個 A 的 key 相同，
-//! 只比 key 擋不住它；世代每次換曲都加一，所以被取代的查詢一定過期。
+//! 只比 key 擋不住它（因曲長改變而重查時也一樣）；世代每次換曲都加一，所以被取代的查詢一定過期。
 //!
-//! 簡轉繁（[`MusicController::set_traditional_lyrics`]）只影響顯示：控制器另外保留提供者給的原始歌詞，
-//! 開關切換時從原始版本重新產生 [`MusicState::lyrics`]，不重查。
+//! 版本與偏移：查詢結束時以**目前快照**的 identity 找記住的選擇（[`ChoiceBook::find`]）並套到結果上
+//! （[`apply_choice`]）；在那之前不顯示存下的內容。只有使用者的明確動作
+//! （[`MusicController::next_version`]、[`MusicController::nudge_offset`]、
+//! [`MusicController::reset_offset`]）而且真的改變了什麼，才寫進紀錄並呼叫 [`ChoiceSaver`]；單純播放不寫。
+//! 紀錄同樣用目前快照的 identity，存的是未偏移、未轉繁的行。偏移每個版本網址各一個，換曲就清掉。
 //!
-//! 並行：狀態（快照、歌詞、目前 key、世代、查詢把手）由單一 mutex 保護；通知訂閱者一律在**鎖外**，
-//! 所以回呼內可以再讀 `state()` 或訂閱。`spawn` 與舊把手的 drop 也都在鎖外
-//! （有的執行器會在 `spawn` 內就地執行，或在 drop 把手時同步執行取消邏輯）。
+//! 顯示的欄位（[`MusicState::lyrics`]、`lyrics_url`、`version`）只由 [`Core::rebuild`] 從版本清單、
+//! 索引、偏移與簡轉繁開關產生。簡轉繁（[`MusicController::set_traditional_lyrics`]）只影響顯示：
+//! 控制器保留提供者給的原始版本，開關切換時重新產生，不重查。
+//!
+//! 並行：狀態（快照、版本與偏移、紀錄、目前 key、世代、查詢把手）由單一 mutex 保護；通知訂閱者與
+//! 呼叫 [`ChoiceSaver`] 一律在**鎖外**，所以回呼內可以再讀 `state()` 或訂閱。`spawn` 與舊把手的 drop
+//! 也都在鎖外（有的執行器會在 `spawn` 內就地執行，或在 drop 把手時同步執行取消邏輯）。
+//! 每個動作的讀取、修改與寫進紀錄在同一次上鎖內完成：和換曲競爭時，動作要嘛整個落在舊歌，
+//! 要嘛看到已清空的新歌而什麼都不做。
 //! 監視器訂閱的回呼與查詢工作都只持有控制器的 `Weak`：控制器 drop 時沒有 Arc 循環，
 //! 把手隨之 drop 而取消進行中的查詢。
 //!
@@ -25,56 +37,166 @@
 //! 較新的狀態可能先於較舊的抵達。訂閱者必須把通知當成「有變化」的訊號，並重讀 [`MusicController::state`]
 //! （它永遠是最新的），不可信任傳入的值。外殼讓兩者都在主執行緒上時，這個交錯在實務上不會發生，
 //! 但這是外殼的性質，不是本型別的保證。
+//!
+//! 存紀錄的先後：[`ChoiceSaver`] 在動作的呼叫端執行緒上同步呼叫，而且在該動作的通知**之前**
+//! （訂閱者在回呼內又做動作時，較新的紀錄才會較晚寫出）。多條執行緒同時做動作時**不保證**寫出的先後，
+//! 所以三個動作要在同一條執行緒上呼叫（外殼用主執行緒），`save` 內也不可再呼叫它們。
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 
+use crate::lyrics::identity::TrackIdentity;
 use crate::lyrics::normalizer::identity_from;
 use crate::lyrics::repository::LyricsResolving;
 use crate::lyrics::traditional::to_traditional;
 use crate::lyrics::{Lyrics, LyricsHit};
+use crate::music::choices::{
+    apply_choice, clamp_offset, duration_distance, known_duration, shift_lyrics, ChoiceBook,
+    SavedChoice,
+};
 use crate::nowplaying::{NowPlayingMonitor, PlaybackCommand, PlaybackControl};
 use crate::runtime::{lock, Notifier, Spawner, Subscription, TaskHandle};
 use crate::types::TrackSnapshot;
 
-/// 音樂畫面讀取的狀態：目前快照、（已查到的）該曲目歌詞，與歌詞的來源網址。
+/// 目前顯示的是第幾個時間軸版本，以及它的偏移。
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct VersionInfo {
+    /// 從 0 起算。
+    pub index: usize,
+    pub count: usize,
+    /// 秒；正值讓歌詞提早出現。
+    pub offset: f64,
+}
+
+/// 把整份紀錄寫出去的函式（由 app 提供）；呼叫時機與執行緒見模組說明。
+pub type ChoiceSaver = Arc<dyn Fn(&ChoiceBook) + Send + Sync>;
+
+/// 音樂畫面讀取的狀態：目前快照、（已查到的）該曲目歌詞、歌詞的來源網址與版本資訊。
 ///
 /// `lyrics` 與 `lyrics_url` 永遠一起設定、一起清除：有歌詞才有網址，沒命中兩者皆為 `None`。
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct MusicState {
     pub snapshot: Option<TrackSnapshot>,
-    /// 要顯示的歌詞（開了簡轉繁時是轉換後的版本）。
+    /// 要顯示的歌詞：目前版本套上它的偏移（開了簡轉繁時再轉換）。
     pub lyrics: Option<Lyrics>,
-    /// 歌詞來源頁面（`https://` 開頭）；沒有歌詞時為 `None`。
+    /// 目前版本的來源頁面（`https://` 開頭）；沒有歌詞時為 `None`。
     pub lyrics_url: Option<String>,
     /// 目前曲目的歌詞查詢還沒有結果。沒有查詢（沒有曲目、缺演出者）時為 `false`。
     pub searching: bool,
+    /// 只有正在顯示時間軸歌詞時為 `Some`。
+    pub version: Option<VersionInfo>,
 }
 
 /// 依開關產生要顯示的歌詞。
-fn displayed(source: Option<&Lyrics>, traditional: bool) -> Option<Lyrics> {
-    source.map(|lyrics| {
-        if traditional {
-            to_traditional(lyrics)
-        } else {
-            lyrics.clone()
-        }
-    })
+fn displayed(lyrics: Option<Lyrics>, traditional: bool) -> Option<Lyrics> {
+    if traditional {
+        lyrics.as_ref().map(to_traditional)
+    } else {
+        lyrics
+    }
 }
 
 #[derive(Default)]
 struct Core {
     state: MusicState,
-    /// 提供者給的原始歌詞；`state.lyrics` 由它（依 `traditional`）產生，兩者永遠一起設定、一起清除。
-    source: Option<Lyrics>,
     /// 歌詞轉繁體中文開關。
     traditional: bool,
+    /// 目前快照的 identity；每個快照都更新（曲長可能晚到或小幅改變），配紀錄與存紀錄用它。
+    identity: Option<TrackIdentity>,
     /// 目前曲目的 `cache_key`；沒有 identity（沒有快照、缺演出者…）時為 `None`。
     current_key: Option<String>,
+    /// 目前這次查詢發出時的曲長；那時不知道曲長為 `None`。
+    lookup_duration: Option<f64>,
     /// 進行中的查詢；drop 即取消。
     lookup: Option<TaskHandle>,
-    /// 查詢世代：每次（重新）開始或作廢查詢（曲目的 key 改變）就加一。每個查詢記下自己開始時的世代，
+    /// 查詢世代：每次（重新）開始或作廢查詢（換曲，含曲長改變）就加一。每個查詢記下自己開始時的世代，
     /// 完成時與 key 一起比對，所以 A→B→A 時第一個、被取代的 A 查詢即使沒被取消也寫不進第二個 A 的狀態。
     generation: u64,
+    /// 本曲的歌詞版本，保持原樣（未偏移、未轉繁）；查詢還沒結束或查無時是空的。
+    versions: Vec<LyricsHit>,
+    /// 目前版本在 `versions` 裡的索引。
+    index: usize,
+    /// 本曲各版本（以網址辨認）的偏移。
+    offsets: BTreeMap<String, f64>,
+    /// 全部歌曲記住的選擇。
+    book: ChoiceBook,
+}
+
+impl Core {
+    /// 目前的快照（`key`、已知的曲長 `duration`）是否需要放棄目前的查詢與歌詞（見模組說明）。
+    fn is_another_track(&self, key: Option<&str>, duration: Option<f64>) -> bool {
+        self.current_key.as_deref() != key
+            || (duration.is_some() && duration_distance(self.lookup_duration, duration).is_none())
+    }
+
+    /// 換曲：作廢舊查詢、清掉上一首的一切。回傳舊查詢的把手，呼叫端要在**鎖外** drop。
+    fn change_track(&mut self, key: Option<String>, duration: Option<f64>) -> Option<TaskHandle> {
+        self.generation += 1;
+        // 有 key 的話呼叫端一定接著開始查詢。
+        self.state.searching = key.is_some();
+        self.current_key = key;
+        self.lookup_duration = duration;
+        self.versions.clear();
+        self.index = 0;
+        self.offsets.clear();
+        self.rebuild();
+        self.lookup.take()
+    }
+
+    /// 收下查詢結果：套上記住的選擇與它的偏移。
+    fn adopt(&mut self, found: Vec<LyricsHit>) {
+        let saved = self
+            .identity
+            .as_ref()
+            .and_then(|identity| self.book.find(identity));
+        let (versions, index) = apply_choice(found, saved);
+        self.offsets = saved.map(|s| s.offsets.clone()).unwrap_or_default();
+        self.versions = versions;
+        self.index = index;
+    }
+
+    /// 該版本的偏移；紀錄來自檔案，所以讀的時候也限制範圍。
+    fn offset_of(&self, url: &str) -> f64 {
+        clamp_offset(self.offsets.get(url).copied().unwrap_or(0.0))
+    }
+
+    /// 由版本清單、索引、偏移與簡轉繁開關重建要顯示的欄位；`lyrics`、`lyrics_url`、`version` 只在這裡寫。
+    fn rebuild(&mut self) {
+        let current = self.versions.get(self.index);
+        let offset = current.map_or(0.0, |hit| self.offset_of(&hit.url));
+        let shifted = current.map(|hit| match &hit.lyrics {
+            Lyrics::Synced(lines) => Lyrics::Synced(shift_lyrics(lines, offset)),
+            plain => plain.clone(),
+        });
+        let url = current.map(|hit| hit.url.clone());
+        let version = current
+            .filter(|hit| hit.lyrics.is_synced())
+            .map(|_| VersionInfo {
+                index: self.index,
+                count: self.versions.len(),
+                offset,
+            });
+        self.state.lyrics = displayed(shifted, self.traditional);
+        self.state.lyrics_url = url;
+        self.state.version = version;
+    }
+
+    /// 把目前版本與本曲的偏移寫進紀錄。
+    fn remember(&mut self) {
+        let (Some(identity), Some(hit)) = (&self.identity, self.versions.get(self.index)) else {
+            return;
+        };
+        let Lyrics::Synced(lines) = &hit.lyrics else {
+            return;
+        };
+        self.book.upsert(SavedChoice {
+            key: identity.cache_key(),
+            duration: known_duration(identity.duration),
+            url: hit.url.clone(),
+            lines: lines.clone(),
+            offsets: self.offsets.clone(),
+        });
+    }
 }
 
 pub struct MusicController {
@@ -83,12 +205,13 @@ pub struct MusicController {
     resolver: Arc<dyn LyricsResolving>,
     control: Option<Arc<dyn PlaybackControl>>,
     spawner: Arc<dyn Spawner>,
+    save: ChoiceSaver,
     /// 對監視器的訂閱；控制器 drop 時一併取消。包在 mutex 裡只是為了建構後再放進去、並讓控制器是 `Sync`。
     _monitor_subscription: Mutex<Option<Subscription>>,
 }
 
 impl MusicController {
-    /// 建立控制器並訂閱 `monitor`（目前值會被冪等地套用）。
+    /// 同 [`Self::new_with_choices`]，但沒有記住的選擇、動作也不寫到任何地方（只在本次執行期間有效）。
     ///
     /// **監視器的存活期必須由呼叫端負責**：控制器**不**持有 `Arc<NowPlayingMonitor>`，
     /// 對監視器的訂閱也隨監視器 drop 而取消。監視器一旦被 drop，快照更新就悄悄停止
@@ -99,12 +222,36 @@ impl MusicController {
         control: Option<Arc<dyn PlaybackControl>>,
         spawner: Arc<dyn Spawner>,
     ) -> Arc<Self> {
+        Self::new_with_choices(
+            monitor,
+            resolver,
+            control,
+            spawner,
+            ChoiceBook::default(),
+            Arc::new(|_| {}),
+        )
+    }
+
+    /// 建立控制器並訂閱 `monitor`（目前值會被冪等地套用）。`book` 是記住的歌詞版本與偏移；
+    /// 使用者改變它時以整份新紀錄呼叫 `save`。監視器的存活期見 [`Self::new`]。
+    pub fn new_with_choices(
+        monitor: Arc<NowPlayingMonitor>,
+        resolver: Arc<dyn LyricsResolving>,
+        control: Option<Arc<dyn PlaybackControl>>,
+        spawner: Arc<dyn Spawner>,
+        book: ChoiceBook,
+        save: ChoiceSaver,
+    ) -> Arc<Self> {
         let controller = Arc::new(Self {
-            core: Mutex::new(Core::default()),
+            core: Mutex::new(Core {
+                book,
+                ..Core::default()
+            }),
             notifier: Notifier::new(),
             resolver,
             control,
             spawner,
+            save,
             _monitor_subscription: Mutex::new(None),
         });
         // 先建好 Arc 再訂閱：重播可能在 subscribe 內同步抵達，那時回呼需要能 upgrade。
@@ -123,7 +270,7 @@ impl MusicController {
         lock(&self.core).state.clone()
     }
 
-    /// 訂閱狀態變動（快照或歌詞真的改變才通知）。不會在訂閱當下重播目前值；要的話先讀 [`Self::state`]。
+    /// 訂閱狀態變動（狀態真的改變才通知）。不會在訂閱當下重播目前值；要的話先讀 [`Self::state`]。
     /// 回呼在鎖外執行；drop 回傳的把手即取消。
     ///
     /// **傳給回呼的值只是「這次變動當下」的狀態，不保證是最新的，也不保證通知依狀態的先後順序抵達**：
@@ -151,49 +298,102 @@ impl MusicController {
     pub fn set_traditional_lyrics(&self, on: bool) {
         let state = {
             let mut core = lock(&self.core);
+            let before = core.state.lyrics.clone();
             core.traditional = on;
-            let lyrics = displayed(core.source.as_ref(), on);
-            if core.state.lyrics == lyrics {
+            core.rebuild();
+            if core.state.lyrics == before {
                 return;
             }
-            core.state.lyrics = lyrics;
             core.state.clone()
         };
+        self.notifier.notify(&state);
+    }
+
+    /// 換到下一個歌詞版本（最後一個之後回到第一個），套用那個版本自己的偏移並記住。
+    /// 沒有顯示時間軸歌詞，或版本少於兩個時什麼都不做。
+    pub fn next_version(&self) {
+        self.act(|core| {
+            if core.versions.len() < 2 {
+                return false;
+            }
+            core.index = (core.index + 1) % core.versions.len();
+            true
+        });
+    }
+
+    /// 目前版本的偏移加 `delta` 秒（正值讓歌詞提早出現），限制在
+    /// ±[`OFFSET_LIMIT`](crate::music::choices::OFFSET_LIMIT) 並記住。
+    /// 沒有顯示時間軸歌詞、偏移沒有改變或 `delta` 是 NaN 時什麼都不做。
+    pub fn nudge_offset(&self, delta: f64) {
+        self.change_offset(|offset| offset + delta);
+    }
+
+    /// 目前版本的偏移歸零並記住；沒有顯示時間軸歌詞或本來就是零時什麼都不做。
+    pub fn reset_offset(&self) {
+        self.change_offset(|_| 0.0);
+    }
+
+    fn change_offset(&self, change: impl FnOnce(f64) -> f64) {
+        self.act(|core| {
+            let Some(url) = core.state.lyrics_url.clone() else {
+                return false;
+            };
+            let old = core.offset_of(&url);
+            let new = change(old);
+            // NaN 不能交給 `clamp_offset`：它會變成 0，把原本的偏移清掉。
+            if new.is_nan() || clamp_offset(new) == old {
+                return false;
+            }
+            core.offsets.insert(url, clamp_offset(new));
+            true
+        });
+    }
+
+    /// 使用者的明確動作，也是唯一寫紀錄的路徑。只在顯示時間軸歌詞時呼叫 `change`；
+    /// 它回傳 `false`（什麼都沒變）時不存也不通知。
+    fn act(&self, change: impl FnOnce(&mut Core) -> bool) {
+        let (state, book) = {
+            let mut core = lock(&self.core);
+            if core.state.version.is_none() || !change(&mut core) {
+                return;
+            }
+            core.rebuild();
+            core.remember();
+            (core.state.clone(), core.book.clone())
+        };
+        // 先存再通知（見模組說明）。
+        (self.save)(&book);
         self.notifier.notify(&state);
     }
 
     fn apply(self: &Arc<Self>, new: Option<TrackSnapshot>) {
         let identity = new.as_ref().and_then(identity_from);
         let key = identity.as_ref().map(|i| i.cache_key());
+        let duration = identity.as_ref().and_then(|i| known_duration(i.duration));
 
-        let (changed, state, old_lookup, key_changed, generation) = {
+        let (changed, state, old_lookup, new_track, generation) = {
             let mut core = lock(&self.core);
-            let key_changed = core.current_key != key;
+            let new_track = core.is_another_track(key.as_deref(), duration);
             let before = core.state.clone();
             core.state.snapshot = new;
-            let mut old_lookup = None;
-            if key_changed {
-                core.current_key = key.clone();
-                core.generation += 1;
-                old_lookup = core.lookup.take();
-                core.source = None;
-                core.state.lyrics = None;
-                core.state.lyrics_url = None;
-                // 有 key 就一定會在下面開始查詢。
-                core.state.searching = key.is_some();
-            }
+            core.identity = identity.clone();
+            let old_lookup = if new_track {
+                core.change_track(key.clone(), duration)
+            } else {
+                None
+            };
             (
                 core.state != before,
                 core.state.clone(),
                 old_lookup,
-                key_changed,
+                new_track,
                 core.generation,
             )
         };
         // 舊查詢在鎖外取消。
         drop(old_lookup);
 
-        if key_changed {
+        if new_track {
             if let (Some(identity), Some(key)) = (identity, key) {
                 self.start_lookup(identity, key, generation);
             }
@@ -203,18 +403,12 @@ impl MusicController {
         }
     }
 
-    fn start_lookup(
-        self: &Arc<Self>,
-        identity: crate::lyrics::identity::TrackIdentity,
-        key: String,
-        generation: u64,
-    ) {
+    fn start_lookup(self: &Arc<Self>, identity: TrackIdentity, key: String, generation: u64) {
         let resolver = self.resolver.clone();
         let weak: Weak<Self> = Arc::downgrade(self);
         let task_key = key.clone();
         let handle = self.spawner.spawn(Box::pin(async move {
-            // 目前只顯示預設版本，也就是清單的第一筆。
-            let result = resolver.lyrics(identity).await.into_iter().next();
+            let result = resolver.lyrics(identity).await;
             if let Some(controller) = weak.upgrade() {
                 controller.finish_lookup(&task_key, generation, result);
             }
@@ -233,26 +427,20 @@ impl MusicController {
     }
 
     /// 查詢完成：曲目可能在請求期間改變；key 或世代不同（含 A→B→A 的舊 A）就丟棄。
-    /// 這裡是唯一拆開 [`LyricsHit`] 的地方：歌詞與網址在同一個鎖內一起寫入。
-    /// 查詢中結束（包含沒命中），或歌詞、網址任一改變才通知。
-    fn finish_lookup(&self, key: &str, generation: u64, result: Option<LyricsHit>) {
-        let (lyrics, lyrics_url) = match result {
-            Some(hit) => (Some(hit.lyrics), Some(hit.url)),
-            None => (None, None),
-        };
+    /// 查詢中結束（包含沒命中），或顯示的內容改變才通知。不寫紀錄。
+    fn finish_lookup(&self, key: &str, generation: u64, found: Vec<LyricsHit>) {
         let state = {
             let mut core = lock(&self.core);
             if core.generation != generation || core.current_key.as_deref() != Some(key) {
                 return;
             }
-            if !core.state.searching && core.source == lyrics && core.state.lyrics_url == lyrics_url
-            {
+            let before = core.state.clone();
+            core.state.searching = false;
+            core.adopt(found);
+            core.rebuild();
+            if core.state == before {
                 return;
             }
-            core.state.searching = false;
-            core.state.lyrics = displayed(lyrics.as_ref(), core.traditional);
-            core.source = lyrics;
-            core.state.lyrics_url = lyrics_url;
             core.state.clone()
         };
         self.notifier.notify(&state);
@@ -264,14 +452,17 @@ mod tests {
     use super::*;
     use crate::artwork_cache::ArtworkCache;
     use crate::lyrics::identity::TrackIdentity;
-    use crate::lyrics::LyricsHit;
+    use crate::lyrics::{LyricLine, LyricsHit};
+    use crate::music::choices::SavedChoice;
     use crate::nowplaying::{NowPlayingSource, SharedSnapshotCallback, SnapshotCallback};
     use crate::runtime::{BoxFuture, Notifier};
     use crate::testing::LocalSpawner;
     use crate::types::PositionAnchor;
+    use std::collections::BTreeMap;
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::OnceLock;
     use std::task::{Context, Poll, Waker};
 
     /// 對應 Swift 的 `CurrentValueSubject` 假來源：訂閱當下立即重播目前值。
@@ -511,7 +702,7 @@ mod tests {
         }
     }
 
-    /// 解析器回傳版本清單；控制器目前只顯示第一個（預設版本）。
+    /// 解析器回傳版本清單；沒有記住的選擇時，控制器顯示第一個（預設版本）。
     #[test]
     fn shows_the_first_of_the_resolved_versions() {
         let fx = Fixture::new();
@@ -930,7 +1121,8 @@ mod tests {
             (core.current_key.clone().unwrap(), core.generation)
         };
         let again = |url: &str| {
-            controller.finish_lookup(&key, generation, hit_at(plain("words"), url));
+            let found = hit_at(plain("words"), url).into_iter().collect();
+            controller.finish_lookup(&key, generation, found);
         };
 
         again("https://one.example/1"); // 完全相同
@@ -1205,5 +1397,833 @@ mod tests {
         controller.set_traditional_lyrics(true);
 
         assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    // ---- 版本與偏移 ----
+
+    const URL_A: &str = "https://test.example/a";
+    const URL_B: &str = "https://test.example/b";
+    const URL_C: &str = "https://test.example/c";
+
+    fn timed(lines: &[(f64, &str)]) -> Vec<LyricLine> {
+        lines
+            .iter()
+            .map(|(time, text)| LyricLine {
+                time: *time,
+                text: (*text).to_string(),
+            })
+            .collect()
+    }
+
+    fn lines_a() -> Vec<LyricLine> {
+        timed(&[(10.0, "a1"), (20.0, "a2"), (30.0, "a3")])
+    }
+
+    fn lines_b() -> Vec<LyricLine> {
+        timed(&[(15.0, "b1"), (25.0, "b2"), (35.0, "b3")])
+    }
+
+    fn lines_c() -> Vec<LyricLine> {
+        timed(&[(40.0, "c1"), (50.0, "c2"), (60.0, "c3")])
+    }
+
+    fn version(url: &str, lines: Vec<LyricLine>) -> LyricsHit {
+        LyricsHit::new(Lyrics::Synced(lines), url)
+    }
+
+    /// A（預設）與 B 兩個版本。
+    fn two_versions() -> Vec<LyricsHit> {
+        vec![version(URL_A, lines_a()), version(URL_B, lines_b())]
+    }
+
+    fn synced(lines: Vec<LyricLine>) -> Option<Lyrics> {
+        Some(Lyrics::Synced(lines))
+    }
+
+    fn info(index: usize, count: usize, offset: f64) -> Option<VersionInfo> {
+        Some(VersionInfo {
+            index,
+            count,
+            offset,
+        })
+    }
+
+    fn lasting(title: &str, duration: Option<f64>) -> Option<TrackSnapshot> {
+        song(title).map(|snapshot| TrackSnapshot {
+            duration,
+            ..snapshot
+        })
+    }
+
+    fn choice(
+        title: &str,
+        duration: Option<f64>,
+        url: &str,
+        lines: Vec<LyricLine>,
+        offsets: &[(&str, f64)],
+    ) -> SavedChoice {
+        let identity = TrackIdentity {
+            title: title.to_string(),
+            artist: "Artist".to_string(),
+            album: None,
+            duration,
+        };
+        SavedChoice {
+            key: identity.cache_key(),
+            duration,
+            url: url.to_string(),
+            lines,
+            offsets: offsets
+                .iter()
+                .map(|(url, offset)| (url.to_string(), *offset))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    fn book(songs: Vec<SavedChoice>) -> ChoiceBook {
+        ChoiceBook { songs }
+    }
+
+    /// 每次呼叫 `save` 拿到的整份紀錄。
+    type Saved = Arc<Mutex<Vec<ChoiceBook>>>;
+
+    fn saves(saved: &Saved) -> usize {
+        lock(saved).len()
+    }
+
+    fn last_saved(saved: &Saved) -> Vec<SavedChoice> {
+        lock(saved).last().expect("nothing was saved").songs.clone()
+    }
+
+    fn act_all(controller: &MusicController) {
+        controller.next_version();
+        controller.nudge_offset(0.5);
+        controller.nudge_offset(-5.0);
+        controller.reset_offset();
+    }
+
+    fn count_notifications(controller: &MusicController) -> (Arc<AtomicUsize>, Subscription) {
+        let count = Arc::new(AtomicUsize::new(0));
+        let n = count.clone();
+        let subscription = controller.subscribe(Box::new(move |_| {
+            n.fetch_add(1, Ordering::SeqCst);
+        }));
+        (count, subscription)
+    }
+
+    impl Fixture {
+        fn controller_with(&self, book: ChoiceBook) -> (Arc<MusicController>, Saved) {
+            let saved: Saved = Arc::default();
+            let log = saved.clone();
+            let controller = MusicController::new_with_choices(
+                self.monitor.clone(),
+                self.resolver.clone(),
+                None,
+                Arc::new(self.spawner.clone()),
+                book,
+                Arc::new(move |book: &ChoiceBook| lock(&log).push(book.clone())),
+            );
+            (controller, saved)
+        }
+
+        fn answer(&self, index: usize, versions: Vec<LyricsHit>) {
+            self.resolver.respond_versions(index, versions);
+            self.spawner.run_until_stalled();
+        }
+
+        fn requested_durations(&self) -> Vec<Option<f64>> {
+            self.resolver
+                .requested()
+                .iter()
+                .map(|t| t.duration)
+                .collect()
+        }
+    }
+
+    #[test]
+    fn first_version_is_shown_with_url_and_version_info() {
+        let fx = Fixture::new();
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+
+        let state = controller.state();
+        assert_eq!(state.lyrics, synced(lines_a()));
+        assert_eq!(state.lyrics_url.as_deref(), Some(URL_A));
+        assert_eq!(state.version, info(0, 2, 0.0));
+        assert!(!state.searching);
+        assert_eq!(saves(&saved), 0);
+    }
+
+    #[test]
+    fn next_version_cycles_and_saves_the_choice() {
+        let fx = Fixture::new();
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+
+        controller.next_version();
+        let state = controller.state();
+        assert_eq!(state.version, info(1, 2, 0.0));
+        assert_eq!(state.lyrics, synced(lines_b()));
+        assert_eq!(state.lyrics_url.as_deref(), Some(URL_B));
+        assert_eq!(saves(&saved), 1);
+        assert_eq!(
+            last_saved(&saved),
+            [choice("Song A", Some(200.0), URL_B, lines_b(), &[])]
+        );
+
+        controller.next_version();
+        let state = controller.state();
+        assert_eq!(state.version, info(0, 2, 0.0));
+        assert_eq!(state.lyrics, synced(lines_a()));
+        assert_eq!(state.lyrics_url.as_deref(), Some(URL_A));
+        assert_eq!(saves(&saved), 2);
+        assert_eq!(
+            last_saved(&saved),
+            [choice("Song A", Some(200.0), URL_A, lines_a(), &[])]
+        );
+        assert_eq!(fx.resolver.requested().len(), 1, "切換版本不重查");
+    }
+
+    #[test]
+    fn nudging_shifts_the_shown_lines_and_saves() {
+        let fx = Fixture::new();
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+
+        controller.nudge_offset(0.5);
+
+        let state = controller.state();
+        assert_eq!(
+            state.lyrics,
+            synced(timed(&[(9.5, "a1"), (19.5, "a2"), (29.5, "a3")]))
+        );
+        assert_eq!(state.lyrics_url.as_deref(), Some(URL_A));
+        assert_eq!(state.version, info(0, 2, 0.5));
+        assert_eq!(saves(&saved), 1);
+        // 存下的是未偏移的行。
+        assert_eq!(
+            last_saved(&saved),
+            [choice(
+                "Song A",
+                Some(200.0),
+                URL_A,
+                lines_a(),
+                &[(URL_A, 0.5)]
+            )]
+        );
+
+        // 第二次偏移從原始行算起，不是在偏移過的行上再偏移一次整個偏移量。
+        controller.nudge_offset(0.5);
+        assert_eq!(
+            controller.state().lyrics,
+            synced(timed(&[(9.0, "a1"), (19.0, "a2"), (29.0, "a3")]))
+        );
+        assert_eq!(controller.state().version, info(0, 2, 1.0));
+        assert_eq!(last_saved(&saved)[0].lines, lines_a());
+    }
+
+    #[test]
+    fn offsets_belong_to_their_version() {
+        let fx = Fixture::new();
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+        controller.nudge_offset(0.5);
+
+        controller.next_version();
+        assert_eq!(controller.state().version, info(1, 2, 0.0));
+        assert_eq!(controller.state().lyrics, synced(lines_b()));
+
+        controller.next_version();
+        assert_eq!(controller.state().version, info(0, 2, 0.5));
+        assert_eq!(
+            controller.state().lyrics,
+            synced(timed(&[(9.5, "a1"), (19.5, "a2"), (29.5, "a3")]))
+        );
+
+        controller.next_version();
+        controller.nudge_offset(-1.0);
+        assert_eq!(controller.state().version, info(1, 2, -1.0));
+        assert_eq!(
+            last_saved(&saved),
+            [choice(
+                "Song A",
+                Some(200.0),
+                URL_B,
+                lines_b(),
+                &[(URL_A, 0.5), (URL_B, -1.0)]
+            )]
+        );
+    }
+
+    #[test]
+    fn offset_is_clamped_and_reset_returns_to_zero() {
+        let fx = Fixture::new();
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+        let (notified, _sub) = count_notifications(&controller);
+
+        controller.nudge_offset(500.0);
+        assert_eq!(controller.state().version, info(0, 2, 120.0));
+        assert_eq!(
+            controller.state().lyrics,
+            synced(timed(&[(-110.0, "a1"), (-100.0, "a2"), (-90.0, "a3")]))
+        );
+        assert_eq!((saves(&saved), notified.load(Ordering::SeqCst)), (1, 1));
+
+        // 已在上限：偏移沒變，不存也不通知。NaN 與 0 也一樣。
+        for unchanged in [0.5, 0.0, f64::NAN] {
+            controller.nudge_offset(unchanged);
+            assert_eq!(controller.state().version, info(0, 2, 120.0));
+        }
+        assert_eq!((saves(&saved), notified.load(Ordering::SeqCst)), (1, 1));
+
+        controller.nudge_offset(-500.0);
+        assert_eq!(controller.state().version, info(0, 2, -120.0));
+        assert_eq!((saves(&saved), notified.load(Ordering::SeqCst)), (2, 2));
+
+        controller.reset_offset();
+        assert_eq!(controller.state().version, info(0, 2, 0.0));
+        assert_eq!(controller.state().lyrics, synced(lines_a()));
+        assert_eq!((saves(&saved), notified.load(Ordering::SeqCst)), (3, 3));
+        assert_eq!(
+            last_saved(&saved)[0]
+                .offsets
+                .get(URL_A)
+                .copied()
+                .unwrap_or(0.0),
+            0.0
+        );
+
+        controller.reset_offset();
+        assert_eq!((saves(&saved), notified.load(Ordering::SeqCst)), (3, 3));
+    }
+
+    #[test]
+    fn a_saved_choice_is_selected_with_its_offset() {
+        let fx = Fixture::new();
+        let recorded = choice(
+            "Song A",
+            Some(200.0),
+            URL_B,
+            lines_b(),
+            &[(URL_A, -2.0), (URL_B, 1.5)],
+        );
+        let (controller, saved) = fx.controller_with(book(vec![recorded]));
+        fx.emit(song("Song A"));
+
+        // 查詢結束前不先顯示存下的內容。
+        let state = controller.state();
+        assert_eq!(state.lyrics, None);
+        assert_eq!(state.lyrics_url, None);
+        assert_eq!(state.version, None);
+        assert!(state.searching);
+
+        fx.answer(0, two_versions());
+        let state = controller.state();
+        assert_eq!(state.version, info(1, 2, 1.5));
+        assert_eq!(state.lyrics_url.as_deref(), Some(URL_B));
+        assert_eq!(
+            state.lyrics,
+            synced(timed(&[(13.5, "b1"), (23.5, "b2"), (33.5, "b3")]))
+        );
+        assert_eq!(saves(&saved), 0, "套用記住的選擇不寫入");
+
+        controller.next_version();
+        assert_eq!(controller.state().version, info(0, 2, -2.0));
+        assert_eq!(
+            controller.state().lyrics,
+            synced(timed(&[(12.0, "a1"), (22.0, "a2"), (32.0, "a3")]))
+        );
+    }
+
+    #[test]
+    fn a_saved_choice_shows_when_the_lookup_finds_nothing() {
+        let fx = Fixture::new();
+        let recorded = choice("Song A", Some(200.0), URL_B, lines_b(), &[(URL_B, 1.5)]);
+        let (controller, saved) = fx.controller_with(book(vec![recorded]));
+        fx.emit(song("Song A"));
+        fx.answer(0, Vec::new());
+
+        let state = controller.state();
+        assert!(!state.searching);
+        assert_eq!(state.version, info(0, 1, 1.5));
+        assert_eq!(state.lyrics_url.as_deref(), Some(URL_B));
+        assert_eq!(
+            state.lyrics,
+            synced(timed(&[(13.5, "b1"), (23.5, "b2"), (33.5, "b3")]))
+        );
+
+        // 只有一個版本：不能切換。
+        controller.next_version();
+        assert_eq!(saves(&saved), 0);
+
+        controller.nudge_offset(0.5);
+        assert_eq!(controller.state().version, info(0, 1, 2.0));
+        assert_eq!(
+            last_saved(&saved),
+            [choice(
+                "Song A",
+                Some(200.0),
+                URL_B,
+                lines_b(),
+                &[(URL_B, 2.0)]
+            )]
+        );
+    }
+
+    #[test]
+    fn plain_missing_or_searching_lyrics_have_no_controls_and_save_nothing() {
+        let fx = Fixture::new();
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
+        let (notified, _sub) = count_notifications(&controller);
+        let unchanged = |expected_notifications: usize| {
+            let before = controller.state();
+            assert_eq!(before.version, None);
+            act_all(&controller);
+            assert_eq!(controller.state(), before);
+            assert_eq!(saves(&saved), 0);
+            assert_eq!(notified.load(Ordering::SeqCst), expected_notifications);
+        };
+
+        unchanged(0); // 沒有曲目
+        fx.emit(song("Song A"));
+        unchanged(1); // 查詢中
+        fx.respond(0, plain("words"));
+        assert_eq!(controller.state().lyrics, plain("words"));
+        unchanged(2); // 純文字
+        fx.emit(song("Song B"));
+        fx.respond(1, None);
+        unchanged(4); // 查無
+    }
+
+    #[test]
+    fn playing_without_touching_the_controls_saves_nothing() {
+        let fx = Fixture::new();
+        let recorded = choice("Song A", Some(200.0), URL_B, lines_b(), &[(URL_B, 1.5)]);
+        let (controller, saved) = fx.controller_with(book(vec![recorded]));
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+        fx.emit(snapshot("Song A", Some("Artist"), false, None));
+        controller.set_traditional_lyrics(true);
+        fx.emit(lasting("Song A", Some(201.0)));
+        fx.emit(song("Song B"));
+        fx.answer(1, two_versions());
+        controller.set_traditional_lyrics(false);
+        fx.emit(None);
+
+        assert_eq!(saves(&saved), 0);
+    }
+
+    #[test]
+    fn actions_after_a_track_change_never_write_the_previous_song() {
+        let fx = Fixture::new();
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+        controller.nudge_offset(0.5);
+        assert_eq!(saves(&saved), 1);
+
+        fx.emit(song("Song B"));
+        assert_eq!(controller.state().version, None);
+        act_all(&controller);
+        assert_eq!(saves(&saved), 1);
+        assert_eq!(controller.state().lyrics, None);
+        assert_eq!(controller.state().lyrics_url, None);
+
+        // 同樣網址的版本出現在新歌：上一首的偏移不跟過來。
+        fx.answer(1, two_versions());
+        assert_eq!(controller.state().version, info(0, 2, 0.0));
+        controller.next_version();
+        assert_eq!(
+            last_saved(&saved),
+            [
+                choice("Song A", Some(200.0), URL_A, lines_a(), &[(URL_A, 0.5)]),
+                choice("Song B", Some(200.0), URL_B, lines_b(), &[]),
+            ]
+        );
+
+        fx.emit(None);
+        act_all(&controller);
+        assert_eq!(saves(&saved), 2);
+        assert_eq!(controller.state().version, None);
+    }
+
+    #[test]
+    fn a_choice_made_this_session_is_applied_when_the_song_comes_back() {
+        let fx = Fixture::new();
+        let (controller, _saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+        controller.next_version();
+        controller.nudge_offset(0.5);
+        fx.emit(song("Song B"));
+        fx.emit(song("Song A"));
+        fx.answer(2, two_versions());
+
+        assert_eq!(controller.state().version, info(1, 2, 0.5));
+        assert_eq!(controller.state().lyrics_url.as_deref(), Some(URL_B));
+    }
+
+    #[test]
+    fn a_duration_that_arrives_late_still_matches_the_saved_choice() {
+        let fx = Fixture::new();
+        let recorded = choice("Song A", Some(200.0), URL_B, lines_b(), &[(URL_B, 1.5)]);
+        let (controller, saved) = fx.controller_with(book(vec![recorded]));
+        fx.emit(lasting("Song A", None));
+        fx.emit(lasting("Song A", Some(200.0)));
+
+        // 曲長晚到會重新查詢，回答第二次查詢。
+        assert_eq!(fx.resolver.requested().len(), 2);
+        fx.answer(1, two_versions());
+
+        assert_eq!(controller.state().version, info(1, 2, 1.5));
+        assert_eq!(controller.state().lyrics_url.as_deref(), Some(URL_B));
+        assert_eq!(saves(&saved), 0);
+    }
+
+    #[test]
+    fn matching_and_saving_use_the_current_snapshots_length() {
+        let fx = Fixture::new();
+        let recorded = choice("Song A", Some(203.0), URL_B, lines_b(), &[]);
+        let (controller, saved) = fx.controller_with(book(vec![recorded.clone()]));
+        fx.emit(lasting("Song A", Some(200.0)));
+        // 差 1.5 秒不重查；紀錄的 203 只在目前的 201.5 的容忍內，不在查詢時的 200 的容忍內。
+        fx.emit(lasting("Song A", Some(201.5)));
+        fx.answer(0, two_versions());
+        assert_eq!(controller.state().version, info(1, 2, 0.0));
+
+        fx.emit(lasting("Song A", Some(198.5)));
+        controller.next_version();
+        assert_eq!(fx.resolver.requested().len(), 1);
+        assert_eq!(
+            last_saved(&saved),
+            [
+                recorded,
+                choice("Song A", Some(198.5), URL_A, lines_a(), &[]),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unusable_length_is_saved_as_unknown() {
+        for unusable in [Some(0.0), Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            let fx = Fixture::new();
+            let (controller, saved) = fx.controller_with(ChoiceBook::default());
+            fx.emit(lasting("Song A", unusable));
+            fx.answer(0, two_versions());
+            controller.next_version();
+            assert_eq!(last_saved(&saved)[0].duration, None, "{unusable:?}");
+        }
+    }
+
+    #[test]
+    fn the_traditional_toggle_keeps_the_offset() {
+        let simplified = || timed(&[(10.0, SIMPLIFIED), (20.0, "这里")]);
+        let fx = Fixture::new();
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, vec![version(URL_A, simplified())]);
+        controller.nudge_offset(0.5);
+
+        controller.set_traditional_lyrics(true);
+        assert_eq!(
+            controller.state().lyrics,
+            synced(timed(&[(9.5, TRADITIONAL), (19.5, "這裡")]))
+        );
+        assert_eq!(controller.state().version, info(0, 1, 0.5));
+        assert_eq!(saves(&saved), 1, "開關不寫入紀錄");
+
+        controller.nudge_offset(0.5);
+        assert_eq!(
+            controller.state().lyrics,
+            synced(timed(&[(9.0, TRADITIONAL), (19.0, "這裡")]))
+        );
+        // 存下的是提供者給的行：未偏移、未轉繁。
+        assert_eq!(last_saved(&saved)[0].lines, simplified());
+
+        controller.set_traditional_lyrics(false);
+        assert_eq!(
+            controller.state().lyrics,
+            synced(timed(&[(9.0, SIMPLIFIED), (19.0, "这里")]))
+        );
+        assert_eq!(controller.state().version, info(0, 1, 1.0));
+    }
+
+    #[test]
+    fn a_stored_offset_outside_the_range_is_clamped() {
+        for (stored, shown) in [(500.0, 120.0), (-500.0, -120.0), (f64::NAN, 0.0)] {
+            let fx = Fixture::new();
+            let recorded = choice("Song A", Some(200.0), URL_A, lines_a(), &[(URL_A, stored)]);
+            let (controller, _saved) = fx.controller_with(book(vec![recorded]));
+            fx.emit(song("Song A"));
+            fx.answer(0, two_versions());
+
+            assert_eq!(controller.state().version, info(0, 2, shown), "{stored}");
+            assert_eq!(
+                controller.state().lyrics,
+                synced(shift_a(shown)),
+                "{stored}"
+            );
+        }
+    }
+
+    fn shift_a(offset: f64) -> Vec<LyricLine> {
+        timed(&[
+            (10.0 - offset, "a1"),
+            (20.0 - offset, "a2"),
+            (30.0 - offset, "a3"),
+        ])
+    }
+
+    #[test]
+    fn every_action_notifies_once_with_the_new_state() {
+        let fx = Fixture::new();
+        let (controller, _saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+        let seen: Arc<Mutex<Vec<Option<VersionInfo>>>> = Arc::default();
+        let log = seen.clone();
+        let _sub = controller.subscribe(Box::new(move |s| lock(&log).push(s.version)));
+
+        controller.next_version();
+        controller.nudge_offset(0.5);
+        controller.reset_offset();
+
+        assert_eq!(
+            *lock(&seen),
+            [info(1, 2, 0.0), info(1, 2, 0.5), info(1, 2, 0.0)]
+        );
+    }
+
+    #[test]
+    fn the_saver_is_called_without_the_controller_lock_held() {
+        let fx = Fixture::new();
+        let slot: Arc<OnceLock<Weak<MusicController>>> = Arc::default();
+        let unlocked: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let (c, log) = (slot.clone(), unlocked.clone());
+        let controller = MusicController::new_with_choices(
+            fx.monitor.clone(),
+            fx.resolver.clone(),
+            None,
+            Arc::new(fx.spawner.clone()),
+            ChoiceBook::default(),
+            Arc::new(move |_| {
+                let controller = c.get().unwrap().upgrade().unwrap();
+                // 用 try_lock：持鎖呼叫時是斷言失敗而不是死結。
+                let free = controller.core.try_lock().is_ok();
+                lock(&log).push(free);
+            }),
+        );
+        slot.set(Arc::downgrade(&controller)).unwrap();
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+
+        controller.next_version();
+        controller.nudge_offset(0.5);
+        controller.reset_offset();
+
+        assert_eq!(*lock(&unlocked), [true, true, true]);
+    }
+
+    /// 訂閱者在通知裡又做了一個動作：較新的紀錄必須最後寫出，所以存檔要在通知之前。
+    #[test]
+    fn a_subscriber_acting_again_leaves_the_newest_choice_saved_last() {
+        let fx = Fixture::new();
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+        let (c, acted) = (Arc::downgrade(&controller), AtomicBool::new(false));
+        let _sub = controller.subscribe(Box::new(move |_| {
+            if !acted.swap(true, Ordering::SeqCst) {
+                c.upgrade().unwrap().nudge_offset(0.5);
+            }
+        }));
+
+        controller.next_version();
+
+        assert_eq!(saves(&saved), 2);
+        assert_eq!(last_saved(&saved)[0].offsets.get(URL_B), Some(&0.5));
+    }
+
+    // ---- 曲長改變時重查 ----
+
+    #[test]
+    fn a_length_that_arrives_late_restarts_the_lookup_once() {
+        let fx = Fixture::new();
+        let (controller, _saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(lasting("Song A", None));
+        fx.emit(lasting("Song A", Some(200.0)));
+        assert_eq!(fx.requested_durations(), [None, Some(200.0)]);
+        assert_eq!(fx.resolver.dropped.load(Ordering::SeqCst), 1);
+        assert!(controller.state().searching);
+
+        fx.emit(snapshot("Song A", Some("Artist"), false, None));
+        fx.emit(lasting("Song A", Some(201.0)));
+        assert_eq!(fx.resolver.requested().len(), 2);
+    }
+
+    #[test]
+    fn a_length_that_arrives_after_the_answer_clears_the_lyrics_and_searches_again() {
+        let fx = Fixture::new();
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(lasting("Song A", None));
+        fx.answer(0, two_versions());
+        assert_eq!(controller.state().version, info(0, 2, 0.0));
+
+        fx.emit(lasting("Song A", Some(200.0)));
+
+        assert_eq!(fx.requested_durations(), [None, Some(200.0)]);
+        let state = controller.state();
+        assert_eq!(state.lyrics, None);
+        assert_eq!(state.lyrics_url, None);
+        assert_eq!(state.version, None);
+        assert!(state.searching);
+        act_all(&controller);
+        assert_eq!(saves(&saved), 0);
+    }
+
+    #[test]
+    fn a_length_change_over_two_seconds_restarts_and_clears_lyrics() {
+        for changed in [202.1, 197.9, 260.0] {
+            let fx = Fixture::new();
+            let (controller, saved) = fx.controller_with(ChoiceBook::default());
+            fx.emit(song("Song A"));
+            fx.answer(0, two_versions());
+            controller.nudge_offset(0.5);
+            let seen: Arc<Mutex<Vec<MusicState>>> = Arc::default();
+            let log = seen.clone();
+            let _sub = controller.subscribe(Box::new(move |s| lock(&log).push(s.clone())));
+
+            fx.emit(lasting("Song A", Some(changed)));
+
+            assert_eq!(
+                fx.requested_durations(),
+                [Some(200.0), Some(changed)],
+                "{changed}"
+            );
+            let state = controller.state();
+            assert_eq!(state.snapshot.as_ref().unwrap().duration, Some(changed));
+            assert_eq!(state.lyrics, None);
+            assert_eq!(state.lyrics_url, None);
+            assert_eq!(state.version, None);
+            assert!(state.searching);
+            assert_eq!(*lock(&seen), [state], "清空只通知一次");
+            act_all(&controller);
+            assert_eq!(saves(&saved), 1);
+        }
+    }
+
+    #[test]
+    fn a_small_change_or_a_missing_length_keeps_the_lookup() {
+        let fx = Fixture::new();
+        let (controller, _saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+        controller.nudge_offset(0.5);
+        let shown = controller.state().lyrics;
+        for length in [
+            Some(202.0),
+            Some(198.0),
+            None,
+            Some(200.0),
+            Some(0.0),
+            Some(-1.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(201.0),
+        ] {
+            fx.emit(lasting("Song A", length));
+            assert_eq!(fx.resolver.requested().len(), 1, "{length:?}");
+            assert_eq!(controller.state().lyrics, shown, "{length:?}");
+            assert_eq!(controller.state().version, info(0, 2, 0.5), "{length:?}");
+            assert!(!controller.state().searching, "{length:?}");
+        }
+
+        // 沒有曲長的快照不會讓控制器忘記查詢時的曲長。
+        fx.emit(lasting("Song A", None));
+        fx.emit(lasting("Song A", Some(205.0)));
+        assert_eq!(fx.requested_durations(), [Some(200.0), Some(205.0)]);
+    }
+
+    /// 寫起來剛好差 2 秒的小數（`256.1 - 254.1 > 2.0`）不受浮點誤差影響。
+    #[test]
+    fn exactly_two_seconds_in_decimals_keeps_the_lookup() {
+        let fx = Fixture::new();
+        let _controller = fx.controller(None);
+        fx.emit(lasting("Song A", Some(254.1)));
+        fx.emit(lasting("Song A", Some(256.1)));
+        assert_eq!(fx.resolver.requested().len(), 1);
+    }
+
+    /// 和查詢發出時的曲長比，不是和上一個快照比。
+    #[test]
+    fn slow_drift_cannot_creep_past_the_limit() {
+        let fx = Fixture::new();
+        let _controller = fx.controller(None);
+        for length in [200.0, 201.5, 203.0] {
+            fx.emit(lasting("Song A", Some(length)));
+        }
+        assert_eq!(fx.requested_durations(), [Some(200.0), Some(203.0)]);
+
+        // 重查之後以新的曲長為準。
+        fx.emit(lasting("Song A", Some(204.5)));
+        fx.emit(lasting("Song A", Some(201.5)));
+        assert_eq!(fx.resolver.requested().len(), 2);
+    }
+
+    #[test]
+    fn a_stale_lookup_of_the_same_song_writes_nothing() {
+        let fx = Fixture::new();
+        let controller = MusicController::new(
+            fx.monitor.clone(),
+            fx.resolver.clone(),
+            None,
+            Arc::new(DetachingSpawner(fx.spawner.clone())),
+        );
+        fx.emit(lasting("Song A", None));
+        fx.emit(lasting("Song A", Some(200.0)));
+        assert_eq!(fx.resolver.requested().len(), 2);
+
+        fx.answer(0, vec![version(URL_C, lines_c())]);
+        let state = controller.state();
+        assert_eq!(state.lyrics, None);
+        assert_eq!(state.lyrics_url, None);
+        assert_eq!(state.version, None);
+        assert!(state.searching);
+
+        fx.answer(1, two_versions());
+        fx.answer(0, vec![version(URL_C, lines_c())]);
+        assert_eq!(controller.state().lyrics_url.as_deref(), Some(URL_A));
+        assert_eq!(controller.state().version, info(0, 2, 0.0));
+    }
+
+    #[test]
+    fn another_length_of_the_same_title_neither_reuses_nor_overwrites_the_previous_versions() {
+        let fx = Fixture::new();
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
+        fx.emit(song("Song A"));
+        fx.answer(0, two_versions());
+        controller.next_version();
+        controller.nudge_offset(0.5);
+        let first = choice("Song A", Some(200.0), URL_B, lines_b(), &[(URL_B, 0.5)]);
+        assert_eq!(last_saved(&saved), std::slice::from_ref(&first));
+
+        fx.emit(lasting("Song A", Some(260.0)));
+        act_all(&controller);
+        assert_eq!(saves(&saved), 2);
+        // 同樣網址的版本也不帶 200 秒那首的選擇與偏移。
+        fx.answer(1, two_versions());
+        assert_eq!(controller.state().version, info(0, 2, 0.0));
+        controller.next_version();
+        assert_eq!(controller.state().version, info(1, 2, 0.0));
+        assert_eq!(
+            last_saved(&saved),
+            [first, choice("Song A", Some(260.0), URL_B, lines_b(), &[]),]
+        );
     }
 }
