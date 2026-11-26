@@ -36,6 +36,20 @@ use ferrous_opencc::OpenCC;
 use regex::Regex;
 use unicode_normalization::UnicodeNormalization;
 
+/// 曲長比對的容忍秒數。
+const DURATION_TOLERANCE: f64 = 5.0;
+/// 沒有吻合的候選時，放寬到這個秒數（官方 MV 常比歌庫收錄的版本長或短幾秒）。
+const LOOSE_DURATION_TOLERANCE: f64 = 10.0;
+
+/// 候選歌詞的曲長與查詢有多吻合。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DurationFit {
+    /// 差 5 秒以內，或任一邊不知道曲長。
+    Close,
+    /// 差超過 5 秒、10 秒以內：只在沒有吻合的候選時使用。
+    Loose,
+}
+
 /// 歌詞提供者被要求查詢的對象。
 ///
 /// 與 `TrackSnapshot` 分開，因為查詢只在乎「是哪首歌」而不在乎播放狀態，
@@ -118,6 +132,15 @@ pub(super) static T2S: LazyLock<Option<OpenCC>> = LazyLock::new(|| {
     converter.ok()
 });
 
+/// 漢字（統一表意文字、擴充區與相容區）。
+pub(super) fn is_han(c: char) -> bool {
+    matches!(c,
+        '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{20000}'..='\u{3FFFF}')
+}
+
 /// 拉丁系組合符號區塊（見模組說明：不含日文濁點）。
 fn is_latin_combining_mark(c: char) -> bool {
     matches!(c,
@@ -176,16 +199,52 @@ impl TrackIdentity {
     }
 
     /// 容忍而非相等：一首歌的另一個版本常與原版差幾秒。任一邊缺少或不大於 0
-    /// 都視為「未知」，永遠不會拒絕候選。NaN 同樣視為未知。
-    pub fn duration_matches(&self, other: Option<f64>) -> bool {
+    /// 都視為「未知」，算吻合。NaN 同樣視為未知。差太多時為 `None`。
+    pub fn duration_fit(&self, other: Option<f64>) -> Option<DurationFit> {
         let (Some(duration), Some(other)) = (self.duration, other) else {
-            return true;
+            return Some(DurationFit::Close);
         };
         // 用否定的 `>` 寫法讓 NaN 也落入「未知」。
         if !(duration > 0.0 && other > 0.0) {
-            return true;
+            return Some(DurationFit::Close);
         }
-        (duration - other).abs() <= 5.0
+        let gap = (duration - other).abs();
+        if gap <= DURATION_TOLERANCE {
+            Some(DurationFit::Close)
+        } else if gap <= LOOSE_DURATION_TOLERANCE {
+            Some(DurationFit::Loose)
+        } else {
+            None
+        }
+    }
+
+    /// 曲長是否吻合（5 秒以內或未知）。
+    pub fn duration_matches(&self, other: Option<f64>) -> bool {
+        self.duration_fit(other) == Some(DurationFit::Close)
+    }
+
+    /// 簡體中文的查詢形式：歌名與演出者轉成簡體，中英並列的演出者名（`周杰倫 Jay Chou`）只留含漢字的部分。
+    /// 有些歌庫（LRCLIB）的搜尋不做繁簡轉換，帶著英文名也找不到中文紀錄。
+    /// 與 [`Self::normalized`] 相同時為 `None`（不必再查一次）。
+    pub fn simplified_chinese(&self) -> Option<TrackIdentity> {
+        let converter = T2S.as_ref()?;
+        let n = self.normalized();
+        let chinese: Vec<&str> = n
+            .artist
+            .split_whitespace()
+            .filter(|word| word.chars().any(is_han))
+            .collect();
+        let artist = if chinese.is_empty() {
+            n.artist.clone()
+        } else {
+            chinese.join(" ")
+        };
+        let simplified = TrackIdentity {
+            title: converter.convert(&n.title),
+            artist: converter.convert(&artist),
+            ..n.clone()
+        };
+        (simplified != n).then_some(simplified)
     }
 
     /// 不要用 `==` 比對提供者回來的歌名：同一首歌可能以簡體、不同大小寫或全形字元回來。
@@ -455,5 +514,61 @@ mod tests {
         m.insert(make("T", "A", Some(f64::NAN)), 1);
         assert_eq!(m.get(&make("T", "A", Some(f64::NAN))), Some(&1));
         assert_eq!(m.get(&make("T", "A", Some(1.0))), None);
+    }
+
+    #[test]
+    fn duration_fit_is_close_within_five_seconds_and_loose_within_ten() {
+        let track = make("T", "A", Some(200.0));
+        for close in [Some(200.0), Some(205.0), Some(195.0), None, Some(0.0)] {
+            assert_eq!(
+                track.duration_fit(close),
+                Some(DurationFit::Close),
+                "{close:?}"
+            );
+        }
+        for loose in [205.1, 210.0, 194.9, 190.0] {
+            assert_eq!(
+                track.duration_fit(Some(loose)),
+                Some(DurationFit::Loose),
+                "{loose}"
+            );
+        }
+        for far in [210.1, 189.9, 400.0] {
+            assert_eq!(track.duration_fit(Some(far)), None, "{far}");
+        }
+        assert_eq!(
+            make("T", "A", None).duration_fit(Some(400.0)),
+            Some(DurationFit::Close)
+        );
+    }
+
+    #[test]
+    fn simplified_chinese_converts_the_text_and_keeps_only_the_chinese_artist_name() {
+        let query = make("爸 我回來了", "周杰倫 Jay Chou", Some(229.6));
+        assert_eq!(
+            query.simplified_chinese(),
+            Some(make("爸 我回来了", "周杰伦", Some(229.6)))
+        );
+        for (artist, expected) in [
+            ("周杰伦 Jay Chou", "周杰伦"),
+            ("周杰倫 (Jay Chou)", "周杰伦"),
+            ("G.E.M. 鄧紫棋", "邓紫棋"),
+            ("劉若英", "刘若英"),
+        ] {
+            let got = make("T", artist, None).simplified_chinese();
+            assert_eq!(got.map(|t| t.artist).as_deref(), Some(expected), "{artist}");
+        }
+    }
+
+    /// 轉了跟原本一樣就不必再查一次。
+    #[test]
+    fn simplified_chinese_is_none_when_nothing_would_change() {
+        assert_eq!(make("晴天", "周杰伦", None).simplified_chinese(), None);
+        assert_eq!(make("Song", "Queen", None).simplified_chinese(), None);
+        // 只差正規化會拿掉的部分（後綴、次要演出者）也算沒變。
+        assert_eq!(
+            make("Song (Live)", "A & B", None).simplified_chinese(),
+            None
+        );
     }
 }

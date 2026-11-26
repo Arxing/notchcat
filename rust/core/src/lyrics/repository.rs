@@ -1,6 +1,6 @@
 //! 跨來源查歌詞、快取查到的結果（移植自 Swift `LyricsRepository.swift`）。
 //!
-//! 排序規則是重點：帶時間軸的結果勝過來源優先序。高順位來源可能只有純文字，
+//! 排序規則是重點：帶時間軸的結果勝過來源優先序，同類之中曲長吻合的勝過放寬的。高順位來源可能只有純文字，
 //! 低順位來源卻有完整的時間軸版本；時間軸歌詞才是這個模組的目的，所以「先到先贏」是錯的規則。
 //!
 //! 這是單趟走訪，不是兩趟：純文字結果邊走邊留著，退回它不必多打任何網路請求。
@@ -136,8 +136,7 @@ impl Inner {
         if let Some(hit) = self.cached(&key) {
             return hit;
         }
-        let mut fallback: Option<LyricsHit> = None;
-        let mut found: Option<LyricsHit> = None;
+        let mut best: Option<LyricsHit> = None;
         let mut any_failed = false;
 
         for provider in &self.providers {
@@ -145,15 +144,14 @@ impl Inner {
                 FetchOutcome::Failed => any_failed = true,
                 FetchOutcome::Empty => {}
                 FetchOutcome::Hit(result) => {
-                    if result.lyrics.is_synced() {
-                        if result.lyrics.is_plausible(track.duration) {
-                            found = Some(result);
-                            break;
-                        }
-                        // 來源答了，但時間軸不可信：等同沒有——不是失敗，也不當保底，網址也一併丟掉。
-                    } else if fallback.is_none() {
-                        // 留下最高順位的純文字（連同它自己的網址），以防找不到同步歌詞。不覆寫，由優先序決定。
-                        fallback = Some(result);
+                    // 來源答了，但時間軸不可信：等同沒有——不是失敗，也不當保底，網址也一併丟掉。
+                    if !result.lyrics.is_plausible(track.duration) {
+                        continue;
+                    }
+                    // 同序保留較前面來源的那筆（連同它自己的網址），由優先序決定。
+                    LyricsHit::keep_better(&mut best, result);
+                    if best.as_ref().is_some_and(LyricsHit::is_best_possible) {
+                        break;
                     }
                 }
             }
@@ -162,22 +160,15 @@ impl Inner {
         // 走到這裡代表查詢沒被放棄（被放棄的 future 已被 drop，不會執行以下任何一行）。
         let now = self.clock.now();
         let failure_expiry = now + self.cfg.failure_ttl.as_secs_f64();
-        let (entry, result) = if let Some(found) = found {
+        let (entry, result) = if let Some(hit) = best {
+            // 純文字或曲長放寬的結果，在有來源掛掉時只短暫記住，之後可能換成更好的。
+            let until = (any_failed && !hit.is_best_possible()).then_some(failure_expiry);
             (
                 CacheEntry::Found {
-                    hit: found.clone(),
-                    until: None,
+                    hit: hit.clone(),
+                    until,
                 },
-                Some(found),
-            )
-        } else if let Some(fallback) = fallback {
-            // 有來源掛掉時找到的純文字，之後可能被同步歌詞取代，所以只短暫記住。
-            (
-                CacheEntry::Found {
-                    hit: fallback.clone(),
-                    until: any_failed.then_some(failure_expiry),
-                },
-                Some(fallback),
+                Some(hit),
             )
         } else {
             let until = if any_failed {
@@ -1534,5 +1525,60 @@ mod tests {
         let repo = h.repo(vec![dynp(&a), dynp(&b)]);
         let got = h.ask_hit(&repo, track()).expect("plain fallback");
         assert_eq!(got.url, "https://b.example/2");
+    }
+
+    // ------------------------------------------------------------ 曲長放寬的命中（Rust 版新增）
+
+    use crate::lyrics::identity::DurationFit;
+
+    fn loose(lyrics: Lyrics, url: &str) -> Option<LyricsHit> {
+        Some(hit_at(lyrics, url).with_fit(DurationFit::Loose))
+    }
+
+    #[test]
+    fn a_loose_duration_hit_does_not_stop_the_walk_before_a_close_one() {
+        let h = Harness::new();
+        let first = FakeProvider::result_hit("a", &h.clock, loose(synced(), "https://a.example/1"));
+        let second =
+            FakeProvider::result_hit("b", &h.clock, Some(hit_at(synced(), "https://b.example/2")));
+        let repo = h.repo(vec![dynp(&first), dynp(&second)]);
+
+        let got = h.ask_hit(&repo, track()).expect("a hit");
+
+        assert_eq!(got.url, "https://b.example/2");
+    }
+
+    #[test]
+    fn a_loose_synced_hit_beats_plain_but_the_earlier_loose_one_wins() {
+        let h = Harness::new();
+        let words = FakeProvider::result_hit(
+            "p",
+            &h.clock,
+            Some(hit_at(plain("words"), "https://p.example/0")),
+        );
+        let first = FakeProvider::result_hit("a", &h.clock, loose(synced(), "https://a.example/1"));
+        let second =
+            FakeProvider::result_hit("b", &h.clock, loose(synced(), "https://b.example/2"));
+        let repo = h.repo(vec![dynp(&words), dynp(&first), dynp(&second)]);
+
+        let got = h.ask_hit(&repo, track()).expect("a hit");
+
+        assert_eq!(got.url, "https://a.example/1");
+        assert_eq!(second.call_count(), 1);
+    }
+
+    /// 另一個來源失敗時，放寬的命中只短暫記住，之後可能換成吻合的版本。
+    #[test]
+    fn a_loose_hit_found_while_a_provider_failed_is_retried_later() {
+        let h = Harness::new();
+        let flaky = FakeProvider::failing("flaky", &h.clock);
+        let other = FakeProvider::result_hit("a", &h.clock, loose(synced(), "https://a.example/1"));
+        let repo = h.make_repo(vec![dynp(&flaky), dynp(&other)], secs(5));
+        assert!(h.ask_hit(&repo, track()).unwrap().loose_duration);
+
+        flaky.respond(Some(synced()), false);
+        h.advance(secs(61));
+
+        assert!(!h.ask_hit(&repo, track()).unwrap().loose_duration);
     }
 }

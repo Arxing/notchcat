@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::identity::{fold_text, TrackIdentity};
+use super::identity::{fold_text, is_han, TrackIdentity};
 use crate::types::TrackSnapshot;
 
 /// 標題缺漏或沒有演出者時回傳 `None`：沒有演出者就沒有可靠的查詢，所以不嘗試。
@@ -122,15 +122,6 @@ fn without_english_subtitle(name: &str) -> &str {
         }
         _ => name,
     }
-}
-
-/// 漢字（統一表意文字、擴充區與相容區）。
-fn is_han(c: char) -> bool {
-    matches!(c,
-        '\u{3400}'..='\u{4DBF}'
-        | '\u{4E00}'..='\u{9FFF}'
-        | '\u{F900}'..='\u{FAFF}'
-        | '\u{20000}'..='\u{3FFFF}')
 }
 
 /// 大小寫、全半形、空白不敏感的形式，用於演出者比對。

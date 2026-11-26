@@ -87,7 +87,7 @@ impl LrclibProvider {
     #[cfg(test)]
     fn decode(data: &[u8], track: &TrackIdentity) -> Option<Lyrics> {
         let payload = decode_object::<Payload>(data).ok()?;
-        Self::payload_lyrics(&payload, track)
+        Self::payload_hit(&payload, track, &Self::exact_url(track)).map(|hit| hit.lyrics)
     }
 
     /// 搜尋結果中第一筆通過 `decode` 檢查、且歌名與查詢相符的紀錄。
@@ -97,23 +97,47 @@ impl LrclibProvider {
         Self::select_candidate(&payloads, track).map(|hit| hit.lyrics)
     }
 
+    /// 精確查詢 → 搜尋 → 簡體搜尋。拿到時間軸且曲長吻合的就停；否則取其中最好的一筆。
     async fn fetch_lyrics(
         &self,
         track: &TrackIdentity,
     ) -> Result<Option<LyricsHit>, ProviderError> {
+        let mut best = None;
         let exact_url = Self::exact_url(track);
         let exact = request(exact_url.clone(), &[]);
         let (status, body) = send(&self.http, exact).await?;
         if is_success(status) {
             let payload = decode_object::<Payload>(&body)?;
-            if let Some(lyrics) = Self::payload_lyrics(&payload, track) {
-                let url = Self::record_url(payload.id, &exact_url);
-                return Ok(Some(LyricsHit::new(lyrics, url)));
+            if let Some(hit) = Self::payload_hit(&payload, track, &exact_url) {
+                if !hit.loose_duration {
+                    return Ok(Some(hit));
+                }
+                best = Some(hit);
             }
         } else if status != 404 {
             return Err(ProviderError::BadStatus(status));
         }
 
+        if let Some(hit) = self.search(track).await? {
+            LyricsHit::keep_better(&mut best, hit);
+        }
+        if best.as_ref().is_some_and(LyricsHit::is_best_possible) {
+            return Ok(best);
+        }
+
+        if let Some(simplified) = track.simplified_chinese() {
+            match self.search(&simplified).await {
+                Ok(Some(hit)) => LyricsHit::keep_better(&mut best, hit),
+                Ok(None) => {}
+                // 手上沒有任何結果時，失敗要照實回報（只短暫快取）；有結果就用它。
+                Err(error) if best.is_none() => return Err(error),
+                Err(_) => {}
+            }
+        }
+        Ok(best)
+    }
+
+    async fn search(&self, track: &TrackIdentity) -> Result<Option<LyricsHit>, ProviderError> {
         let search = request(Self::search_url(track), &[]);
         let found = success_body(&self.http, search).await?;
         let payloads = decode_array::<Payload>(&found)?;
@@ -122,26 +146,41 @@ impl LrclibProvider {
 
     /// 搜尋是模糊的，可能回來另一首歌、混音或翻唱；不像精確查詢（伺服器自己比對名稱），
     /// 每個候選都必須帶有與查詢寬鬆相符的歌名。寧可沒有歌詞，也不要錯的歌詞。
+    /// 通過的候選取優先序最高者（時間軸、曲長吻合），同序取排在前面的。
     ///
     /// 命中的網址是候選自己的紀錄頁；候選沒有可用編號時退回搜尋請求的位址。
     fn select_candidate(payloads: &[Payload], track: &TrackIdentity) -> Option<LyricsHit> {
         let wanted = track.normalized().title;
-        payloads.iter().find_map(|payload| {
-            let name = payload.track_name.as_deref().filter(|n| !n.is_empty())?;
+        let search_url = Self::search_url(track);
+        let mut best = None;
+        for payload in payloads {
+            let Some(name) = payload.track_name.as_deref().filter(|n| !n.is_empty()) else {
+                continue;
+            };
             if !TrackIdentity::loosely_matches(&candidate_title(name), &wanted) {
-                return None;
+                continue;
             }
-            let lyrics = Self::payload_lyrics(payload, track)?;
-            let url = Self::record_url(payload.id, &Self::search_url(track));
-            Some(LyricsHit::new(lyrics, url))
-        })
+            if let Some(hit) = Self::payload_hit(payload, track, &search_url) {
+                LyricsHit::keep_better(&mut best, hit);
+            }
+        }
+        best
     }
 
-    /// 帶時間軸的優先於純文字；曲長檢查只在雙方都回報正的長度時才生效。
-    fn payload_lyrics(payload: &Payload, track: &TrackIdentity) -> Option<Lyrics> {
-        if !track.duration_matches(payload.duration) {
-            return None;
-        }
+    /// 一筆紀錄的命中；曲長差超過放寬的容忍（雙方都回報正的長度時才比）或沒有歌詞時為 `None`。
+    fn payload_hit(
+        payload: &Payload,
+        track: &TrackIdentity,
+        request_url: &str,
+    ) -> Option<LyricsHit> {
+        let fit = track.duration_fit(payload.duration)?;
+        let lyrics = Self::payload_lyrics(payload)?;
+        let url = Self::record_url(payload.id, request_url);
+        Some(LyricsHit::new(lyrics, url).with_fit(fit))
+    }
+
+    /// 帶時間軸的優先於純文字。
+    fn payload_lyrics(payload: &Payload) -> Option<Lyrics> {
         if let Some(parsed) = payload.synced_lyrics.as_deref().and_then(parse_lrc) {
             if parsed.is_synced() {
                 return Some(parsed);
@@ -729,6 +768,118 @@ mod tests {
         assert!(
             LrclibProvider::record_url(None, &LrclibProvider::search_url(&t))
                 .starts_with("https://")
+        );
+    }
+
+    // MARK: Simplified Chinese retry and loose duration (Rust only)
+
+    fn mv_track() -> TrackIdentity {
+        TrackIdentity {
+            title: "爸 我回來了".into(),
+            artist: "周杰倫 Jay Chou".into(),
+            album: None,
+            duration: Some(229.6),
+        }
+    }
+
+    fn record(id: i64, title: &str, duration: f64, text: &str) -> String {
+        format!(
+            r#"{{"id":{id},"trackName":"{title}","duration":{duration},"syncedLyrics":"[00:01.00]{text}"}}"#
+        )
+    }
+
+    /// 精確查詢落空，原文與簡體的搜尋各回指定的紀錄。
+    fn mv_setup(original: &str, simplified: &str) -> (Arc<FakeHttp>, LrclibProvider) {
+        let (http, provider) = setup();
+        let t = mv_track();
+        let retry = t.simplified_chinese().expect("traditional query");
+        http.respond(LrclibProvider::exact_url(&t), 404, "{}");
+        http.respond(LrclibProvider::search_url(&t), 200, format!("[{original}]"));
+        http.respond(
+            LrclibProvider::search_url(&retry),
+            200,
+            format!("[{simplified}]"),
+        );
+        (http, provider)
+    }
+
+    fn fetch_mv(provider: &LrclibProvider) -> Option<(Lyrics, bool)> {
+        block_on(provider.fetch(&mv_track()))
+            .unwrap()
+            .map(|h| (h.lyrics, h.loose_duration))
+    }
+
+    #[test]
+    fn lrclib_retries_in_simplified_chinese_when_the_search_misses() {
+        let (http, provider) = mv_setup("", &record(9, "爸 我回来了", 230.0, "found"));
+
+        let hit = block_on(provider.fetch(&mv_track())).unwrap().unwrap();
+
+        assert_eq!(hit.lyrics, synced(1.0, "found"));
+        assert!(!hit.loose_duration);
+        assert_eq!(hit.url, "https://lrclib.net/api/get/9");
+        let requests = http.requests();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(query_values(&requests[2].url)["q"], "爸 我回来了 周杰伦");
+    }
+
+    #[test]
+    fn lrclib_does_not_retry_after_a_close_synced_hit() {
+        let (http, provider) = mv_setup(&record(1, "爸 我回來了", 230.0, "original"), "");
+
+        assert_eq!(fetch_mv(&provider), Some((synced(1.0, "original"), false)));
+        assert_eq!(http.requests().len(), 2);
+    }
+
+    #[test]
+    fn lrclib_prefers_a_close_simplified_record_over_a_loose_original_one() {
+        let (_, provider) = mv_setup(
+            &record(1, "爸 我回來了", 236.0, "loose"),
+            &record(2, "爸 我回来了", 230.0, "close"),
+        );
+
+        assert_eq!(fetch_mv(&provider), Some((synced(1.0, "close"), false)));
+    }
+
+    #[test]
+    fn lrclib_uses_a_loose_record_only_when_nothing_is_closer() {
+        let (_, provider) = mv_setup(&record(1, "爸 我回來了", 236.0, "loose"), "");
+        assert_eq!(fetch_mv(&provider), Some((synced(1.0, "loose"), true)));
+
+        // 同一份搜尋結果裡，吻合的勝過排在前面的放寬者。
+        let both = format!(
+            "{},{}",
+            record(1, "爸 我回來了", 236.0, "loose"),
+            record(2, "爸 我回來了", 231.0, "close")
+        );
+        let (_, provider) = mv_setup(&both, "");
+        assert_eq!(fetch_mv(&provider), Some((synced(1.0, "close"), false)));
+
+        // 差超過 10 秒仍然不收。
+        let (_, provider) = mv_setup(&record(1, "爸 我回來了", 240.0, "far"), "");
+        assert_eq!(fetch_mv(&provider), None);
+    }
+
+    #[test]
+    fn lrclib_prefers_a_close_synced_record_over_an_earlier_plain_one() {
+        let plain = r#"{"id":1,"trackName":"爸 我回來了","duration":230,"plainLyrics":"words"}"#;
+        let (_, provider) = mv_setup(plain, &record(2, "爸 我回来了", 230.0, "synced"));
+        assert_eq!(fetch_mv(&provider), Some((synced(1.0, "synced"), false)));
+    }
+
+    #[test]
+    fn lrclib_failed_retry_keeps_what_was_already_found() {
+        let (http, provider) = mv_setup(&record(1, "爸 我回來了", 236.0, "loose"), "");
+        let retry = mv_track().simplified_chinese().unwrap();
+        http.respond(LrclibProvider::search_url(&retry), 500, "");
+        assert_eq!(fetch_mv(&provider), Some((synced(1.0, "loose"), true)));
+
+        // 什麼都沒找到時，重試失敗就是失敗（不能被當成「查無」快取一整天）。
+        let (http, provider) = mv_setup("", "");
+        http.respond(LrclibProvider::search_url(&retry), 500, "");
+        assert_eq!(
+            block_on(provider.fetch(&mv_track())),
+            Err(ProviderError::BadStatus(500))
         );
     }
 }
