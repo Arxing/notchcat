@@ -4,7 +4,7 @@
 //! 是 `Send`、不綁任何執行器，drop 它不會阻塞（執行緒在背景跑完，受請求逾時限制）。
 //!
 //! 語意（core 的 lyrics 管線依賴這些）：
-//! - 非 2xx 是正常回應（`http_status_as_error(false)`）：LRCLIB 的 404 必須落到搜尋，不是傳輸錯誤。
+//! - 非 2xx 是正常回應（`http_status_as_error(false)`）：LRCLIB 的 404 是乾淨的「沒有」，不是傳輸錯誤。
 //! - 本體最多讀 [`MAX_BODY_BYTES`]。2xx 超過 → `TooLarge`；非 2xx 超過 → 保留狀態碼、本體為空
 //!   （巨大的 404 仍是 404，不能變成失敗）。
 //! - 傳輸錯誤只帶固定的短描述，不含 URL：query 裡是歌名，不進錯誤字串或日誌。
