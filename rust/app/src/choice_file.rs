@@ -19,7 +19,7 @@
 //!   → 空紀錄加一則警告。
 //! - 單筆壞掉（欄位型別不對、網址不是 `https://`、沒有歌詞行、數字超出範圍）→ 只略過那筆；
 //!   警告只帶略過的筆數。
-//! - 偏移讀入時限制範圍（[`clamp_offset`]）。
+//! - 偏移讀入時限制範圍（[`clamp_offset`]）；每筆的歌詞行讀入時依時間排序（同時間維持原順序）。
 //! - 警告永遠不含歌名、演出者或歌詞（解析器的錯誤訊息會引用原文，所以不轉述）。
 //!
 //! # 存檔規則
@@ -117,7 +117,8 @@ impl From<SavedChoice> for Song {
 
 /// 檢查並整理一筆紀錄；不能用的回 `None`。讀入與寫出都經過這裡。
 ///
-/// 下游假設網址是 `https://`、歌詞行不是空的；非有限的數字寫成 JSON 會變成 `null`。
+/// 下游假設網址是 `https://`、歌詞行不是空的、行依時間排列（查目前行用二分搜尋）；
+/// 非有限的數字寫成 JSON 會變成 `null`。
 fn usable(mut choice: SavedChoice) -> Option<SavedChoice> {
     let ok = choice.url.starts_with("https://")
         && !choice.lines.is_empty()
@@ -125,6 +126,8 @@ fn usable(mut choice: SavedChoice) -> Option<SavedChoice> {
     if !ok {
         return None;
     }
+    // 穩定排序：同時間的行維持原順序。
+    choice.lines.sort_by(|a, b| a.time.total_cmp(&b.time));
     choice.duration = choice.duration.filter(|d| d.is_finite());
     for offset in choice.offsets.values_mut() {
         *offset = clamp_offset(*offset);
@@ -779,6 +782,29 @@ mod tests {
             ("https://test.example/3".to_string(), -120.0),
         ]);
         assert_eq!(loaded, book_of(vec![want]));
+    }
+
+    /// 目前行的查找假設時間由小到大；檔案裡順序亂掉的行在讀入時排好，同時間的行維持原順序。
+    #[test]
+    fn lines_are_loaded_in_time_order() {
+        let dir = TempDir::new();
+        let text = concat!(
+            r#"{"version":1,"songs":[{"song":"s","duration":null,"url":"https://test.example/1","#,
+            r#""offsets":{},"lines":[[20.0,"d"],[10.0,"b"],[5.0,"a"],[10.0,"c"]]}]}"#,
+        );
+        fs::write(dir.file(), text).unwrap();
+
+        let book = reload(&dir.file());
+
+        assert_eq!(
+            book.songs[0].lines,
+            [
+                line(5.0, "a"),
+                line(10.0, "b"),
+                line(10.0, "c"),
+                line(20.0, "d")
+            ]
+        );
     }
 
     // ---------------------------------------------------------------- 失敗
