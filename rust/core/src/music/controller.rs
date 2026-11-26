@@ -11,19 +11,22 @@
 //! 守門同時比對世代計數（[`Core::generation`]）：A→B→A 時，第一個 A 的查詢與第二個 A 的 key 相同，
 //! 只比 key 擋不住它（因曲長改變而重查時也一樣）；世代每次換曲都加一，所以被取代的查詢一定過期。
 //!
-//! 版本與偏移：查詢結束時以**目前快照**的 identity 找記住的選擇（[`ChoiceBook::find`]）並套到結果上
-//! （[`apply_choice`]）；在那之前不顯示存下的內容。只有使用者的明確動作
+//! 版本與偏移：查詢結束時以**這次查詢發出時**的 identity 找記住的選擇（[`ChoiceBook::find`]）並套到
+//! 結果上（[`apply_choice`]）；在那之前不顯示存下的內容。只有使用者的明確動作
 //! （[`MusicController::next_version`]、[`MusicController::nudge_offset`]、
 //! [`MusicController::reset_offset`]）而且真的改變了什麼，才寫進紀錄並呼叫 [`ChoiceSaver`]；單純播放不寫。
-//! 紀錄同樣用目前快照的 identity，存的是未偏移、未轉繁的行。偏移每個版本網址各一個，換曲就清掉。
+//! 紀錄用同一個 identity，存的是未偏移、未轉繁的行。偏移每個版本網址各一個，換曲就清掉。
+//! 不用目前快照的曲長：它會在容忍內晃動或暫時消失，同一次播放的選擇會散成兩筆，或記到下次找不到的
+//! 地方；曲長真的晚到或改變時已經重查，所以查詢發出時的曲長就是這次播放的曲長。
 //!
 //! 顯示的欄位（[`MusicState::lyrics`]、`lyrics_url`、`version`）只由 [`Core::rebuild`] 從版本清單、
 //! 索引、偏移與簡轉繁開關產生。簡轉繁（[`MusicController::set_traditional_lyrics`]）只影響顯示：
 //! 控制器保留提供者給的原始版本，開關切換時重新產生，不重查。
 //!
-//! 並行：狀態（快照、版本與偏移、紀錄、目前 key、世代、查詢把手）由單一 mutex 保護；通知訂閱者與
-//! 呼叫 [`ChoiceSaver`] 一律在**鎖外**，所以回呼內可以再讀 `state()` 或訂閱。`spawn` 與舊把手的 drop
-//! 也都在鎖外（有的執行器會在 `spawn` 內就地執行，或在 drop 把手時同步執行取消邏輯）。
+//! 並行：狀態（快照、版本與偏移、紀錄、目前 key、查詢的 identity、世代、查詢把手）由單一 mutex
+//! 保護；通知訂閱者與呼叫 [`ChoiceSaver`] 一律在**鎖外**，所以回呼內可以再讀 `state()` 或訂閱。
+//! `spawn` 與舊把手的 drop 也都在鎖外（有的執行器會在 `spawn` 內就地執行，或在 drop 把手時同步執行
+//! 取消邏輯）。
 //! 每個動作的讀取、修改與寫進紀錄在同一次上鎖內完成：和換曲競爭時，動作要嘛整個落在舊歌，
 //! 要嘛看到已清空的新歌而什麼都不做。
 //! 監視器訂閱的回呼與查詢工作都只持有控制器的 `Weak`：控制器 drop 時沒有 Arc 循環，
@@ -101,12 +104,11 @@ struct Core {
     state: MusicState,
     /// 歌詞轉繁體中文開關。
     traditional: bool,
-    /// 目前快照的 identity；每個快照都更新（曲長可能晚到或小幅改變），配紀錄與存紀錄用它。
-    identity: Option<TrackIdentity>,
     /// 目前曲目的 `cache_key`；沒有 identity（沒有快照、缺演出者…）時為 `None`。
     current_key: Option<String>,
-    /// 目前這次查詢發出時的曲長；那時不知道曲長為 `None`。
-    lookup_duration: Option<f64>,
+    /// 目前這次查詢發出時的 identity（含那時的曲長）；只在換曲時改變，判斷曲長是否改變、配紀錄與
+    /// 存紀錄都用它。
+    lookup_identity: Option<TrackIdentity>,
     /// 進行中的查詢；drop 即取消。
     lookup: Option<TaskHandle>,
     /// 查詢世代：每次（重新）開始或作廢查詢（換曲，含曲長改變）就加一。每個查詢記下自己開始時的世代，
@@ -125,17 +127,22 @@ struct Core {
 impl Core {
     /// 目前的快照（`key`、已知的曲長 `duration`）是否需要放棄目前的查詢與歌詞（見模組說明）。
     fn is_another_track(&self, key: Option<&str>, duration: Option<f64>) -> bool {
+        let issued = self.lookup_identity.as_ref().and_then(|i| i.duration);
         self.current_key.as_deref() != key
-            || (duration.is_some() && duration_distance(self.lookup_duration, duration).is_none())
+            || (duration.is_some() && duration_distance(issued, duration).is_none())
     }
 
     /// 換曲：作廢舊查詢、清掉上一首的一切。回傳舊查詢的把手，呼叫端要在**鎖外** drop。
-    fn change_track(&mut self, key: Option<String>, duration: Option<f64>) -> Option<TaskHandle> {
+    fn change_track(
+        &mut self,
+        key: Option<String>,
+        identity: Option<TrackIdentity>,
+    ) -> Option<TaskHandle> {
         self.generation += 1;
         // 有 key 的話呼叫端一定接著開始查詢。
         self.state.searching = key.is_some();
         self.current_key = key;
-        self.lookup_duration = duration;
+        self.lookup_identity = identity;
         self.versions.clear();
         self.index = 0;
         self.offsets.clear();
@@ -146,7 +153,7 @@ impl Core {
     /// 收下查詢結果：套上記住的選擇與它的偏移。
     fn adopt(&mut self, found: Vec<LyricsHit>) {
         let saved = self
-            .identity
+            .lookup_identity
             .as_ref()
             .and_then(|identity| self.book.find(identity));
         let (versions, index) = apply_choice(found, saved);
@@ -183,7 +190,8 @@ impl Core {
 
     /// 把目前版本與本曲的偏移寫進紀錄。
     fn remember(&mut self) {
-        let (Some(identity), Some(hit)) = (&self.identity, self.versions.get(self.index)) else {
+        let current = self.versions.get(self.index);
+        let (Some(identity), Some(hit)) = (&self.lookup_identity, current) else {
             return;
         };
         let Lyrics::Synced(lines) = &hit.lyrics else {
@@ -376,9 +384,8 @@ impl MusicController {
             let new_track = core.is_another_track(key.as_deref(), duration);
             let before = core.state.clone();
             core.state.snapshot = new;
-            core.identity = identity.clone();
             let old_lookup = if new_track {
-                core.change_track(key.clone(), duration)
+                core.change_track(key.clone(), identity.clone())
             } else {
                 None
             };
@@ -1886,27 +1893,84 @@ mod tests {
         assert_eq!(saves(&saved), 0);
     }
 
+    /// 快照的曲長在容忍內晃動不重查，紀錄一直認查詢發出時的 200：同一次播放只寫同一筆。
     #[test]
-    fn matching_and_saving_use_the_current_snapshots_length() {
+    fn saving_uses_the_lookup_length_while_the_snapshot_wanders() {
         let fx = Fixture::new();
-        let recorded = choice("Song A", Some(203.0), URL_B, lines_b(), &[]);
-        let (controller, saved) = fx.controller_with(book(vec![recorded.clone()]));
+        let (controller, saved) = fx.controller_with(ChoiceBook::default());
         fx.emit(lasting("Song A", Some(200.0)));
-        // 差 1.5 秒不重查；紀錄的 203 只在目前的 201.5 的容忍內，不在查詢時的 200 的容忍內。
-        fx.emit(lasting("Song A", Some(201.5)));
         fx.answer(0, two_versions());
-        assert_eq!(controller.state().version, info(1, 2, 0.0));
 
-        fx.emit(lasting("Song A", Some(198.5)));
+        fx.emit(lasting("Song A", Some(201.5)));
         controller.next_version();
-        assert_eq!(fx.resolver.requested().len(), 1);
         assert_eq!(
             last_saved(&saved),
-            [
-                recorded,
-                choice("Song A", Some(198.5), URL_A, lines_a(), &[]),
-            ]
+            [choice("Song A", Some(200.0), URL_B, lines_b(), &[])]
         );
+
+        // 和上一次晃到的 201.5 差超過 2 秒，仍是同一筆。
+        fx.emit(lasting("Song A", Some(198.5)));
+        controller.nudge_offset(0.5);
+        assert_eq!(
+            last_saved(&saved),
+            [choice(
+                "Song A",
+                Some(200.0),
+                URL_B,
+                lines_b(),
+                &[(URL_B, 0.5)]
+            )]
+        );
+        assert_eq!(fx.resolver.requested().len(), 1);
+    }
+
+    #[test]
+    fn matching_uses_the_lookup_length_while_the_snapshot_wanders() {
+        let fx = Fixture::new();
+        // 198.5 在查詢時的 200 的容忍內，不在目前的 201.5 的容忍內。
+        let recorded = choice("Song A", Some(198.5), URL_B, lines_b(), &[(URL_B, 1.5)]);
+        let (controller, saved) = fx.controller_with(book(vec![recorded]));
+        fx.emit(lasting("Song A", Some(200.0)));
+        fx.emit(lasting("Song A", Some(201.5)));
+        fx.answer(0, two_versions());
+        assert_eq!(controller.state().version, info(1, 2, 1.5));
+
+        // 存回配到的那一筆，不另外新增。
+        controller.nudge_offset(0.5);
+        assert_eq!(
+            last_saved(&saved),
+            [choice(
+                "Song A",
+                Some(200.0),
+                URL_B,
+                lines_b(),
+                &[(URL_B, 2.0)]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_dropped_length_keeps_matching_and_saving_at_the_lookup_length() {
+        let fx = Fixture::new();
+        let recorded = choice("Song A", Some(200.0), URL_B, lines_b(), &[(URL_B, 1.5)]);
+        let (controller, saved) = fx.controller_with(book(vec![recorded]));
+        fx.emit(lasting("Song A", Some(200.0)));
+        fx.emit(lasting("Song A", None));
+        fx.answer(0, two_versions());
+        assert_eq!(controller.state().version, info(1, 2, 1.5));
+
+        controller.nudge_offset(0.5);
+        assert_eq!(
+            last_saved(&saved),
+            [choice(
+                "Song A",
+                Some(200.0),
+                URL_B,
+                lines_b(),
+                &[(URL_B, 2.0)]
+            )]
+        );
+        assert_eq!(fx.resolver.requested().len(), 1);
     }
 
     #[test]
