@@ -9,6 +9,7 @@ pub mod normalizer;
 pub mod provider;
 pub mod repository;
 pub mod traditional;
+pub mod versions;
 
 pub use identity::TrackIdentity;
 pub use normalizer::identity_from;
@@ -35,13 +36,50 @@ pub enum Lyrics {
 pub struct LyricsHit {
     pub lyrics: Lyrics,
     pub url: String,
+    /// 曲長只在放寬的容忍內（見 [`identity::DurationFit::Loose`]）。
+    pub loose_duration: bool,
+    /// 紀錄曲長和查詢曲長差幾秒；任一邊未知時為 `None`。
+    pub duration_gap: Option<f64>,
+    /// 紀錄的演出者和查詢的演出者寬鬆相符（見 [`TrackIdentity::matches_artist`]）。
+    /// 來源沒有提供演出者、或由服務端自己比對過演出者（LRCLIB 精確查詢）時也是 `true`。
+    pub artist_matches: bool,
 }
 
 impl LyricsHit {
     pub fn new(lyrics: Lyrics, url: impl Into<String>) -> Self {
         let url = url.into();
         debug_assert!(url.starts_with("https://"), "非 https 網址：{url}");
-        Self { lyrics, url }
+        Self {
+            lyrics,
+            url,
+            loose_duration: false,
+            duration_gap: None,
+            artist_matches: true,
+        }
+    }
+
+    /// 依紀錄曲長和查詢的吻合程度標記；差超過放寬的容忍時為 `None`。
+    pub(crate) fn matched(
+        mut self,
+        track: &TrackIdentity,
+        record_duration: Option<f64>,
+    ) -> Option<Self> {
+        let fit = track.duration_fit(record_duration)?;
+        self.loose_duration = fit == identity::DurationFit::Loose;
+        self.duration_gap = track.duration_gap(record_duration);
+        Some(self)
+    }
+
+    /// 挑選用的優先序，越大越好：時間軸勝過純文字；同類之中曲長吻合的勝過放寬的。
+    fn rank(&self) -> u8 {
+        u8::from(self.lyrics.is_synced()) * 2 + u8::from(!self.loose_duration)
+    }
+
+    /// 只在 `candidate` 的優先序更高時換掉 `best`；同序保留先找到的。
+    pub(crate) fn keep_better(best: &mut Option<Self>, candidate: Self) {
+        if best.as_ref().is_none_or(|b| b.rank() < candidate.rank()) {
+            *best = Some(candidate);
+        }
     }
 }
 
@@ -300,6 +338,25 @@ mod tests {
         let hit = LyricsHit::new(Lyrics::Plain("words".into()), "https://x.example/1");
         assert_eq!(hit.lyrics, Lyrics::Plain("words".into()));
         assert_eq!(hit.url, "https://x.example/1");
+    }
+
+    #[test]
+    fn matched_records_how_far_off_the_duration_is() {
+        let track = TrackIdentity {
+            title: "T".into(),
+            artist: "A".into(),
+            album: None,
+            duration: Some(200.0),
+        };
+        let matched = |record| {
+            LyricsHit::new(Lyrics::Plain("words".into()), "https://x.example/1")
+                .matched(&track, record)
+                .map(|h| (h.loose_duration, h.duration_gap))
+        };
+        assert_eq!(matched(Some(197.0)), Some((false, Some(3.0))));
+        assert_eq!(matched(Some(208.0)), Some((true, Some(8.0))));
+        assert_eq!(matched(None), Some((false, None)));
+        assert_eq!(matched(Some(211.0)), None);
     }
 
     fn texts(lines: &[LyricLine]) -> Vec<&str> {

@@ -47,7 +47,7 @@ pub enum ShellEvent {
 /// - 物件安全：外殼以 `Arc<dyn ShellContent>` 持有，所有方法都在 GPUI 的主執行緒上呼叫。
 /// - [`preview`](Self::preview)／[`expanded`](Self::expanded) 在外殼每次重繪時呼叫（只有大小、模式或可見性
 ///   改變時才重繪，閒置時不會被呼叫）。回傳的元素放在一個**固定大小**的槽裡：Preview 槽 = Preview 的大小
-///   （瀏海寬 + 160，瀏海高 + 額外高度），Expanded 槽 = Expanded 的大小（同寬，高 180，上方留 8 點，同 Swift
+///   （瀏海寬 + 260，瀏海高 + 額外高度），Expanded 槽 = Expanded 的大小（同寬，高 180，上方留 8 點，同 Swift
 ///   `NotchContentView`）。槽從外形的左上角開始、不隨動畫改變大小，所以內容不會在動畫中重新排版；
 ///   外形比槽小的部分被裁掉。模式一改變就換成另一個模式的內容（同 Swift），形狀再花 0.28 秒長大／縮小。
 /// - 內容自己的狀態改變（例如換歌）要重繪時：讓元素來自內容自己的 `Entity<V: Render>`

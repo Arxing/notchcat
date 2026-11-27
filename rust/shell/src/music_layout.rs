@@ -5,7 +5,7 @@
 //! 長度單位都是點（GPUI 的 `px` 即點，Retina 由縮放係數處理）。
 
 use musicat_core::lyrics::Lyrics;
-use musicat_core::music::presentation::playback_position;
+use musicat_core::music::presentation::{playback_position, LyricsStatus};
 use musicat_core::shell_logic::geometry::{ease_in_out, EXPANDED_HEIGHT};
 use musicat_core::types::TrackSnapshot;
 
@@ -65,8 +65,8 @@ pub const STRIP_HORIZONTAL_PADDING: f64 = 12.0;
 pub const STRIP_FONT_SIZE: f64 = 12.0;
 /// 顯示歌詞行時的文字不透明度（`isLine ? 0.95 : 0.7`）。
 pub const STRIP_LINE_OPACITY: f64 = 0.95;
-/// 顯示曲名時的文字不透明度。
-pub const STRIP_TITLE_OPACITY: f64 = 0.7;
+/// 沒有歌詞行、顯示命中狀態時的文字不透明度。
+pub const STRIP_STATUS_OPACITY: f64 = 0.7;
 /// 多行歌詞條裡，前後文行（非目前行）的文字不透明度。
 pub const STRIP_CONTEXT_OPACITY: f64 = 0.45;
 /// 歌詞條某一列的文字不透明度：依強調程度在前後文與目前行之間內插。
@@ -301,6 +301,85 @@ pub fn control_side_widths(info_width: f64) -> (f64, f64) {
     }
 }
 
+/// Preview 兩翼文字（曲名、演出者）的字級與行高。
+pub const PREVIEW_TEXT_FONT_SIZE: f64 = 11.0;
+pub const PREVIEW_TEXT_LINE_HEIGHT: f64 = 14.0;
+/// 文字與封面／音柱的間距。
+pub const PREVIEW_TEXT_SPACING: f64 = 6.0;
+/// 文字與瀏海邊緣的距離。
+pub const PREVIEW_TEXT_NOTCH_INSET: f64 = 4.0;
+pub const PREVIEW_TITLE_OPACITY: f64 = 0.95;
+pub const PREVIEW_ARTIST_OPACITY: f64 = 0.65;
+
+/// Preview 兩翼要顯示的文字：左翼曲名、右翼演出者（沒有或只有空白時為 `None`）。
+/// 沒在播放時整個是 `None`：暫停時兩翼只留封面和靜止的音柱。
+pub fn preview_labels(s: &TrackSnapshot) -> Option<(&str, Option<&str>)> {
+    if !s.is_playing {
+        return None;
+    }
+    let artist = s.artist.as_deref().filter(|a| !a.trim().is_empty());
+    Some((s.title.as_str(), artist))
+}
+
+/// 歌詞命中狀態的標籤（歌詞條沒有歌詞行可顯示時的文字，與 Expanded 控制列左側）。
+pub fn lyrics_status_label(status: LyricsStatus) -> &'static str {
+    match status {
+        LyricsStatus::Searching => "查詢中…",
+        LyricsStatus::NotFound => "沒有歌詞",
+        LyricsStatus::Plain => "純文字版",
+        LyricsStatus::Synced => "時間軸版",
+    }
+}
+/// Expanded 狀態標籤的不透明度：比下面的來源連結亮一點。
+pub const STATUS_LABEL_OPACITY: f64 = 0.7;
+
+// ---------------------------------------------------------------- 版本切換與時間微調（本版，Swift 沒有）
+
+/// 偏移按鈕點一下的秒數；按住 Option 點是 [`OFFSET_BIG_STEP`]。
+pub const OFFSET_STEP: f64 = 0.5;
+/// 按住 Option 點的秒數（MV 前面有長劇情時用）。
+pub const OFFSET_BIG_STEP: f64 = 5.0;
+/// `−`／`＋` 按鈕與中間數值的寬。三者排在控制列右側、折疊開關左邊的彈性區：瀏海 185 點時那裡寬 86.5，
+/// 放得下合計的 76。字級與來源標籤相同（[`SOURCE_LABEL_FONT_SIZE`]），文字不透明度同狀態標籤。
+pub const OFFSET_BUTTON_WIDTH: f64 = 18.0;
+pub const OFFSET_VALUE_WIDTH: f64 = 40.0;
+/// 按鈕字樣：U+2212（減號）與 U+FF0B（全形加號）。
+pub const OFFSET_MINUS_GLYPH: &str = "\u{2212}";
+pub const OFFSET_PLUS_GLYPH: &str = "\u{FF0B}";
+
+/// 顯示時間軸歌詞時控制列左側上行的文字：有兩個以上版本時是「時間軸版 1/3 ›」（`index` 從 0 起算，
+/// `›` 表示點一下換下一個），只有一個時就是「時間軸版」。
+pub fn version_label(index: usize, count: usize) -> String {
+    let status = lyrics_status_label(LyricsStatus::Synced);
+    if count >= 2 {
+        format!("{status} {}/{count} \u{203A}", index + 1)
+    } else {
+        status.to_string()
+    }
+}
+
+/// 目前偏移的文字：取到小數一位，`+0.5s`、`−1.0s`（減號是 U+2212）；顯示起來是零的不帶正負號。
+pub fn offset_label(offset: f64) -> String {
+    // 先取整再看正負：-0.04 與 -0.0 都顯示 `0.0s`。
+    let rounded = (offset * 10.0).round() / 10.0;
+    if rounded > 0.0 {
+        format!("+{rounded:.1}s")
+    } else if rounded < 0.0 {
+        format!("{OFFSET_MINUS_GLYPH}{:.1}s", -rounded)
+    } else {
+        "0.0s".to_string()
+    }
+}
+
+/// 偏移按鈕這一下要加減的秒數。
+pub fn offset_step(option_held: bool) -> f64 {
+    if option_held {
+        OFFSET_BIG_STEP
+    } else {
+        OFFSET_STEP
+    }
+}
+
 /// 歌詞來源標籤的文字：網址的主機加上 ` ↗`（例如 `lrclib.net ↗`）。
 ///
 /// 不用 `url` crate：取 `https://` 之後到第一個 `/`、`?`、`#` 之前的部分，去掉 `userinfo@` 與 `:埠號`
@@ -528,7 +607,7 @@ pub fn glyph_shapes(glyph: Glyph, size: f64) -> Vec<GlyphShape> {
 mod tests {
     use super::*;
     use musicat_core::lyrics::LyricLine;
-    use musicat_core::shell_logic::geometry::EXPANDED_CORNER_RADIUS;
+    use musicat_core::shell_logic::geometry::{EXPANDED_CORNER_RADIUS, WIDTH_PADDING};
     use musicat_core::types::PositionAnchor;
 
     fn close(a: f64, b: f64) {
@@ -819,6 +898,38 @@ mod tests {
     }
 
     #[test]
+    fn preview_labels_show_title_and_artist_only_while_playing() {
+        let mut s = snapshot(None);
+        s.title = "Song".into();
+        s.artist = Some("Singer".into());
+        s.is_playing = true;
+        assert_eq!(preview_labels(&s), Some(("Song", Some("Singer"))));
+        // 沒有演出者（或只有空白）：右翼不放文字。
+        s.artist = Some("  ".into());
+        assert_eq!(preview_labels(&s), Some(("Song", None)));
+        s.artist = None;
+        assert_eq!(preview_labels(&s), Some(("Song", None)));
+        // 暫停時兩翼只留封面和音柱。
+        s.artist = Some("Singer".into());
+        s.is_playing = false;
+        assert_eq!(preview_labels(&s), None);
+    }
+
+    #[test]
+    fn each_lyrics_status_has_its_own_label() {
+        assert_eq!(
+            [
+                LyricsStatus::Searching,
+                LyricsStatus::NotFound,
+                LyricsStatus::Plain,
+                LyricsStatus::Synced,
+            ]
+            .map(lyrics_status_label),
+            ["查詢中…", "沒有歌詞", "純文字版", "時間軸版"]
+        );
+    }
+
+    #[test]
     fn source_label_uses_the_host_and_an_arrow() {
         assert_eq!(
             source_label("https://lrclib.net/api/get/1").as_deref(),
@@ -992,7 +1103,7 @@ mod tests {
             assert!(height - rows >= 8.0, "lines = {lines}");
             assert!(STRIP_CORNER_RADIUS <= height);
         }
-        const { assert!(STRIP_CONTEXT_OPACITY < STRIP_TITLE_OPACITY) };
+        const { assert!(STRIP_CONTEXT_OPACITY < STRIP_STATUS_OPACITY) };
     }
 
     fn strip_key(lines: u8) -> (String, usize, u8) {
@@ -1071,8 +1182,8 @@ mod tests {
         // 按鈕群：3 顆 28 寬加 2 個 14 間距。
         close(control_buttons_width(), 112.0);
         for notch in [185.0, 200.0, 150.0] {
-            // 資訊欄寬 = 外形寬（瀏海 + 160）− 左右內距 − 封面 − 間距。
-            let info = notch + 160.0
+            // 資訊欄寬 = 外形寬（瀏海 + WIDTH_PADDING）− 左右內距 − 封面 − 間距。
+            let info = notch + WIDTH_PADDING
                 - 2.0 * PAGE_HORIZONTAL_PADDING
                 - EXPANDED_COVER_SIDE
                 - HEADER_SPACING;
@@ -1094,5 +1205,43 @@ mod tests {
         assert!(l == 0.0 && r == 0.0);
         let (l, r) = control_side_widths(10.0);
         assert!(l == 0.0 && r == 0.0);
+    }
+
+    #[test]
+    fn version_label_counts_only_when_there_is_a_choice() {
+        assert_eq!(version_label(0, 3), "時間軸版 1/3 ›");
+        assert_eq!(version_label(2, 3), "時間軸版 3/3 ›");
+        assert_eq!(version_label(0, 1), "時間軸版");
+    }
+
+    #[test]
+    fn offset_label_is_signed() {
+        assert_eq!(offset_label(0.0), "0.0s");
+        assert_eq!(offset_label(-0.0), "0.0s");
+        assert_eq!(offset_label(0.5), "+0.5s");
+        assert_eq!(offset_label(-1.0), "\u{2212}1.0s");
+        // 紀錄檔裡的偏移可以是任意值：顯示成 0.0 的不帶正負號。
+        assert_eq!(offset_label(0.04), "0.0s");
+        assert_eq!(offset_label(-0.04), "0.0s");
+        assert_eq!(offset_label(-120.0), "\u{2212}120.0s");
+    }
+
+    #[test]
+    fn option_click_takes_the_big_step() {
+        assert_eq!((offset_step(false), offset_step(true)), (0.5, 5.0));
+    }
+
+    #[test]
+    fn offset_controls_fit_beside_the_fold_button() {
+        for notch in [185.0, 200.0] {
+            // 資訊欄寬 = 外形寬（瀏海 + WIDTH_PADDING）− 左右內距 − 封面 − 間距。
+            let info = notch + WIDTH_PADDING
+                - 2.0 * PAGE_HORIZONTAL_PADDING
+                - EXPANDED_COVER_SIDE
+                - HEADER_SPACING;
+            let free = control_side_widths(info).1 - CONTROL_ROW_HEIGHT;
+            let needed = 2.0 * OFFSET_BUTTON_WIDTH + OFFSET_VALUE_WIDTH;
+            assert!(free >= needed, "{notch}: {free} < {needed}");
+        }
     }
 }

@@ -146,6 +146,7 @@ pub fn describe_snapshot(snapshot: Option<&TrackSnapshot>, detailed: bool) -> St
 /// 歌詞狀態的一行描述（不含歌詞內容）。
 pub fn describe_lyrics(state: &MusicState) -> String {
     match &state.lyrics {
+        None if state.searching => "searching lyrics".to_string(),
         None => "no lyrics".to_string(),
         Some(Lyrics::Synced(lines)) => format!("synced lyrics, {} lines", lines.len()),
         Some(Lyrics::Plain(text)) => format!("plain lyrics, {} lines", text.lines().count()),
@@ -345,6 +346,9 @@ mod tests {
         use musicat_core::lyrics::LyricLine;
         let mut state = MusicState::default();
         assert_eq!(describe_lyrics(&state), "no lyrics");
+        state.searching = true;
+        assert_eq!(describe_lyrics(&state), "searching lyrics");
+        state.searching = false;
         state.lyrics = Some(Lyrics::Synced(vec![
             LyricLine {
                 time: 1.0,

@@ -16,6 +16,29 @@ pub enum StripContent {
     None,
 }
 
+/// 目前曲目的歌詞命中狀態。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LyricsStatus {
+    /// 查詢還沒有結果。
+    Searching,
+    /// 查過沒有，或根本沒得查（缺演出者）。
+    NotFound,
+    /// 只有純文字歌詞。
+    Plain,
+    /// 帶時間軸的歌詞。
+    Synced,
+}
+
+/// 由控制器狀態的歌詞與「查詢中」旗標決定狀態；有歌詞時以歌詞為準。
+pub fn lyrics_status(lyrics: Option<&Lyrics>, searching: bool) -> LyricsStatus {
+    match lyrics {
+        Some(Lyrics::Synced(_)) => LyricsStatus::Synced,
+        Some(Lyrics::Plain(_)) => LyricsStatus::Plain,
+        None if searching => LyricsStatus::Searching,
+        None => LyricsStatus::NotFound,
+    }
+}
+
 /// `now` 時的播放位置；來源沒有回報 anchor 時為 `None`。位置未知時絕不拿 0 充數。
 pub fn playback_position(s: &TrackSnapshot, now: f64) -> Option<f64> {
     s.position.map(|a| a.position_at(now, s.duration))
@@ -178,6 +201,17 @@ mod tests {
 
     fn close(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} != {b}");
+    }
+
+    #[test]
+    fn lyrics_status_tells_miss_plain_and_synced_apart() {
+        let plain = Lyrics::Plain("la".into());
+        assert_eq!(lyrics_status(None, true), LyricsStatus::Searching);
+        assert_eq!(lyrics_status(None, false), LyricsStatus::NotFound);
+        assert_eq!(lyrics_status(Some(&plain), false), LyricsStatus::Plain);
+        assert_eq!(lyrics_status(Some(&synced()), false), LyricsStatus::Synced);
+        // 已經有歌詞就以歌詞為準。
+        assert_eq!(lyrics_status(Some(&synced()), true), LyricsStatus::Synced);
     }
 
     #[test]

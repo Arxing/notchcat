@@ -6,12 +6,14 @@
 //! 正規表達式照 Swift 版逐條搬移，沒有用到 look-around（`regex` 不支援），所以不需要改結構。
 //! 與 ICU（`NSRegularExpression`）的差異：`\b`、`\s`、`(?i)` 在 `regex` 都是 Unicode 版，
 //! 對本檔的輸入（ASCII 關鍵字加全形括號）行為一致；`\s` 另含 U+0085 與 U+000B，影響可忽略。
+//!
+//! Rust 版另外認得官方 MV 的標題 `歌手【歌名 English】Official MV`（Swift 版沒有）：整串拿去查一定落空。
 
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::identity::{fold_text, TrackIdentity};
+use super::identity::{fold_text, is_han, TrackIdentity};
 use crate::types::TrackSnapshot;
 
 /// 標題缺漏或沒有演出者時回傳 `None`：沒有演出者就沒有可靠的查詢，所以不嘗試。
@@ -55,11 +57,20 @@ static VIDEO_TAG: LazyLock<Regex> = LazyLock::new(|| {
     .expect("video tag pattern is valid")
 });
 
+/// 官方 MV 的整個標題：開頭、`【…】`、結尾 `Official MV`（或 `Official Music Video`）。
+static OFFICIAL_MV: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^([^【】]+)【([^【】]+)】\s*official\s+(?:music\s+video|mv|m/v)$")
+        .expect("official mv pattern is valid")
+});
+
 static WHITESPACE_RUN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s+").expect("whitespace pattern is valid"));
 
 fn clean_title(title: &str, artist: &str) -> String {
-    let mut result = split_off_artist(title, artist).unwrap_or(title).to_string();
+    let mut result = official_mv_song(title, artist)
+        .or_else(|| split_off_artist(title, artist))
+        .unwrap_or(title)
+        .to_string();
     result = BRACKETED_FEAT.replace_all(&result, "").into_owned();
     result = FEAT_SEGMENT.replace_all(&result, "").into_owned();
     result = VIDEO_TAG.replace_all(&result, "").into_owned();
@@ -83,6 +94,34 @@ fn split_off_artist<'a>(title: &'a str, artist: &str) -> Option<&'a str> {
         return None;
     }
     Some(tail)
+}
+
+/// `歌手【歌名】Official MV` 裡的歌名；標題不是這個形狀、開頭不是演出者（或其一部分）、
+/// 或括號裡沒有字時為 `None`。
+fn official_mv_song<'a>(title: &'a str, artist: &str) -> Option<&'a str> {
+    let captures = OFFICIAL_MV.captures(title)?;
+    let head = squash(captures.get(1)?.as_str());
+    if head.is_empty() || !squash(artist).contains(&head) {
+        return None;
+    }
+    let name = captures.get(2)?.as_str().trim();
+    (!name.is_empty()).then(|| without_english_subtitle(name))
+}
+
+/// `愛在西元前 Love before AD` → `愛在西元前`（帶著副標查不到歌詞）。只在最後一個漢字之後、
+/// 從空白起的部分含英文字母時切掉；沒有漢字的歌名、結尾是漢字或數字的歌名原樣保留。
+fn without_english_subtitle(name: &str) -> &str {
+    let Some((index, last)) = name.char_indices().rfind(|(_, c)| is_han(*c)) else {
+        return name;
+    };
+    let end = index + last.len_utf8();
+    let tail = &name[end..];
+    match tail.find(char::is_whitespace) {
+        Some(space) if tail[space..].contains(|c: char| c.is_ascii_alphabetic()) => {
+            &name[..end + space]
+        }
+        _ => name,
+    }
 }
 
 /// 大小寫、全半形、空白不敏感的形式，用於演出者比對。
@@ -273,6 +312,52 @@ mod tests {
     }
 
     // ---- 以下為 Rust 版新增（Swift 沒有的案例） ----
+
+    /// 官方 MV 的「歌手【中文歌名 English】Official MV」：只取中文歌名。
+    #[test]
+    fn official_mv_title_yields_the_chinese_song_name() {
+        let artist = Some("周杰倫 Jay Chou");
+        for (raw, name) in [
+            (
+                "周杰倫 Jay Chou【最偉大的作品 Greatest Works of Art】Official MV",
+                "最偉大的作品",
+            ),
+            (
+                "周杰倫 Jay Chou【愛在西元前 Love before AD】Official MV",
+                "愛在西元前",
+            ),
+            // 結尾標籤不分大小寫、也接受 Official Music Video；開頭只寫歌手名的一部分也算。
+            ("周杰倫【晴天】 official music video", "晴天"),
+        ] {
+            assert_eq!(title(raw, artist).as_deref(), Some(name), "{raw}");
+        }
+    }
+
+    /// 中文後面沒有英文副標時，括號裡的字整個是歌名。
+    #[test]
+    fn official_mv_title_keeps_names_without_an_english_subtitle() {
+        let artist = Some("周杰倫 Jay Chou");
+        for name in ["Mojito", "Now You See Me", "晴天 2.0", "我的 Superman 夢"] {
+            let raw = format!("周杰倫 Jay Chou【{name}】Official MV");
+            assert_eq!(title(&raw, artist).as_deref(), Some(name), "{raw}");
+        }
+    }
+
+    /// 開頭是歌手、`【…】`、結尾 Official MV，三個條件缺一就不套用。
+    #[test]
+    fn mv_rule_needs_the_artist_prefix_and_the_official_mv_ending() {
+        let artist = Some("周杰倫 Jay Chou");
+        for raw in [
+            "好聽歌曲【晴天】Official MV",
+            "【晴天】Official MV",
+            "周杰倫 Jay Chou【晴天】",
+            "周杰倫 Jay Chou【晴天】Live",
+            "周杰倫 Jay Chou【晴天】Official MV Reaction",
+            "周杰倫 Jay Chou【 】Official MV",
+        ] {
+            assert_eq!(title(raw, artist).as_deref(), Some(raw), "{raw}");
+        }
+    }
 
     #[test]
     fn identity_from_does_not_panic_on_emoji_and_combining_characters() {

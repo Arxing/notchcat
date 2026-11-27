@@ -1,6 +1,6 @@
 //! 歌詞提供者介面與共用的請求管線（移植自 Swift `LyricsProvider`／`LyricsHTTP`）。
 //!
-//! 提供者必須區分「失敗」（回傳 `Err`）與「乾淨地沒有」（回傳 `Ok(None)`）：
+//! 提供者必須區分「失敗」（回傳 `Err`，或把清單標成不完整）與「乾淨地沒有」（完整的空清單）：
 //! `LyricsRepository` 對兩者的快取策略截然不同。
 
 use std::sync::Arc;
@@ -31,17 +31,62 @@ impl std::fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+/// 一個來源這次查到的所有合格候選。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidates {
+    /// 依請求順序、同一請求內依回應順序排列；同一網址只出現一次。
+    pub hits: Vec<LyricsHit>,
+    /// `false`：有請求失敗，清單可能缺候選。
+    pub complete: bool,
+}
+
+impl Candidates {
+    /// 依請求順序收攏各請求的結果。一個候選都沒有且有請求失敗時回第一個錯誤；
+    /// 有候選但有請求失敗時標成不完整。網址相同的候選只留優先序最高的那筆（同序留先到的），
+    /// 位置是該網址第一次出現的地方。
+    pub(crate) fn collect<H: IntoIterator<Item = LyricsHit>>(
+        requests: impl IntoIterator<Item = Result<H, ProviderError>>,
+    ) -> Result<Self, ProviderError> {
+        let mut hits: Vec<LyricsHit> = Vec::new();
+        let mut first_error = None;
+        for request in requests {
+            match request {
+                Ok(found) => {
+                    for hit in found {
+                        match hits.iter_mut().find(|kept| kept.url == hit.url) {
+                            Some(kept) if kept.rank() < hit.rank() => *kept = hit,
+                            Some(_) => {}
+                            None => hits.push(hit),
+                        }
+                    }
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        match first_error {
+            Some(error) if hits.is_empty() => Err(error),
+            error => Ok(Self {
+                hits,
+                complete: error.is_none(),
+            }),
+        }
+    }
+}
+
 /// 一個歌詞來源。
 ///
-/// 回傳 `Err` 表示請求失敗（傳輸錯誤、非 2xx、2xx 但看不懂的本體）；
-/// `Ok(None)` 只用於服務乾淨地回答「沒有」。兩者的快取策略不同，不可混用。
-/// 命中的 `LyricsHit` 帶著這筆歌詞在來源服務上的 `https://` 網址。
+/// 一次查詢可能發多個請求。請求失敗指傳輸錯誤、非 2xx、或 2xx 但看不懂的本體：
+/// 一個候選都沒有且有請求失敗時回 `Err`；有候選但有請求失敗時回不完整的 [`Candidates`]。
+/// 完整的空清單只用於服務乾淨地回答「沒有」。三者的快取策略不同，不可混用。
+/// 每筆 `LyricsHit` 帶著這筆歌詞在來源服務上的 `https://` 網址。
 pub trait LyricsProvider: Send + Sync {
     fn id(&self) -> &str;
     fn fetch<'a>(
         &'a self,
         track: &'a TrackIdentity,
-    ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>>;
+    ) -> BoxFuture<'a, Result<Candidates, ProviderError>>;
 }
 
 /// 固定、不帶任何使用者資料。
@@ -49,9 +94,6 @@ pub const USER_AGENT: &str = "MusiCat";
 
 /// 2xx 回應本體的上限。超過視為失敗而非命中，避免惡意或出錯的服務吃光記憶體。
 pub const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
-
-/// 每個來源的請求逾時；逾時視同失敗。
-pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 以嚴格百分比編碼組出 URL：只保留 `A-Za-z0-9-._~`，其餘（包含 `+`、`&`、空白與非 ASCII）
 /// 逐位元組編成大寫十六進位。通用的 query 編碼會放過 `+` 與 `&`，
@@ -80,8 +122,12 @@ fn encode_into(out: &mut String, text: &str) {
     }
 }
 
-/// 帶固定 User-Agent 與 5 秒逾時的 GET 請求。
-pub(crate) fn request(url: String, extra_headers: &[(&str, &str)]) -> HttpRequest {
+/// 帶固定 User-Agent 的 GET 請求；`timeout` 到了視同請求失敗。各提供者自訂逾時值。
+pub(crate) fn request(
+    url: String,
+    extra_headers: &[(&str, &str)],
+    timeout: Duration,
+) -> HttpRequest {
     let mut headers = vec![("User-Agent".to_string(), USER_AGENT.to_string())];
     headers.extend(
         extra_headers
@@ -91,7 +137,7 @@ pub(crate) fn request(url: String, extra_headers: &[(&str, &str)]) -> HttpReques
     HttpRequest {
         url,
         headers,
-        timeout: REQUEST_TIMEOUT,
+        timeout,
     }
 }
 
@@ -177,6 +223,22 @@ pub(crate) mod test_support {
 
     use futures_util::task::noop_waker;
 
+    use crate::lyrics::LyricsHit;
+
+    /// 候選裡優先序最高的一筆（時間軸勝過純文字、曲長吻合勝過放寬，同序取先到的）。
+    pub fn best_of(hits: Vec<LyricsHit>) -> Option<LyricsHit> {
+        let mut best = None;
+        for hit in hits {
+            LyricsHit::keep_better(&mut best, hit);
+        }
+        best
+    }
+
+    /// 結果裡各筆命中的網址，依清單順序。
+    pub fn urls(hits: &[LyricsHit]) -> Vec<&str> {
+        hits.iter().map(|hit| hit.url.as_str()).collect()
+    }
+
     /// FakeHttp 的回應都是立即就緒，所以不需要真的執行器。
     pub fn block_on<F: Future>(f: F) -> F::Output {
         let waker = noop_waker();
@@ -244,8 +306,9 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
-    use crate::lyrics::lrclib::LrclibProvider;
-    use crate::lyrics::netease::NetEaseProvider;
+    use crate::lyrics::lrclib::{self, LrclibProvider};
+    use crate::lyrics::netease::{self, NetEaseProvider};
+    use crate::lyrics::repository::RepositoryConfig;
     use crate::testing::FakeHttp;
 
     fn track() -> TrackIdentity {
@@ -289,12 +352,23 @@ mod tests {
     #[test]
     fn user_agent_is_the_bare_app_name() {
         assert_eq!(USER_AGENT, "MusiCat");
-        let req = request("https://x.test".into(), &[("Referer", "r")]);
+        let timeout = Duration::from_millis(1_234);
+        let req = request("https://x.test".into(), &[("Referer", "r")], timeout);
         assert_eq!(req.url, "https://x.test");
-        assert_eq!(req.timeout, Duration::from_secs(5));
+        assert_eq!(req.timeout, timeout);
         assert_eq!(header(&req, "User-Agent"), Some("MusiCat"));
         assert_eq!(header(&req, "Referer"), Some("r"));
         assert_eq!(req.headers.len(), 2);
+    }
+
+    /// 來源超過自己的上限會整個丟掉；每個請求（階段）要在上限內逾時，已收到的候選才留得住。
+    #[test]
+    fn request_timeouts_fit_inside_the_provider_limit() {
+        let limit = RepositoryConfig::default().provider_timeout;
+        // LRCLIB 的請求同時發出，只有一個階段。
+        assert!(lrclib::REQUEST_TIMEOUT < limit);
+        // 網易雲先搜尋、再同時取歌詞，兩個階段相加。
+        assert!(netease::SEARCH_TIMEOUT + netease::LYRIC_TIMEOUT < limit);
     }
 
     #[test]
@@ -332,15 +406,17 @@ mod tests {
         let t = track();
 
         // 用戶端回報 TooLarge：兩個提供者都是失敗。
+        // LRCLIB 的搜尋要排成乾淨的「沒有」，否則沒排程的網址本身就會造成失敗。
         let http = Arc::new(FakeHttp::new());
         http.fail(LrclibProvider::exact_url(&t), HttpError::TooLarge);
-        let lrclib = LrclibProvider::new(http.clone());
-        assert!(block_on(lrclib.fetch(&t)).is_err());
+        http.respond(LrclibProvider::search_url(&t), 200, "[]");
+        let lrclib = LrclibProvider::new(http);
+        assert_eq!(block_on(lrclib.fetch(&t)), Err(ProviderError::BadResponse));
 
         let http = Arc::new(FakeHttp::new());
         http.fail(NetEaseProvider::search_url(&t), HttpError::TooLarge);
-        let netease = NetEaseProvider::new(http.clone());
-        assert!(block_on(netease.fetch(&t)).is_err());
+        let netease = NetEaseProvider::new(http);
+        assert_eq!(block_on(netease.fetch(&t)), Err(ProviderError::BadResponse));
 
         // 用戶端沒擋住：合法 JSON 後面接滿空白，本體超過上限；解碼得出命中，但仍須失敗。
         let http = Arc::new(FakeHttp::new());
@@ -349,9 +425,9 @@ mod tests {
             200,
             padded(LRCLIB_HIT, MAX_BODY_BYTES + 1),
         );
-        let lrclib = LrclibProvider::new(http.clone());
+        http.respond(LrclibProvider::search_url(&t), 200, "[]");
+        let lrclib = LrclibProvider::new(http);
         assert_eq!(block_on(lrclib.fetch(&t)), Err(ProviderError::BadResponse));
-        assert_eq!(http.requests().len(), 1, "不得退回搜尋");
 
         let http = Arc::new(FakeHttp::new());
         http.respond(LrclibProvider::exact_url(&t), 404, "{}");
@@ -406,9 +482,11 @@ mod tests {
             200,
             padded(LRCLIB_HIT, MAX_BODY_BYTES),
         );
+        http.respond(LrclibProvider::search_url(&t), 200, "[]");
         let lrclib = LrclibProvider::new(http);
         let got = block_on(lrclib.fetch(&t)).unwrap();
-        assert!(got.is_some());
+        assert_eq!(got.hits.len(), 1);
+        assert!(got.complete);
     }
 
     #[test]

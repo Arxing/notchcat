@@ -7,7 +7,8 @@
 //!
 //! # 啟動順序
 //!
-//! 1. 讀設定（`MUSICAT_CONFIG` 或平台預設路徑），把警告印到 stderr（只有鍵名，不印內容）。
+//! 1. 讀設定（`MUSICAT_CONFIG` 或平台預設路徑），把警告印到 stderr（只有鍵名，不印內容）；
+//!    再讀它旁邊的歌詞紀錄檔（[`musicat_app::choice_file`]），警告同樣不含內容（不印歌名或歌詞）。
 //! 2. `Application::new()`、`panel::patch_gpui_panel_class()`；在 `run` 的回呼一開始
 //!    `panel::set_accessory_activation_policy()`（必須在 GPUI 啟動之後，否則會被蓋回 Regular；見 `panel.rs`）。
 //! 3. `GpuiClock`／`GpuiSpawner`（GPUI 背景執行器）、`UreqHttp`、`SwitchableResolver`（依 `[sources]` 建的 repository）。
@@ -56,7 +57,8 @@
 //! - `MUSICAT_LOG=1`：在 stderr 印曲目（**含曲名與演出者**）、歌詞狀態（行數，不含內容）與外殼狀態轉移。
 //!   沒設時不印任何與曲目有關的內容。
 //! - `MUSICAT_AUTO_QUIT_SECS=<n>`：n 秒後走與選單「結束」完全相同的路徑結束（自動化驗證用）。
-//! - `MUSICAT_CONFIG=<path>`：改用這個設定檔（測試損毀設定時用，避免碰到真正的設定檔）。
+//! - `MUSICAT_CONFIG=<path>`：改用這個設定檔（測試損毀設定時用，避免碰到真正的設定檔）；
+//!   歌詞紀錄檔也跟著放在它旁邊。
 //!
 //! 日誌一律是 stderr 的 `eprintln!`，不印設定檔內容。
 
@@ -82,6 +84,7 @@ mod macos {
     use futures_channel::mpsc;
     use futures_util::StreamExt;
     use gpui::{App, Application, AsyncApp};
+    use musicat_app::choice_file::{choices_path, ChoiceFile};
     use musicat_app::composition::{
         auto_quit_after, config_path_with_override, describe_lyrics, describe_snapshot,
         log_enabled, placement, should_log_no_screens, target_geometry, Placement, ScreenTracker,
@@ -97,7 +100,8 @@ mod macos {
     use musicat_core::http::HttpClient;
     use musicat_core::menu::MenuEvent;
     use musicat_core::modules::{ModuleManager, ModuleState};
-    use musicat_core::music::controller::MusicController;
+    use musicat_core::music::choices::ChoiceBook;
+    use musicat_core::music::controller::{ChoiceSaver, MusicController};
     use musicat_core::music::module::MusicModuleState;
     use musicat_core::nowplaying::{NowPlayingMonitor, NowPlayingSource, PlaybackControl};
     use musicat_core::runtime::{Clock, Spawner, Subscription};
@@ -208,12 +212,22 @@ mod macos {
         for w in &warnings {
             log!("config warning: {w}");
         }
+        let (choice_file, choices, warnings) = ChoiceFile::open(choices_path(&path));
+        for w in &warnings {
+            log!("lyric choices warning: {w}");
+        }
 
         let app = Application::new();
         panel::patch_gpui_panel_class();
         app.run(move |cx: &mut App| {
             panel::set_accessory_activation_policy();
-            let state = Rc::new(RefCell::new(build(store, detailed_log, cx)));
+            let state = Rc::new(RefCell::new(build(
+                store,
+                choice_file,
+                choices,
+                detailed_log,
+                cx,
+            )));
 
             // 選單：回呼只送 channel；前景工作處理。
             let (tx, rx) = mpsc::unbounded::<MenuEvent>();
@@ -282,7 +296,13 @@ mod macos {
     }
 
     /// 建出所有長壽的物件（主執行緒，`run` 的回呼裡）。
-    fn build(store: ConfigStore, detailed_log: bool, cx: &mut App) -> AppState {
+    fn build(
+        store: ConfigStore,
+        choice_file: ChoiceFile,
+        choices: ChoiceBook,
+        detailed_log: bool,
+        cx: &mut App,
+    ) -> AppState {
         let executor = cx.background_executor().clone();
         let clock: Arc<dyn Clock> = Arc::new(GpuiClock::new(executor.clone()));
         let spawner: Arc<dyn Spawner> = Arc::new(GpuiSpawner::new(executor));
@@ -336,8 +356,20 @@ mod macos {
         if control.is_none() {
             log!("playback control unavailable (MediaRemote could not be loaded); buttons are disabled");
         }
-        let controller =
-            MusicController::new(monitor.clone(), resolver.clone(), control, spawner.clone());
+        // 使用者切換版本或調偏移時，控制器在主執行緒同步呼叫；失敗只寫日誌（本次執行仍照新的選擇）。
+        let save_choices: ChoiceSaver = Arc::new(move |book: &ChoiceBook| {
+            if let Err(e) = choice_file.save(book) {
+                log!("could not save the lyric choices ({:?})", e.kind());
+            }
+        });
+        let controller = MusicController::new_with_choices(
+            monitor.clone(),
+            resolver.clone(),
+            control,
+            spawner.clone(),
+            choices,
+            save_choices,
+        );
         controller.set_traditional_lyrics(cfg.traditional_lyrics);
         let module_state = Arc::new(MusicModuleState::with_strip_lines(
             controller.clone(),

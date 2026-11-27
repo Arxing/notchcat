@@ -1,20 +1,31 @@
-//! 跨來源查歌詞、快取查到的結果（移植自 Swift `LyricsRepository.swift`）。
+//! 跨來源查歌詞、快取查到的結果（移植自 Swift `LyricsRepository.swift`；版本清單是 Rust 版新增）。
 //!
-//! 排序規則是重點：帶時間軸的結果勝過來源優先序。高順位來源可能只有純文字，
-//! 低順位來源卻有完整的時間軸版本；時間軸歌詞才是這個模組的目的，所以「先到先贏」是錯的規則。
+//! 所有來源同時查、全部回來（或逾時）才有結果：同一首歌的時間軸版本散在各來源，少問一個就可能少一個版本。
+//! 每個來源最多問一次，且各有時間上限；逾時或錯誤都算失敗，只答出一部分（不完整的候選清單）也按失敗計。
 //!
-//! 這是單趟走訪，不是兩趟：純文字結果邊走邊留著，退回它不必多打任何網路請求。
-//! 每個來源最多問一次，且各有時間上限；逾時或錯誤都算失敗。
+//! 結果只用時間軸可信（[`super::Lyrics::is_plausible`]）的候選；其中只要有任何一筆（不分來源）演出者相符
+//! （[`LyricsHit::artist_matches`]），不相符的就全部丟掉，同名的別首歌不會混進來；一筆都不相符則全部保留，
+//! 因為播放器回報的「演出者」常是頻道名稱。剩下的有時間軸歌詞就回合併後的版本清單
+//! （[`merge_versions`]，預設版本在前）；一份都沒有才回至多一筆純文字（曲長吻合的勝過放寬的）；
+//! 什麼都沒有就是空清單。候選依來源順序串接，所以同序時由前面的來源勝出，和誰先回答無關。
 //!
-//! 非同步模型見 ADR-0001：同一首歌的併發呼叫以 `Coalescer` 共用一次查詢；快取寫入位於被合併的
+//! 有來源失敗時清單可能缺版本，所以不論查到什麼都只快取 `failure_ttl`；否則查到的永久有效、
+//! 「查無」記 `negative_ttl`。
+//!
+//! 快取與併發合併以「正規化後的歌名與演出者，加上取整到秒的曲長」辨認一次查詢（見 `LookupKey`）。
+//!
+//! 非同步模型見 ADR-0001：同一鍵的併發呼叫以 `Coalescer` 共用一次查詢；快取寫入位於被合併的
 //! future 內部的結尾，所以被放棄（所有呼叫者都 drop）的查詢根本跑不到寫入那一行，不會被記成「查無」。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::future::join_all;
+
 use super::identity::TrackIdentity;
-use super::provider::LyricsProvider;
+use super::provider::{Candidates, LyricsProvider};
+use super::versions::merge_versions;
 use super::LyricsHit;
 use crate::runtime::{lock, BoxFuture, Clock};
 use crate::timing::{with_timeout, Coalescer};
@@ -24,8 +35,8 @@ use crate::timing::{with_timeout, Coalescer};
 pub struct RepositoryConfig {
     /// 「每個來源都答了、而且都沒有」要記多久。
     pub negative_ttl: Duration,
-    /// 至少一個來源失敗或逾時、且沒找到同步歌詞時，結果要記多久。涵蓋「沒有」與「純文字保底」，
-    /// 讓稍後重試仍有機會找到同步歌詞。遠短於 `negative_ttl`，因為離線與這首歌無關。
+    /// 至少一個來源失敗、逾時或只答出一部分時，結果要記多久。涵蓋版本清單、純文字保底與「沒有」，
+    /// 讓稍後重試仍有機會補齊版本。遠短於 `negative_ttl`，因為離線與這首歌無關。
     pub failure_ttl: Duration,
     /// 每個來源的上限；超過即算失敗。可以是 `Duration::MAX`（永不逾時）。
     pub provider_timeout: Duration,
@@ -42,21 +53,40 @@ impl Default for RepositoryConfig {
 }
 
 /// 依曲目解析歌詞。回傳的 future 被 drop 即代表這個呼叫者放棄。
+///
+/// 有時間軸歌詞時回版本清單（各版本一筆，預設版本在前）；否則至多一筆純文字；查無時為空清單。
 pub trait LyricsResolving: Send + Sync {
-    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>>;
+    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Vec<LyricsHit>>;
+}
+
+/// 快取與合併查詢用的鍵：[`TrackIdentity::cache_key`] 加整數秒曲長；曲長未知（沒有、非有限值、
+/// 不大於 0）為 `None`。版本清單按曲長把關與排序，同名但長度不同的曲目（MV 與專輯版）不能共用。
+type LookupKey = (String, Option<u64>);
+
+fn lookup_key(track: &TrackIdentity) -> LookupKey {
+    let seconds = track
+        .duration
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .map(|d| d.round() as u64);
+    (track.cache_key(), seconds)
 }
 
 /// `until`（Unix epoch 秒）為 `None` 表示永不過期。
 #[derive(Clone)]
 enum CacheEntry {
-    Found { hit: LyricsHit, until: Option<f64> },
-    Missing { until: f64 },
+    Found {
+        hits: Vec<LyricsHit>,
+        until: Option<f64>,
+    },
+    Missing {
+        until: f64,
+    },
 }
 
 /// 跨來源解析歌詞並快取結果（見模組說明）。
 pub struct LyricsRepository {
     inner: Arc<Inner>,
-    flights: Coalescer<String, Option<LyricsHit>>,
+    flights: Coalescer<LookupKey, Vec<LyricsHit>>,
 }
 
 /// 被合併的查詢 future 需要 `'static`，所以它用到的狀態放在 `Arc` 裡。
@@ -64,20 +94,12 @@ struct Inner {
     providers: Vec<Arc<dyn LyricsProvider>>,
     clock: Arc<dyn Clock>,
     cfg: RepositoryConfig,
-    cache: Mutex<HashMap<String, CacheEntry>>,
-}
-
-/// 單一來源的結果。
-enum FetchOutcome {
-    Hit(LyricsHit),
-    /// 來源答了，而且沒有。
-    Empty,
-    /// 錯誤或逾時。
-    Failed,
+    cache: Mutex<HashMap<LookupKey, CacheEntry>>,
 }
 
 impl LyricsRepository {
-    /// `providers` 依優先序排列；在最前面插入新來源不需要改其他任何程式碼。
+    /// `providers` 依優先序排列（同序的版本與純文字由前面的勝出）；
+    /// 在最前面插入新來源不需要改其他任何程式碼。
     pub fn new(
         providers: Vec<Arc<dyn LyricsProvider>>,
         clock: Arc<dyn Clock>,
@@ -94,19 +116,20 @@ impl LyricsRepository {
         }
     }
 
-    /// 正在等待 `track` 那次查詢的呼叫者數；沒有進行中的查詢時為 0（測試用）。
+    /// 正在等待 `track` 那次查詢（歌名、演出者與取整曲長都相同者共用）的呼叫者數；
+    /// 沒有進行中的查詢時為 0（測試用）。
     pub fn in_flight_waiters(&self, track: &TrackIdentity) -> usize {
-        self.flights.waiters(&track.cache_key())
+        self.flights.waiters(&lookup_key(track))
     }
 }
 
 impl LyricsResolving for LyricsRepository {
-    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Option<LyricsHit>> {
-        let key = track.cache_key();
-        if let Some(hit) = self.inner.cached(&key) {
-            return Box::pin(std::future::ready(hit));
+    fn lyrics(&self, track: TrackIdentity) -> BoxFuture<'_, Vec<LyricsHit>> {
+        let key = lookup_key(&track);
+        if let Some(hits) = self.inner.cached(&key) {
+            return Box::pin(std::future::ready(hits));
         }
-        // 同一首歌的呼叫者共用一次查詢，所以來回快速切歌不會把同一個來源問兩次。
+        // 同一鍵的呼叫者共用一次查詢，所以來回快速切歌不會把同一個來源問兩次。
         // 呼叫者 drop 自己的 future 即離開；最後一個離開時查詢被 drop（放棄）。
         let inner = self.inner.clone();
         let run_key = key.clone();
@@ -117,108 +140,124 @@ impl LyricsResolving for LyricsRepository {
 }
 
 impl Inner {
-    /// 未過期的快取結果：`Some(Some(_))` 命中歌詞、`Some(None)` 命中「查無」、`None` 沒有可用的快取。
-    fn cached(&self, key: &str) -> Option<Option<LyricsHit>> {
+    /// 未過期的快取結果：非空清單是命中歌詞、空清單是命中「查無」、`None` 沒有可用的快取。
+    fn cached(&self, key: &LookupKey) -> Option<Vec<LyricsHit>> {
         let now = self.clock.now();
         match lock(&self.cache).get(key)? {
-            CacheEntry::Found { hit, until } if until.is_none_or(|u| now < u) => {
-                Some(Some(hit.clone()))
+            CacheEntry::Found { hits, until } if until.is_none_or(|u| now < u) => {
+                Some(hits.clone())
             }
-            CacheEntry::Missing { until } if now < *until => Some(None),
+            CacheEntry::Missing { until } if now < *until => Some(Vec::new()),
             _ => None,
         }
     }
 
-    async fn resolve(&self, track: TrackIdentity, key: String) -> Option<LyricsHit> {
+    async fn resolve(&self, track: TrackIdentity, key: LookupKey) -> Vec<LyricsHit> {
         // 多執行緒競態：呼叫者查快取沒命中之後、本查詢第一次被輪詢之前，另一條執行緒的查詢可能
         // 已經寫好快取並移除了它的表項（快取一律先寫、表項後移除），於是這裡成了第二輪查詢。
         // 開頭重查一次快取即可擋下，不必再問一輪來源。
-        if let Some(hit) = self.cached(&key) {
-            return hit;
+        if let Some(hits) = self.cached(&key) {
+            return hits;
         }
-        let mut fallback: Option<LyricsHit> = None;
-        let mut found: Option<LyricsHit> = None;
+        // 各來源各自計時、同時進行；`join_all` 依來源順序交回結果。
+        let answers = join_all(
+            self.providers
+                .iter()
+                .map(|provider| self.fetch(provider.as_ref(), &track)),
+        )
+        .await;
+        let mut candidates = Vec::new();
         let mut any_failed = false;
-
-        for provider in &self.providers {
-            match self.fetch(provider.as_ref(), &track).await {
-                FetchOutcome::Failed => any_failed = true,
-                FetchOutcome::Empty => {}
-                FetchOutcome::Hit(result) => {
-                    if result.lyrics.is_synced() {
-                        if result.lyrics.is_plausible(track.duration) {
-                            found = Some(result);
-                            break;
-                        }
-                        // 來源答了，但時間軸不可信：等同沒有——不是失敗，也不當保底，網址也一併丟掉。
-                    } else if fallback.is_none() {
-                        // 留下最高順位的純文字（連同它自己的網址），以防找不到同步歌詞。不覆寫，由優先序決定。
-                        fallback = Some(result);
-                    }
-                }
-            }
+        for answer in answers {
+            let Some(answer) = answer else {
+                any_failed = true;
+                continue;
+            };
+            any_failed |= !answer.complete;
+            // 時間軸不可信的候選等同沒有：不是失敗，也不當保底，網址也一併丟掉。
+            candidates.extend(
+                answer
+                    .hits
+                    .into_iter()
+                    .filter(|hit| hit.lyrics.is_plausible(track.duration)),
+            );
         }
+        let hits = versions_or_plain(preferring_artist_matches(candidates));
 
         // 走到這裡代表查詢沒被放棄（被放棄的 future 已被 drop，不會執行以下任何一行）。
         let now = self.clock.now();
         let failure_expiry = now + self.cfg.failure_ttl.as_secs_f64();
-        let (entry, result) = if let Some(found) = found {
-            (
-                CacheEntry::Found {
-                    hit: found.clone(),
-                    until: None,
-                },
-                Some(found),
-            )
-        } else if let Some(fallback) = fallback {
-            // 有來源掛掉時找到的純文字，之後可能被同步歌詞取代，所以只短暫記住。
-            (
-                CacheEntry::Found {
-                    hit: fallback.clone(),
-                    until: any_failed.then_some(failure_expiry),
-                },
-                Some(fallback),
-            )
-        } else {
+        let entry = if hits.is_empty() {
             let until = if any_failed {
                 failure_expiry
             } else {
                 now + self.cfg.negative_ttl.as_secs_f64()
             };
-            (CacheEntry::Missing { until }, None)
+            CacheEntry::Missing { until }
+        } else {
+            CacheEntry::Found {
+                hits: hits.clone(),
+                until: any_failed.then_some(failure_expiry),
+            }
         };
         lock(&self.cache).insert(key, entry);
-        result
+        hits
     }
 
-    /// 讓來源與逾時賽跑；輸家直接 drop，所以不理會取消的來源也卡不住走訪。
-    async fn fetch(&self, provider: &dyn LyricsProvider, track: &TrackIdentity) -> FetchOutcome {
+    /// 讓來源與逾時賽跑；輸家直接 drop，所以不理會取消的來源也拖不住整次查詢。
+    /// 錯誤或逾時為 `None`。
+    async fn fetch(
+        &self,
+        provider: &dyn LyricsProvider,
+        track: &TrackIdentity,
+    ) -> Option<Candidates> {
         let attempt = with_timeout(
             self.clock.as_ref(),
             self.cfg.provider_timeout,
             provider.fetch(track),
         );
-        match attempt.await {
-            Ok(Ok(Some(hit))) => FetchOutcome::Hit(hit),
-            Ok(Ok(None)) => FetchOutcome::Empty,
-            Ok(Err(_)) | Err(_) => FetchOutcome::Failed,
-        }
+        attempt.await.ok()?.ok()
     }
+}
+
+/// 有演出者相符的候選時只留相符的；一筆都沒有就原樣保留。
+fn preferring_artist_matches(mut candidates: Vec<LyricsHit>) -> Vec<LyricsHit> {
+    if candidates.iter().any(|hit| hit.artist_matches) {
+        candidates.retain(|hit| hit.artist_matches);
+    }
+    candidates
+}
+
+/// 有時間軸歌詞就回合併後的版本清單（預設在前）；否則回最好的那筆純文字（至多一筆）。
+fn versions_or_plain(candidates: Vec<LyricsHit>) -> Vec<LyricsHit> {
+    if candidates.iter().any(|hit| hit.lyrics.is_synced()) {
+        return merge_versions(candidates);
+    }
+    let mut best = None;
+    for hit in candidates {
+        // 同序保留較前面的那筆（連同它自己的網址），由來源優先序與來源內的順序決定。
+        LyricsHit::keep_better(&mut best, hit);
+    }
+    best.into_iter().collect()
 }
 
 #[cfg(test)]
 mod tests {
-    //! 移植 Swift `LyricsRepositoryTests`（30 案，名稱為 Swift 測試名的 snake_case），
+    //! 移植 Swift `LyricsRepositoryTests`（30 案，名稱為 Swift 測試名的 snake_case；
+    //! 和多版本清單的行為衝突的案例，在原位置換成 Rust 版的案例並註明），
     //! 之後是任務簡報點名的行為測試（以正式版預設值 86400／120／5 秒驅動）。
     //!
     //! Swift 的真實時間（`Task.sleep`、`DispatchQueue.asyncAfter`、`waitUntil`）一律換成
     //! `FakeClock` + `LocalSpawner`：`run_until_stalled` 之後的狀態就是「所有能前進的都前進了」。
 
     use super::*;
-    use crate::lyrics::provider::ProviderError;
+    use crate::lyrics::lrclib::LrclibProvider;
+    use crate::lyrics::provider::test_support::urls;
+    use crate::lyrics::provider::{Candidates, ProviderError};
     use crate::lyrics::{LyricLine, Lyrics, LyricsHit};
+    use crate::music::choices::{apply_choice, SavedChoice};
     use crate::runtime::{Spawner, TaskHandle};
-    use crate::testing::{FakeClock, LocalSpawner};
+    use crate::testing::{FakeClock, FakeHttp, LocalSpawner};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
     use std::task::{Poll, Waker};
@@ -229,7 +268,7 @@ mod tests {
     /// 可在中途改答案（例如來源恢復）。延遲之後才讀取答案，與 Swift 相同。
     struct FakeProvider {
         id: String,
-        response: Mutex<(Option<LyricsHit>, bool)>,
+        response: Mutex<(Candidates, bool)>,
         delay: Duration,
         clock: Arc<FakeClock>,
         calls: AtomicUsize,
@@ -251,6 +290,14 @@ mod tests {
         lyrics.map(|l| hit_at(l, &format!("https://test.example/{id}")))
     }
 
+    /// 完整的回答：至多一筆候選。
+    fn answer(result: Option<LyricsHit>) -> Candidates {
+        Candidates {
+            hits: result.into_iter().collect(),
+            complete: true,
+        }
+    }
+
     impl FakeProvider {
         fn new(
             id: &str,
@@ -261,7 +308,7 @@ mod tests {
         ) -> Arc<Self> {
             Arc::new(Self {
                 id: id.to_string(),
-                response: Mutex::new((result, fails)),
+                response: Mutex::new((answer(result), fails)),
                 delay,
                 clock: clock.clone(),
                 calls: AtomicUsize::new(0),
@@ -275,6 +322,18 @@ mod tests {
         /// 明確指定整個命中（含網址）。
         fn result_hit(id: &str, clock: &Arc<FakeClock>, result: Option<LyricsHit>) -> Arc<Self> {
             Self::new(id, clock, result, false, Duration::ZERO)
+        }
+
+        /// 明確指定整份回答：多筆候選，或不完整。
+        fn candidates(
+            id: &str,
+            clock: &Arc<FakeClock>,
+            hits: Vec<LyricsHit>,
+            complete: bool,
+        ) -> Arc<Self> {
+            let provider = Self::new(id, clock, None, false, Duration::ZERO);
+            *provider.response.lock().unwrap() = (Candidates { hits, complete }, false);
+            provider
         }
 
         fn failing(id: &str, clock: &Arc<FakeClock>) -> Arc<Self> {
@@ -297,7 +356,7 @@ mod tests {
 
         /// 改變之後呼叫的答案。
         fn respond(&self, result: Option<Lyrics>, fails: bool) {
-            *self.response.lock().unwrap() = (hit_for(&self.id, result), fails);
+            *self.response.lock().unwrap() = (answer(hit_for(&self.id, result)), fails);
         }
 
         fn call_count(&self) -> usize {
@@ -313,17 +372,17 @@ mod tests {
         fn fetch<'a>(
             &'a self,
             _track: &'a TrackIdentity,
-        ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>> {
+        ) -> BoxFuture<'a, Result<Candidates, ProviderError>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 if self.delay > Duration::ZERO {
                     self.clock.sleep(self.delay).await;
                 }
-                let (result, fails) = self.response.lock().unwrap().clone();
+                let (candidates, fails) = self.response.lock().unwrap().clone();
                 if fails {
                     return Err(ProviderError::Transport("provider failure".into()));
                 }
-                Ok(result)
+                Ok(candidates)
             })
         }
     }
@@ -353,13 +412,13 @@ mod tests {
         fn fetch<'a>(
             &'a self,
             _track: &'a TrackIdentity,
-        ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>> {
+        ) -> BoxFuture<'a, Result<Candidates, ProviderError>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let flag = DropFlag(self.dropped.clone());
             Box::pin(async move {
                 let _flag = flag;
                 self.clock.sleep(self.delay).await;
-                Ok(self.result.clone())
+                Ok(answer(self.result.clone()))
             })
         }
     }
@@ -402,7 +461,7 @@ mod tests {
         fn fetch<'a>(
             &'a self,
             _track: &'a TrackIdentity,
-        ) -> BoxFuture<'a, Result<Option<LyricsHit>, ProviderError>> {
+        ) -> BoxFuture<'a, Result<Candidates, ProviderError>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 std::future::poll_fn(|cx| {
@@ -415,7 +474,7 @@ mod tests {
                     }
                 })
                 .await;
-                Ok(self.result.clone())
+                Ok(answer(self.result.clone()))
             })
         }
     }
@@ -424,22 +483,23 @@ mod tests {
 
     /// 一次在背景跑的查詢：結果寫進 `slot`；drop `task` 即取消該呼叫者。
     struct Lookup {
-        slot: Arc<Mutex<Option<Option<LyricsHit>>>>,
+        slot: Arc<Mutex<Option<Vec<LyricsHit>>>>,
         task: TaskHandle,
     }
 
     impl Lookup {
-        /// `None`：還沒結束（或已被取消）；`Some(r)`：查詢回傳了 `r`（只看歌詞）。
+        /// `None`：還沒結束（或已被取消）；`Some(r)`：清單的第一筆是 `r`（只看歌詞）。
         fn outcome(&self) -> Option<Option<Lyrics>> {
             let done = self.slot.lock().unwrap().clone()?;
-            Some(done.map(|h| h.lyrics))
+            Some(done.into_iter().next().map(|h| h.lyrics))
         }
 
         fn finished(&self) -> Option<Lyrics> {
             self.outcome().expect("the lookup should have finished")
         }
 
-        fn finished_hit(&self) -> Option<LyricsHit> {
+        /// 查詢回傳的整份清單。
+        fn finished_versions(&self) -> Vec<LyricsHit> {
             let done = self.slot.lock().unwrap().clone();
             done.expect("the lookup should have finished")
         }
@@ -515,9 +575,18 @@ mod tests {
 
         /// 同 `ask`，但連來源網址一起回傳。
         fn ask_hit(&self, repo: &Arc<LyricsRepository>, track: TrackIdentity) -> Option<LyricsHit> {
+            self.ask_versions(repo, track).into_iter().next()
+        }
+
+        /// 同 `ask`，但回傳整份清單。
+        fn ask_versions(
+            &self,
+            repo: &Arc<LyricsRepository>,
+            track: TrackIdentity,
+        ) -> Vec<LyricsHit> {
             let lookup = self.start(repo, track);
             self.run();
-            lookup.finished_hit()
+            lookup.finished_versions()
         }
     }
 
@@ -553,6 +622,11 @@ mod tests {
         Lyrics::Synced(vec![line(0.0, "line"), line(10.0, "next")])
     }
 
+    /// 和 [`synced`] 同樣的詞、整體晚 `by` 秒：差超過 1 秒就是另一個版本。
+    fn shifted(by: f64) -> Lyrics {
+        Lyrics::Synced(vec![line(by, "line"), line(10.0 + by, "next")])
+    }
+
     /// 只有一行時間行通常是「純音樂」佔位，可信度把關會擋下。
     fn implausible() -> Lyrics {
         Lyrics::Synced(vec![line(0.0, "純音樂，請欣賞")])
@@ -568,7 +642,7 @@ mod tests {
 
     // ------------------------------------------------------------ 移植的 30 案
 
-    /// 整個歌詞設計的基礎：帶時間軸的結果勝過來源優先序，較前來源的純文字不得停止走訪。
+    /// 整個歌詞設計的基礎：帶時間軸的結果勝過來源優先序，較前來源的純文字不得擋住它。
     #[test]
     fn synced_result_beats_higher_priority_plain() {
         let h = Harness::new();
@@ -592,21 +666,32 @@ mod tests {
         assert_eq!(second.call_count(), 1);
     }
 
+    /// 取代 Swift 的 `testStopsAtFirstSyncedResult`：有時間軸命中也照樣問完所有來源，
+    /// 時間軸相同的合併成一個版本，紀錄多的版本排前面。
     #[test]
-    fn stops_at_first_synced_result() {
+    fn every_provider_is_queried_and_versions_are_merged() {
         let h = Harness::new();
-        let first = FakeProvider::result("first", &h.clock, Some(synced()));
-        let second = FakeProvider::result("second", &h.clock, Some(synced()));
-        let repo = h.repo(vec![dynp(&first), dynp(&second)]);
+        let a = FakeProvider::result("a", &h.clock, Some(synced()));
+        let b = FakeProvider::result("b", &h.clock, Some(shifted(5.0)));
+        let c = FakeProvider::result("c", &h.clock, Some(shifted(5.0)));
+        let repo = h.repo(vec![dynp(&a), dynp(&b), dynp(&c)]);
 
-        h.ask(&repo, track());
+        let versions = h.ask_versions(&repo, track());
 
-        assert_eq!(first.call_count(), 1);
         assert_eq!(
-            second.call_count(),
-            0,
-            "No source after the first synced hit should be asked"
+            versions,
+            [
+                hit_for("b", Some(shifted(5.0))).unwrap(),
+                hit_for("a", Some(synced())).unwrap(),
+            ]
         );
+        assert_eq!((a.call_count(), b.call_count(), c.call_count()), (1, 1, 1));
+        assert_eq!(
+            h.ask_versions(&repo, track()),
+            versions,
+            "the whole list is cached"
+        );
+        assert_eq!(a.call_count(), 1);
     }
 
     #[test]
@@ -619,7 +704,7 @@ mod tests {
         let result = h.ask(&repo, track());
 
         assert_eq!(result, Some(plain("first words")));
-        assert_eq!(second.call_count(), 1, "A plain hit must not stop the walk");
+        assert_eq!(second.call_count(), 1, "Every source is asked");
     }
 
     #[test]
@@ -720,7 +805,7 @@ mod tests {
         );
     }
 
-    /// 快取鍵來自正規化後的識別，所以同一首歌帶 feat. 後綴、長度略有不同時不得重查。
+    /// 快取鍵來自正規化後的識別，所以同一首歌帶 feat. 後綴、大小寫不同、曲長取整後相同時不得重查。
     #[test]
     fn cache_is_keyed_on_normalized_identity() {
         let h = Harness::new();
@@ -728,7 +813,7 @@ mod tests {
         let repo = h.repo(vec![dynp(&provider)]);
 
         h.ask(&repo, track());
-        let result = h.ask(&repo, identity("T (feat. X)", 203.0));
+        let result = h.ask(&repo, identity("t (feat. X)", 200.4));
 
         assert_eq!(result, Some(synced()));
         assert_eq!(provider.call_count(), 1);
@@ -757,7 +842,7 @@ mod tests {
         assert_eq!(
             second.call_count(),
             1,
-            "A timed-out source must not block later ones"
+            "A timed-out source must not block the others"
         );
     }
 
@@ -787,7 +872,7 @@ mod tests {
         let repo = h.repo(vec![dynp(&provider)]);
 
         let a = h.start(&repo, track());
-        let b = h.start(&repo, identity("T (feat. X)", 201.0));
+        let b = h.start(&repo, identity("T (feat. X)", 200.4));
         h.run();
         h.advance(millis(100));
 
@@ -898,7 +983,7 @@ mod tests {
         assert_eq!(
             lookup.finished(),
             Some(plain("words")),
-            "The walk must move on at the timeout, not when the provider finishes"
+            "The lookup must finish at the timeout, not when the provider does"
         );
         assert_eq!(stubborn.calls.load(Ordering::SeqCst), 1);
         assert_eq!(second.call_count(), 1);
@@ -1045,20 +1130,33 @@ mod tests {
         assert_eq!(provider.call_count(), 1);
     }
 
+    /// 取代 Swift 的 `testSyncedResultStaysCachedEvenIfAnEarlierProviderFailed`：
+    /// 有來源失敗時清單可能缺版本，即使有吻合的時間軸歌詞也只短暫記住。
     #[test]
-    fn synced_result_stays_cached_even_if_an_earlier_provider_failed() {
+    fn a_partial_version_list_expires_after_failure_ttl() {
         let h = Harness::new();
         let flaky = FakeProvider::failing("flaky", &h.clock);
         let good = FakeProvider::result("good", &h.clock, Some(synced()));
         let repo = h.make_repo(vec![dynp(&flaky), dynp(&good)], secs(5));
 
-        h.ask(&repo, track());
-        h.advance(secs(1_000_000_000));
-        let result = h.ask(&repo, track());
+        assert_eq!(h.ask_versions(&repo, track()).len(), 1);
+        h.advance(secs(59));
+        assert_eq!(h.ask(&repo, track()), Some(synced()));
+        assert_eq!(
+            (flaky.call_count(), good.call_count()),
+            (1, 1),
+            "Inside failureTTL the partial list is served from cache"
+        );
 
-        assert_eq!(result, Some(synced()));
-        assert_eq!(flaky.call_count(), 1);
-        assert_eq!(good.call_count(), 1);
+        flaky.respond(Some(shifted(5.0)), false);
+        h.advance(secs(2));
+        assert_eq!(h.ask_versions(&repo, track()).len(), 2);
+        assert_eq!((flaky.call_count(), good.call_count()), (2, 2));
+
+        // 這次所有來源都答了：清單永久有效。
+        h.advance(secs(1_000_000_000));
+        assert_eq!(h.ask_versions(&repo, track()).len(), 2);
+        assert_eq!((flaky.call_count(), good.call_count()), (2, 2));
     }
 
     // ---- 可信度把關
@@ -1162,7 +1260,7 @@ mod tests {
         let third = FakeProvider::result("third", &h.clock, Some(implausible()));
         let repo = h.repo(vec![dynp(&first), dynp(&second), dynp(&third)]);
         assert_eq!(h.ask(&repo, track()), Some(plain("first")));
-        assert_eq!(third.call_count(), 1, "plain never stops the walk");
+        assert_eq!(third.call_count(), 1, "every source is asked");
 
         let h = Harness::new();
         let first = FakeProvider::result("first", &h.clock, Some(plain("first")));
@@ -1255,24 +1353,116 @@ mod tests {
         assert_eq!(plain_source.call_count(), 2);
     }
 
-    /// 第一個來源永不回應：`advance(5s)` 後仍走到第二個來源。
     #[test]
-    fn provider_timeout_is_a_miss_and_does_not_stall_the_walk() {
+    fn providers_are_queried_at_the_same_time() {
         let h = Harness::new();
-        let hanging = FakeProvider::hanging("hanging", &h.clock, Some(synced()));
-        let second = FakeProvider::result("second", &h.clock, Some(synced()));
-        let repo = h.repo(vec![dynp(&hanging), dynp(&second)]);
+        let a = FakeProvider::slow("a", &h.clock, Some(synced()), secs(3));
+        let b = FakeProvider::slow("b", &h.clock, Some(shifted(5.0)), secs(3));
+        let repo = h.repo(vec![dynp(&a), dynp(&b)]);
 
         let lookup = h.start(&repo, track());
         h.run();
+        assert_eq!((a.call_count(), b.call_count()), (1, 1));
+        h.advance(secs(3));
+
+        assert_eq!(
+            urls(&lookup.finished_versions()),
+            ["https://test.example/a", "https://test.example/b"]
+        );
+    }
+
+    /// 同序的版本依來源順序排列，和誰先回答無關。
+    #[test]
+    fn source_order_not_arrival_order_breaks_ties() {
+        let h = Harness::new();
+        let slow = FakeProvider::slow("slow", &h.clock, Some(synced()), secs(2));
+        let fast = FakeProvider::result("fast", &h.clock, Some(shifted(5.0)));
+        let repo = h.repo(vec![dynp(&slow), dynp(&fast)]);
+
+        let lookup = h.start(&repo, track());
+        h.run();
+        assert_eq!(lookup.outcome(), None, "all sources are awaited");
+        h.advance(secs(2));
+
+        assert_eq!(
+            urls(&lookup.finished_versions()),
+            ["https://test.example/slow", "https://test.example/fast"]
+        );
+    }
+
+    /// 一個來源永不回應：`advance(5s)` 後拿到其他來源的版本。
+    #[test]
+    fn a_hanging_provider_does_not_hide_the_others_versions() {
+        let h = Harness::new();
+        let hanging = FakeProvider::hanging("hanging", &h.clock, Some(synced()));
+        let other = FakeProvider::candidates(
+            "other",
+            &h.clock,
+            vec![
+                hit_at(synced(), "https://other.example/1"),
+                hit_at(shifted(5.0), "https://other.example/2"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&hanging), dynp(&other)]);
+
+        let lookup = h.start(&repo, track());
+        h.run();
+        assert_eq!(other.call_count(), 1);
         h.advance(millis(4_999));
         assert_eq!(lookup.outcome(), None);
-        assert_eq!(second.call_count(), 0);
 
         h.advance(millis(1));
-        assert_eq!(lookup.finished(), Some(synced()));
-        assert_eq!(second.call_count(), 1);
+        assert_eq!(
+            urls(&lookup.finished_versions()),
+            ["https://other.example/1", "https://other.example/2"]
+        );
         assert_eq!(h.clock.pending_sleeps(), 0, "the hanging fetch was dropped");
+
+        // 逾時算失敗：清單只記 failure_ttl。
+        h.advance(secs(120));
+        h.start(&repo, track()).task.detach();
+        h.run();
+        assert_eq!(other.call_count(), 2);
+    }
+
+    #[test]
+    fn plain_is_returned_alone_only_when_nothing_is_synced() {
+        // 沒有時間軸：只回最好的那一筆純文字（曲長吻合的勝過順序在前的放寬紀錄）。
+        let h = Harness::new();
+        let first = FakeProvider::result_hit(
+            "a",
+            &h.clock,
+            loose(plain("loose words"), "https://a.example/1"),
+        );
+        let second = FakeProvider::candidates(
+            "b",
+            &h.clock,
+            vec![
+                hit_at(plain("close words"), "https://b.example/1"),
+                hit_at(plain("more words"), "https://b.example/2"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&first), dynp(&second)]);
+        assert_eq!(
+            h.ask_versions(&repo, track()),
+            [hit_at(plain("close words"), "https://b.example/1")]
+        );
+
+        // 有任何時間軸版本（即使曲長放寬）：清單裡沒有純文字。
+        let h = Harness::new();
+        let words = FakeProvider::result_hit(
+            "a",
+            &h.clock,
+            Some(hit_at(plain("words"), "https://a.example/1")),
+        );
+        let timed = FakeProvider::result_hit("b", &h.clock, loose(synced(), "https://b.example/1"));
+        let repo = h.repo(vec![dynp(&words), dynp(&timed)]);
+        assert_eq!(
+            urls(&h.ask_versions(&repo, track())),
+            ["https://b.example/1"]
+        );
     }
 
     #[test]
@@ -1328,16 +1518,16 @@ mod tests {
             )
         };
 
-        // 新來源有同步歌詞：它的結果勝出，後面的來源都不必問。
+        // 新來源有同步歌詞：紀錄數相同時它的版本排在原本來源的前面。
         let h = Harness::new();
         let (a, b) = base(&h);
         let newcomer_lyrics = Lyrics::Synced(vec![line(1.0, "new"), line(2.0, "source")]);
         let newcomer = FakeProvider::result("new", &h.clock, Some(newcomer_lyrics.clone()));
         let repo = h.repo(vec![dynp(&newcomer), dynp(&a), dynp(&b)]);
         assert_eq!(h.ask(&repo, track()), Some(newcomer_lyrics));
-        assert_eq!((a.call_count(), b.call_count()), (0, 0));
+        assert_eq!((a.call_count(), b.call_count()), (1, 1));
 
-        // 新來源沒有：走訪照舊落到原本的來源。
+        // 新來源沒有：結果照舊來自原本的來源。
         let h = Harness::new();
         let (a, b) = base(&h);
         let newcomer = FakeProvider::result("new", &h.clock, None);
@@ -1360,7 +1550,7 @@ mod tests {
     /// 剛好寫好快取並移除了它的表項。被合併的查詢開頭必須重查快取，不得再問一輪來源。
     /// 以手動排出該交錯：呼叫者的 future 已建立（快取當時沒命中）、尚未輪詢，快取才被填入。
     #[test]
-    fn coalesced_run_rechecks_the_cache_before_walking_providers() {
+    fn coalesced_run_rechecks_the_cache_before_querying_providers() {
         use futures_util::FutureExt;
 
         let h = Harness::new();
@@ -1370,16 +1560,16 @@ mod tests {
         let caller = repo.lyrics(track());
         assert_eq!(repo.in_flight_waiters(&track()), 1);
         lock(&repo.inner.cache).insert(
-            track().cache_key(),
+            lookup_key(&track()),
             CacheEntry::Found {
-                hit: hit(synced()),
+                hits: vec![hit(synced())],
                 until: None,
             },
         );
 
         assert_eq!(
-            caller.now_or_never().map(|r| r.map(|h| h.lyrics)),
-            Some(Some(synced())),
+            caller.now_or_never(),
+            Some(vec![hit(synced())]),
             "the run must answer from the cache another run just wrote"
         );
         assert_eq!(provider.call_count(), 0, "no duplicate lookup");
@@ -1404,21 +1594,95 @@ mod tests {
         assert_eq!(provider.call_count(), 1);
     }
 
-    /// 快取鍵不含曲長：同一首歌回報不同長度（或沒有長度）時直接命中快取。
+    // ------------------------------------------------------------ 快取鍵含曲長（Rust 版新增）
+
+    /// 版本清單按曲長把關與排序，所以同名但長度不同的曲目（MV 與專輯版）各查各的、各拿自己的清單。
     #[test]
-    fn cache_key_ignores_duration() {
+    fn tracks_of_different_lengths_get_their_own_version_lists() {
+        let h = Harness::new();
+        // 第二份的最後一行在 260 秒：放得進 298 秒的曲子，放不進 238 秒的。
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                hit_at(synced(), "https://a.example/1"),
+                hit_at(shifted(250.0), "https://a.example/2"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+
+        let short = h.ask_versions(&repo, identity("T", 238.0));
+        let long = h.ask_versions(&repo, identity("T", 298.0));
+
+        assert_eq!(source.call_count(), 2);
+        assert_eq!(urls(&short), ["https://a.example/1"]);
+        assert_eq!(urls(&long), ["https://a.example/1", "https://a.example/2"]);
+        // 兩份清單各自留在快取裡。
+        assert_eq!(h.ask_versions(&repo, identity("T", 238.0)), short);
+        assert_eq!(h.ask_versions(&repo, identity("T", 298.0)), long);
+        assert_eq!(source.call_count(), 2);
+    }
+
+    #[test]
+    fn lengths_rounding_to_the_same_second_share_a_cache_entry() {
         let h = Harness::new();
         let provider = FakeProvider::result("p", &h.clock, Some(synced()));
         let repo = h.repo(vec![dynp(&provider)]);
 
-        h.ask(&repo, identity("T", 200.0));
-        assert_eq!(h.ask(&repo, identity("T", 260.0)), Some(synced()));
-        let unknown = TrackIdentity {
-            duration: None,
+        for duration in [238.2, 238.4, 237.6] {
+            assert_eq!(h.ask(&repo, identity("T", duration)), Some(synced()));
+        }
+        assert_eq!(provider.call_count(), 1);
+
+        // 四捨五入到 239 秒：另一個項目。
+        h.ask(&repo, identity("T", 238.6));
+        assert_eq!(provider.call_count(), 2);
+    }
+
+    /// 沒有曲長、非有限值、不大於 0 都算「未知」：彼此共用，和已知長度分開。
+    #[test]
+    fn an_unknown_length_is_cached_apart_from_known_ones() {
+        let h = Harness::new();
+        let provider = FakeProvider::result("p", &h.clock, Some(synced()));
+        let repo = h.repo(vec![dynp(&provider)]);
+        let with_duration = |duration| TrackIdentity {
+            duration,
             ..track()
         };
-        assert_eq!(h.ask(&repo, unknown), Some(synced()));
-        assert_eq!(provider.call_count(), 1);
+
+        h.ask(&repo, track());
+        h.ask(&repo, with_duration(None));
+        assert_eq!(provider.call_count(), 2);
+
+        for unknown in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            h.ask(&repo, with_duration(Some(unknown)));
+            assert_eq!(provider.call_count(), 2, "{unknown}");
+        }
+        // 不到半秒的已知長度取整是 0，仍不算未知。
+        h.ask(&repo, with_duration(Some(0.2)));
+        assert_eq!(provider.call_count(), 3);
+    }
+
+    #[test]
+    fn concurrent_lookups_share_a_flight_only_within_the_same_rounded_length() {
+        let h = Harness::new();
+        let provider = FakeProvider::slow("p", &h.clock, Some(synced()), secs(1));
+        let repo = h.repo(vec![dynp(&provider)]);
+
+        let a = h.start(&repo, identity("T", 238.2));
+        let b = h.start(&repo, identity("T", 238.4));
+        let c = h.start(&repo, identity("T", 298.0));
+        h.run();
+
+        assert_eq!(provider.call_count(), 2);
+        assert_eq!(repo.in_flight_waiters(&identity("T", 238.0)), 2);
+        assert_eq!(repo.in_flight_waiters(&identity("T", 298.0)), 1);
+        h.advance(secs(1));
+        for lookup in [&a, &b, &c] {
+            assert_eq!(lookup.finished(), Some(synced()));
+        }
+        assert_eq!(provider.call_count(), 2);
     }
 
     // ------------------------------------------------------------ 來源網址（LyricsHit）
@@ -1534,5 +1798,295 @@ mod tests {
         let repo = h.repo(vec![dynp(&a), dynp(&b)]);
         let got = h.ask_hit(&repo, track()).expect("plain fallback");
         assert_eq!(got.url, "https://b.example/2");
+    }
+
+    // ------------------------------------------------------------ 曲長放寬的命中（Rust 版新增）
+
+    /// 紀錄比查詢的曲子長 8 秒。
+    fn loose(lyrics: Lyrics, url: &str) -> Option<LyricsHit> {
+        hit_at(lyrics, url).matched(&track(), Some(208.0))
+    }
+
+    /// 兩個來源時間軸相同：版本只有一個，代表是曲長吻合的那筆。
+    #[test]
+    fn a_close_duration_hit_represents_the_version_over_an_earlier_loose_one() {
+        let h = Harness::new();
+        let first = FakeProvider::result_hit("a", &h.clock, loose(synced(), "https://a.example/1"));
+        let second =
+            FakeProvider::result_hit("b", &h.clock, Some(hit_at(synced(), "https://b.example/2")));
+        let repo = h.repo(vec![dynp(&first), dynp(&second)]);
+
+        let got = h.ask_hit(&repo, track()).expect("a hit");
+
+        assert_eq!(got.url, "https://b.example/2");
+    }
+
+    #[test]
+    fn a_loose_synced_hit_beats_plain_but_the_earlier_loose_one_wins() {
+        let h = Harness::new();
+        let words = FakeProvider::result_hit(
+            "p",
+            &h.clock,
+            Some(hit_at(plain("words"), "https://p.example/0")),
+        );
+        let first = FakeProvider::result_hit("a", &h.clock, loose(synced(), "https://a.example/1"));
+        let second =
+            FakeProvider::result_hit("b", &h.clock, loose(synced(), "https://b.example/2"));
+        let repo = h.repo(vec![dynp(&words), dynp(&first), dynp(&second)]);
+
+        let got = h.ask_hit(&repo, track()).expect("a hit");
+
+        assert_eq!(got.url, "https://a.example/1");
+        assert_eq!(second.call_count(), 1);
+    }
+
+    /// 另一個來源失敗時，放寬的命中只短暫記住，之後可能換成吻合的版本。
+    #[test]
+    fn a_loose_hit_found_while_a_provider_failed_is_retried_later() {
+        let h = Harness::new();
+        let flaky = FakeProvider::failing("flaky", &h.clock);
+        let other = FakeProvider::result_hit("a", &h.clock, loose(synced(), "https://a.example/1"));
+        let repo = h.make_repo(vec![dynp(&flaky), dynp(&other)], secs(5));
+        assert!(h.ask_hit(&repo, track()).unwrap().loose_duration);
+
+        flaky.respond(Some(synced()), false);
+        h.advance(secs(61));
+
+        assert!(!h.ask_hit(&repo, track()).unwrap().loose_duration);
+    }
+
+    // ------------------------------------------------------------ 一個來源多筆候選（Rust 版新增）
+
+    #[test]
+    fn the_best_plausible_candidate_of_a_source_is_used() {
+        let h = Harness::new();
+        let loose_one = loose(synced(), "https://a.example/2").expect("within tolerance");
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                hit_at(implausible(), "https://a.example/0"),
+                hit_at(plain("words"), "https://a.example/1"),
+                loose_one,
+                hit_at(synced(), "https://a.example/3"),
+                hit_at(synced(), "https://a.example/4"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+
+        let got = h.ask_hit(&repo, track()).expect("a hit");
+
+        assert_eq!(got.url, "https://a.example/3");
+    }
+
+    #[test]
+    fn an_incomplete_answer_is_retried_like_a_failure() {
+        // 只有純文字：短暫記住。
+        let h = Harness::new();
+        let words = vec![hit_at(plain("words"), "https://a.example/1")];
+        let source = FakeProvider::candidates("a", &h.clock, words, false);
+        let repo = h.make_repo(vec![dynp(&source)], secs(5));
+        assert_eq!(h.ask(&repo, track()), Some(plain("words")));
+        h.advance(secs(59));
+        h.ask(&repo, track());
+        assert_eq!(source.call_count(), 1);
+        h.advance(secs(2));
+        h.ask(&repo, track());
+        assert_eq!(source.call_count(), 2);
+
+        // 沒有可用的候選：不能當成「查無」記到 negative_ttl。
+        let h = Harness::new();
+        let unusable = vec![hit_at(implausible(), "https://a.example/1")];
+        let source = FakeProvider::candidates("a", &h.clock, unusable, false);
+        let repo = h.make_repo(vec![dynp(&source)], secs(5));
+        assert_eq!(h.ask(&repo, track()), None);
+        h.advance(secs(61));
+        h.ask(&repo, track());
+        assert_eq!(source.call_count(), 2);
+
+        // 有時間軸版本：清單照用，但同樣只短暫記住。
+        let h = Harness::new();
+        let timed = vec![hit_at(synced(), "https://a.example/1")];
+        let source = FakeProvider::candidates("a", &h.clock, timed, false);
+        let repo = h.make_repo(vec![dynp(&source)], secs(5));
+        assert_eq!(h.ask(&repo, track()), Some(synced()));
+        h.advance(secs(59));
+        h.ask(&repo, track());
+        assert_eq!(source.call_count(), 1);
+        h.advance(secs(2));
+        h.ask(&repo, track());
+        assert_eq!(source.call_count(), 2);
+    }
+
+    // ------------------------------------------------------------ 演出者把關（Rust 版新增）
+
+    /// 演出者不相符的命中。
+    fn mismatched(lyrics: Lyrics, url: &str) -> LyricsHit {
+        let mut hit = hit_at(lyrics, url);
+        hit.artist_matches = false;
+        hit
+    }
+
+    #[test]
+    fn mismatched_artists_are_dropped_when_any_source_has_a_matching_one() {
+        let h = Harness::new();
+        // 不相符的紀錄比較多、來源又在前面，仍然整批丟掉。
+        let others = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                mismatched(shifted(5.0), "https://a.example/1"),
+                mismatched(shifted(5.0), "https://a.example/2"),
+            ],
+            true,
+        );
+        let right =
+            FakeProvider::result_hit("b", &h.clock, Some(hit_at(synced(), "https://b.example/1")));
+        let repo = h.repo(vec![dynp(&others), dynp(&right)]);
+
+        assert_eq!(
+            urls(&h.ask_versions(&repo, track())),
+            ["https://b.example/1"]
+        );
+    }
+
+    #[test]
+    fn all_hits_are_kept_when_no_artist_matches() {
+        let h = Harness::new();
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                mismatched(synced(), "https://a.example/1"),
+                mismatched(shifted(5.0), "https://a.example/2"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+
+        assert_eq!(
+            urls(&h.ask_versions(&repo, track())),
+            ["https://a.example/1", "https://a.example/2"]
+        );
+    }
+
+    /// 不可信的紀錄先被丟掉：它的演出者相符也不能把其他紀錄擠掉。
+    #[test]
+    fn the_artist_filter_runs_after_the_plausibility_filter() {
+        let h = Harness::new();
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                hit_at(implausible(), "https://a.example/1"),
+                mismatched(synced(), "https://a.example/2"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+
+        assert_eq!(
+            urls(&h.ask_versions(&repo, track())),
+            ["https://a.example/2"]
+        );
+    }
+
+    #[test]
+    fn a_matching_plain_hit_beats_a_mismatched_synced_one() {
+        let h = Harness::new();
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                mismatched(synced(), "https://a.example/1"),
+                hit_at(plain("words"), "https://a.example/2"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+
+        assert_eq!(
+            h.ask_versions(&repo, track()),
+            [hit_at(plain("words"), "https://a.example/2")]
+        );
+    }
+
+    /// 使用者選過的版本不受演出者把關影響：查詢結果裡被丟掉了，仍用存下的內容並選中它。
+    #[test]
+    fn a_saved_choice_survives_the_artist_filter() {
+        let h = Harness::new();
+        let chosen = "https://a.example/chosen";
+        let source = FakeProvider::candidates(
+            "a",
+            &h.clock,
+            vec![
+                mismatched(shifted(5.0), chosen),
+                hit_at(synced(), "https://a.example/1"),
+            ],
+            true,
+        );
+        let repo = h.repo(vec![dynp(&source)]);
+        let found = h.ask_versions(&repo, track());
+        assert_eq!(urls(&found), ["https://a.example/1"]);
+        let Lyrics::Synced(lines) = shifted(5.0) else {
+            unreachable!()
+        };
+        let saved = SavedChoice {
+            key: track().cache_key(),
+            duration: track().duration,
+            url: chosen.into(),
+            lines,
+            offsets: Default::default(),
+        };
+
+        let (versions, index) = apply_choice(found, Some(&saved));
+
+        assert_eq!(versions[index].url, chosen);
+        assert_eq!(versions[index].lyrics, shifted(5.0));
+    }
+
+    /// 用真的提供者走完整條路：播放器回報的「演出者」是頻道名稱時沒有任何紀錄相符，全部保留；
+    /// 是歌手名時另一位歌手的同名歌被丟掉。
+    #[test]
+    fn a_channel_name_as_artist_keeps_every_record_but_a_real_artist_filters() {
+        let h = Harness::new();
+        let ask = |artist: &str| {
+            let track = TrackIdentity {
+                artist: artist.into(),
+                ..identity("晴天", 200.0)
+            };
+            let http = Arc::new(FakeHttp::new());
+            http.respond(LrclibProvider::exact_url(&track), 404, "{}");
+            let record = |id: u32, by: &str, start: u32| {
+                format!(
+                    r#"{{"id":{id},"trackName":"晴天","artistName":"{by}","duration":200,"syncedLyrics":"[00:{start:02}.00]a\n[00:50.00]b"}}"#
+                )
+            };
+            let found = format!(
+                "[{},{}]",
+                record(1, "周杰伦", 10),
+                record(2, "恶童ETON", 20)
+            );
+            http.respond(LrclibProvider::search_url(&track), 200, found.clone());
+            if let Some(retry) = track.simplified_chinese() {
+                http.respond(LrclibProvider::search_url(&retry), 200, "[]");
+            }
+            let source = Arc::new(LrclibProvider::new(http));
+            let repo = h.repo(vec![dynp(&source)]);
+            urls(&h.ask_versions(&repo, track))
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            ask("華語音樂精選頻道"),
+            [
+                "https://lrclib.net/api/get/1",
+                "https://lrclib.net/api/get/2"
+            ]
+        );
+        assert_eq!(ask("周杰倫 Jay Chou"), ["https://lrclib.net/api/get/1"]);
     }
 }

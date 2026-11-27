@@ -36,6 +36,20 @@ use ferrous_opencc::OpenCC;
 use regex::Regex;
 use unicode_normalization::UnicodeNormalization;
 
+/// 曲長比對的容忍秒數。
+const DURATION_TOLERANCE: f64 = 5.0;
+/// 沒有吻合的候選時，放寬到這個秒數（官方 MV 常比歌庫收錄的版本長或短幾秒）。
+const LOOSE_DURATION_TOLERANCE: f64 = 10.0;
+
+/// 候選歌詞的曲長與查詢有多吻合。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DurationFit {
+    /// 差 5 秒以內，或任一邊不知道曲長。
+    Close,
+    /// 差超過 5 秒、10 秒以內：只在沒有吻合的候選時使用。
+    Loose,
+}
+
 /// 歌詞提供者被要求查詢的對象。
 ///
 /// 與 `TrackSnapshot` 分開，因為查詢只在乎「是哪首歌」而不在乎播放狀態，
@@ -118,6 +132,15 @@ pub(super) static T2S: LazyLock<Option<OpenCC>> = LazyLock::new(|| {
     converter.ok()
 });
 
+/// 漢字（統一表意文字、擴充區與相容區）。
+pub(super) fn is_han(c: char) -> bool {
+    matches!(c,
+        '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{20000}'..='\u{3FFFF}')
+}
+
 /// 拉丁系組合符號區塊（見模組說明：不含日文濁點）。
 fn is_latin_combining_mark(c: char) -> bool {
     matches!(c,
@@ -175,17 +198,82 @@ impl TrackIdentity {
         format!("{}\u{1}{}", n.title.to_lowercase(), n.artist.to_lowercase())
     }
 
-    /// 容忍而非相等：一首歌的另一個版本常與原版差幾秒。任一邊缺少或不大於 0
-    /// 都視為「未知」，永遠不會拒絕候選。NaN 同樣視為未知。
-    pub fn duration_matches(&self, other: Option<f64>) -> bool {
-        let (Some(duration), Some(other)) = (self.duration, other) else {
-            return true;
+    /// 兩邊曲長差幾秒（絕對值）。任一邊缺少、不大於 0 或是 NaN 都視為「未知」，回 `None`。
+    pub fn duration_gap(&self, other: Option<f64>) -> Option<f64> {
+        let (duration, other) = (self.duration?, other?);
+        // NaN 的比較一律為 false，因此也落入「未知」。
+        (duration > 0.0 && other > 0.0).then(|| (duration - other).abs())
+    }
+
+    /// 容忍而非相等：一首歌的另一個版本常與原版差幾秒。曲長未知（見 [`Self::duration_gap`]）
+    /// 算吻合。差太多時為 `None`。
+    pub fn duration_fit(&self, other: Option<f64>) -> Option<DurationFit> {
+        let Some(gap) = self.duration_gap(other) else {
+            return Some(DurationFit::Close);
         };
-        // 用否定的 `>` 寫法讓 NaN 也落入「未知」。
-        if !(duration > 0.0 && other > 0.0) {
-            return true;
+        if gap <= DURATION_TOLERANCE {
+            Some(DurationFit::Close)
+        } else if gap <= LOOSE_DURATION_TOLERANCE {
+            Some(DurationFit::Loose)
+        } else {
+            None
         }
-        (duration - other).abs() <= 5.0
+    }
+
+    /// 曲長是否吻合（5 秒以內或未知）。
+    pub fn duration_matches(&self, other: Option<f64>) -> bool {
+        self.duration_fit(other) == Some(DurationFit::Close)
+    }
+
+    /// 簡體中文的查詢形式：歌名與演出者轉成簡體，中英並列的演出者名（`周杰倫 Jay Chou`）只留含漢字的部分。
+    /// 有些歌庫（LRCLIB）的搜尋不做繁簡轉換，帶著英文名也找不到中文紀錄。
+    /// 與 [`Self::normalized`] 相同時為 `None`（不必再查一次）。
+    pub fn simplified_chinese(&self) -> Option<TrackIdentity> {
+        let converter = T2S.as_ref()?;
+        let n = self.normalized();
+        let chinese: Vec<&str> = n
+            .artist
+            .split_whitespace()
+            .filter(|word| word.chars().any(is_han))
+            .collect();
+        let artist = if chinese.is_empty() {
+            n.artist.clone()
+        } else {
+            chinese.join(" ")
+        };
+        let simplified = TrackIdentity {
+            title: converter.convert(&n.title),
+            artist: converter.convert(&artist),
+            ..n.clone()
+        };
+        (simplified != n).then_some(simplified)
+    }
+
+    /// 紀錄列出的演出者（一首歌可以有好幾位）是否和查詢的演出者寬鬆相符；任一位相符即可。
+    ///
+    /// 查詢端用正規化後的演出者（和送給來源、當快取鍵的相同：多位時取第一位）。兩邊和歌名一樣摺疊
+    /// （簡繁、全半形、大小寫），去掉空白與標點，再比三種部分：整個名字、其中的漢字、漢字以外的字；
+    /// 不足兩個字的部分不比，任一對部分一方包含另一方就算相符。
+    /// 紀錄沒有任何帶文字的名字（空清單、空字串）時沒有資訊可判斷，算相符。
+    pub fn matches_artist<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> bool {
+        let wanted = artist_parts(&artist_text(&self.normalized().artist));
+        let mut informed = false;
+        for name in names {
+            let name = artist_text(name);
+            if name.is_empty() {
+                continue;
+            }
+            informed = true;
+            let found = artist_parts(&name).iter().any(|theirs| {
+                wanted
+                    .iter()
+                    .any(|ours| ours.contains(theirs.as_str()) || theirs.contains(ours.as_str()))
+            });
+            if found {
+                return true;
+            }
+        }
+        !informed
     }
 
     /// 不要用 `==` 比對提供者回來的歌名：同一首歌可能以簡體、不同大小寫或全形字元回來。
@@ -195,7 +283,8 @@ impl TrackIdentity {
     }
 }
 
-fn fold(raw: &str) -> String {
+/// [`TrackIdentity::loosely_matches`] 的比對形式；歌詞版本合併也用它比對行文字。
+pub(super) fn fold(raw: &str) -> String {
     // 先 NFKC 再轉簡體：NFKC 會把相容漢字（如 U+F900 區）併到統一漢字，讓字典查得到。
     let composed: String = raw.nfkc().collect();
     let simplified = match T2S.as_ref() {
@@ -205,6 +294,21 @@ fn fold(raw: &str) -> String {
     fold_text(&simplified)
         .trim_matches(char::is_whitespace)
         .to_string()
+}
+
+/// 演出者名的比對形式：同歌名的摺疊，再只留文字與數字。摺疊結果是分解形式，重新組合（NFC）
+/// 讓帶濁點的假名、韓文音節各算一個字。
+fn artist_text(raw: &str) -> String {
+    fold(raw).nfc().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// [`artist_text`] 結果裡拿來比的部分：整個名字、漢字、漢字以外；不足兩個字的丟掉。
+fn artist_parts(text: &str) -> Vec<String> {
+    let (han, other): (String, String) = text.chars().partition(|c| is_han(*c));
+    [text.to_string(), han, other]
+        .into_iter()
+        .filter(|part| part.chars().count() >= 2)
+        .collect()
 }
 
 #[cfg(test)]
@@ -455,5 +559,146 @@ mod tests {
         m.insert(make("T", "A", Some(f64::NAN)), 1);
         assert_eq!(m.get(&make("T", "A", Some(f64::NAN))), Some(&1));
         assert_eq!(m.get(&make("T", "A", Some(1.0))), None);
+    }
+
+    #[test]
+    fn duration_fit_is_close_within_five_seconds_and_loose_within_ten() {
+        let track = make("T", "A", Some(200.0));
+        for close in [Some(200.0), Some(205.0), Some(195.0), None, Some(0.0)] {
+            assert_eq!(
+                track.duration_fit(close),
+                Some(DurationFit::Close),
+                "{close:?}"
+            );
+        }
+        for loose in [205.1, 210.0, 194.9, 190.0] {
+            assert_eq!(
+                track.duration_fit(Some(loose)),
+                Some(DurationFit::Loose),
+                "{loose}"
+            );
+        }
+        for far in [210.1, 189.9, 400.0] {
+            assert_eq!(track.duration_fit(Some(far)), None, "{far}");
+        }
+        assert_eq!(
+            make("T", "A", None).duration_fit(Some(400.0)),
+            Some(DurationFit::Close)
+        );
+    }
+
+    #[test]
+    fn duration_gap_is_the_absolute_difference_or_unknown() {
+        let track = make("T", "A", Some(200.0));
+        assert_eq!(track.duration_gap(Some(197.0)), Some(3.0));
+        assert_eq!(track.duration_gap(Some(450.0)), Some(250.0));
+        assert_eq!(track.duration_gap(Some(200.0)), Some(0.0));
+        for unknown in [None, Some(0.0), Some(-1.0), Some(f64::NAN)] {
+            assert_eq!(track.duration_gap(unknown), None, "{unknown:?}");
+            assert_eq!(
+                make("T", "A", unknown).duration_gap(Some(200.0)),
+                None,
+                "{unknown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn simplified_chinese_converts_the_text_and_keeps_only_the_chinese_artist_name() {
+        let query = make("爸 我回來了", "周杰倫 Jay Chou", Some(229.6));
+        assert_eq!(
+            query.simplified_chinese(),
+            Some(make("爸 我回来了", "周杰伦", Some(229.6)))
+        );
+        for (artist, expected) in [
+            ("周杰伦 Jay Chou", "周杰伦"),
+            ("周杰倫 (Jay Chou)", "周杰伦"),
+            ("G.E.M. 鄧紫棋", "邓紫棋"),
+            ("劉若英", "刘若英"),
+        ] {
+            let got = make("T", artist, None).simplified_chinese();
+            assert_eq!(got.map(|t| t.artist).as_deref(), Some(expected), "{artist}");
+        }
+    }
+
+    /// 轉了跟原本一樣就不必再查一次。
+    #[test]
+    fn simplified_chinese_is_none_when_nothing_would_change() {
+        assert_eq!(make("晴天", "周杰伦", None).simplified_chinese(), None);
+        assert_eq!(make("Song", "Queen", None).simplified_chinese(), None);
+        // 只差正規化會拿掉的部分（後綴、次要演出者）也算沒變。
+        assert_eq!(
+            make("Song (Live)", "A & B", None).simplified_chinese(),
+            None
+        );
+    }
+
+    // ---- 演出者比對（Rust 版新增）
+
+    fn artist_matches(query: &str, record: &str) -> bool {
+        make("T", query, None).matches_artist([record])
+    }
+
+    #[test]
+    fn artist_matching_compares_the_whole_name_and_its_han_and_non_han_parts() {
+        let query = "周杰倫 Jay Chou";
+        for record in [
+            "周杰伦",
+            "Jay Chou",
+            "周杰倫 (Jay Chou)",
+            "ＪＡＹ　ＣＨＯＵ",
+            "jay-chou",
+            "周 杰 倫",
+        ] {
+            assert!(artist_matches(query, record), "{record}");
+        }
+        for record in ["恶童ETON", "Jay Park", "陈奕迅"] {
+            assert!(!artist_matches(query, record), "{record}");
+        }
+    }
+
+    #[test]
+    fn artist_matching_is_containment_either_way() {
+        assert!(artist_matches("周杰倫", "周杰倫 Jay Chou"));
+        assert!(artist_matches("Jay Chou", "周杰伦 (Jay Chou)"));
+        assert!(artist_matches("周杰倫 Official Channel", "周杰伦 Jay"));
+        assert!(artist_matches("鄧紫棋 G.E.M.", "GEM"));
+        assert!(artist_matches("宇多田ヒカル", "宇多田ヒカル"));
+    }
+
+    /// 單一字母或單一漢字的部分幾乎什麼都包含得到，所以不拿來比。
+    #[test]
+    fn artist_parts_shorter_than_two_characters_are_ignored() {
+        // 非漢字部分只剩「x」：不能因此配上任何含 x 的名字。
+        assert!(!artist_matches("周杰倫 X", "X Japan"));
+        assert!(!artist_matches("周杰倫", "周"));
+        assert!(!artist_matches("A", "Abba"));
+    }
+
+    #[test]
+    fn a_record_without_artist_information_counts_as_matching() {
+        let query = make("T", "周杰倫", None);
+        assert!(query.matches_artist([]));
+        for blank in ["", "  ", " - / ", "　"] {
+            assert!(query.matches_artist([blank]), "{blank:?}");
+        }
+        // 空白名字不是資訊：和不相符的名字並列時，仍以有內容的名字判斷。
+        assert!(!query.matches_artist(["", "恶童ETON"]));
+    }
+
+    #[test]
+    fn any_listed_artist_may_match() {
+        let query = make("T", "周杰倫", None);
+        assert!(query.matches_artist(["费玉清", "周杰伦"]));
+        assert!(!query.matches_artist(["费玉清", "陈奕迅"]));
+    }
+
+    /// 和歌名一樣用正規化後的查詢：多位演出者以第一位為準，寫法不同的合作名單也認得。
+    #[test]
+    fn artist_matching_uses_the_primary_query_artist() {
+        let query = "Taylor Swift, Ed Sheeran";
+        assert!(artist_matches(query, "Taylor Swift feat. Ed Sheeran"));
+        assert!(artist_matches(query, "Taylor Swift"));
+        assert!(!artist_matches(query, "Ed Sheeran"));
     }
 }

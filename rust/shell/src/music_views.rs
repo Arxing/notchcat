@@ -50,11 +50,10 @@ use gpui::{
 };
 use musicat_core::lyrics::{LyricLine, Lyrics};
 use musicat_core::modules::{ModuleManager, ModuleState};
-use musicat_core::music::controller::{MusicController, MusicState};
+use musicat_core::music::controller::{MusicController, MusicState, VersionInfo};
 use musicat_core::music::module::{MusicModuleState, LYRIC_STRIP_OPACITY, LYRIC_STRIP_ROW_HEIGHT};
 use musicat_core::music::presentation::{
-    has_progress, progress_fraction, strip_content, strip_line_index, strip_rows, StripContent,
-    StripRow,
+    has_progress, lyrics_status, progress_fraction, strip_line_index, strip_rows, StripRow,
 };
 use musicat_core::nowplaying::PlaybackCommand;
 use musicat_core::runtime::{Clock, Subscription};
@@ -107,6 +106,9 @@ struct Shared {
     /// 被快取擠出、等下一次 render（有 `Window`）時從 GPU 圖集釋放的封面。
     released: RefCell<Vec<Arc<RenderImage>>>,
     strip_marquee: MarqueeState,
+    /// Preview 左翼的曲名與右翼的演出者。
+    wing_title_marquee: MarqueeState,
+    wing_artist_marquee: MarqueeState,
     /// 歌詞條的換行捲動。
     strip_scroll: RefCell<StripScroll>,
     title_marquee: MarqueeState,
@@ -153,6 +155,8 @@ impl Shared {
                 self.title_marquee.is_scrolling() || self.artist_marquee.is_scrolling()
             } else {
                 self.strip_marquee.is_scrolling()
+                    || self.wing_title_marquee.is_scrolling()
+                    || self.wing_artist_marquee.is_scrolling()
             },
         }
     }
@@ -166,7 +170,7 @@ struct LyricScroll {
     from: f64,
     to: f64,
     started: Option<Instant>,
-    /// 下一次直接跳到位置（剛展開）。
+    /// 下一次直接跳到位置（剛展開，或剛切換歌詞版本）。
     jump: bool,
 }
 
@@ -240,6 +244,8 @@ impl MusicShellContent {
             },
             released: RefCell::new(Vec::new()),
             strip_marquee: MarqueeState::new(),
+            wing_title_marquee: MarqueeState::new(),
+            wing_artist_marquee: MarqueeState::new(),
             strip_scroll: RefCell::new(StripScroll::default()),
             title_marquee: MarqueeState::new(),
             artist_marquee: MarqueeState::new(),
@@ -281,6 +287,8 @@ impl MusicShellContent {
 
         // 跑馬燈開始捲動時喚醒定時器（它可能正閒置等待）。
         for marquee in [
+            &shared.wing_title_marquee,
+            &shared.wing_artist_marquee,
             &shared.strip_marquee,
             &shared.title_marquee,
             &shared.artist_marquee,
@@ -415,6 +423,8 @@ impl ShellContent for MusicShellContent {
             ShellEvent::Collapsed => {
                 s.mode.set(ShellMode::Preview);
                 s.strip_marquee.reset();
+                s.wing_title_marquee.reset();
+                s.wing_artist_marquee.reset();
                 // 歌詞條重新出現：直接顯示目前行，不從展開前的舊行捲過來。
                 s.strip_scroll.borrow_mut().reset();
             }
@@ -447,7 +457,11 @@ impl Render for MusicView {
         }
         // 只有這一格畫到的跑馬燈會把旗標設回來（見 MarqueeState::clear_scrolling）。
         match self.kind {
-            ShellMode::Preview => self.shared.strip_marquee.clear_scrolling(),
+            ShellMode::Preview => {
+                self.shared.strip_marquee.clear_scrolling();
+                self.shared.wing_title_marquee.clear_scrolling();
+                self.shared.wing_artist_marquee.clear_scrolling();
+            }
             ShellMode::Expanded => {
                 self.shared.title_marquee.clear_scrolling();
                 self.shared.artist_marquee.clear_scrolling();
@@ -466,7 +480,7 @@ impl MusicView {
     fn render_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let s = self.shared.clone();
         let empty = || div().size_full().into_any_element();
-        // 同 Swift：active 模組不是音樂（沒在播放）時 Preview 不畫任何內容（DefaultShellContent 是 EmptyView）。
+        // active 模組不是音樂（沒有曲目）時 Preview 不畫任何內容（Swift DefaultShellContent 是 EmptyView）。
         if !s.music_is_active() {
             return empty();
         }
@@ -482,25 +496,61 @@ impl MusicView {
         let wing = wing_width(size.w, notch_w);
         let side = preview_cover_side(wing, row_h);
 
-        let left = div()
+        let labels = preview_labels(snapshot);
+        if labels.is_none() {
+            // 暫停：下次出現時從頭捲。
+            s.wing_title_marquee.reset();
+            s.wing_artist_marquee.reset();
+        }
+        // 兩翼的文字佔封面／音柱與瀏海之間剩下的寬度，放不下就跑馬燈。
+        let label = |state: &MarqueeState, text: &str, opacity: f64| {
+            div().flex_1().min_w_0().child(marquee(
+                state,
+                text.to_string(),
+                MarqueeStyle {
+                    font_size: PREVIEW_TEXT_FONT_SIZE as f32,
+                    weight: FontWeight::MEDIUM,
+                    color: white_a(opacity),
+                    line_height: PREVIEW_TEXT_LINE_HEIGHT as f32,
+                },
+            ))
+        };
+
+        let mut left = div()
             .w(px(wing as f32))
             .h_full()
             .flex_none()
             .flex()
             .items_center()
+            .gap(px(PREVIEW_TEXT_SPACING as f32))
             .pl(px(PREVIEW_COVER_INSET as f32))
+            .pr(px(PREVIEW_TEXT_NOTCH_INSET as f32))
+            .overflow_hidden()
             .child(self.cover(snapshot.artwork.as_ref(), side, cx));
+        if let Some((title, _)) = labels {
+            left = left.child(label(&s.wing_title_marquee, title, PREVIEW_TITLE_OPACITY));
+        }
         // 真瀏海後面：不放任何東西。
         let middle = div().w(px(notch_w as f32)).h_full().flex_none();
-        let right = div()
+        let mut right = div()
             .w(px(wing as f32))
             .h_full()
             .flex_none()
             .flex()
             .items_center()
             .justify_end()
+            .gap(px(PREVIEW_TEXT_SPACING as f32))
+            .pl(px(PREVIEW_TEXT_NOTCH_INSET as f32))
             .pr(px(PREVIEW_BARS_INSET as f32))
-            .child(equalizer(s.t0.elapsed().as_secs_f64(), snapshot.is_playing));
+            .overflow_hidden();
+        if let Some((_, Some(artist))) = labels {
+            right = right.child(label(
+                &s.wing_artist_marquee,
+                artist,
+                PREVIEW_ARTIST_OPACITY,
+            ));
+        }
+        let right = right.child(equalizer(s.t0.elapsed().as_secs_f64(), snapshot.is_playing));
         let wings = div()
             .w_full()
             .h(px(row_h as f32))
@@ -512,7 +562,11 @@ impl MusicView {
             .child(right);
 
         let mut root = div().size_full().flex().flex_col().child(wings);
-        if extra > 0.0 {
+        if extra <= 0.0 {
+            // 歌詞條收起（暫停或使用者折疊）：下次出現時從頭顯示目前行，不接著舊的捲動位置。
+            s.strip_marquee.reset();
+            s.strip_scroll.borrow_mut().reset();
+        } else {
             let rows = self.strip_content_element(snapshot, &state, window);
             // 歌詞條：外殼在這一段不塗黑，由內容畫 0.6 不透明的黑底與下方圓角（Swift LyricStripView）。
             // 高度就是模組回報的額外高度（隨行數變），列在其中垂直置中。
@@ -533,7 +587,7 @@ impl MusicView {
         root.into_any_element()
     }
 
-    /// 歌詞條黑底裡的內容：同步歌詞時是會換行捲動的歌詞列，否則是單列曲名。
+    /// 歌詞條黑底裡的內容：同步歌詞時是會換行捲動的歌詞列，否則是單列的歌詞命中狀態。
     fn strip_content_element(
         &self,
         snapshot: &TrackSnapshot,
@@ -549,7 +603,7 @@ impl MusicView {
             color: white_a(opacity),
             line_height: LYRIC_STRIP_ROW_HEIGHT as f32,
         };
-        // 每一列固定高度；目前行與曲名用跑馬燈（太長會捲動），前後文只截斷（不捲動，避免多行同時動）。
+        // 每一列固定高度；目前行用跑馬燈（太長會捲動），前後文只截斷（不捲動，避免多行同時動）。
         let row_box = || {
             div()
                 .w_full()
@@ -562,12 +616,15 @@ impl MusicView {
         let current = strip_line_index(Some(snapshot), lyrics, now);
         let (Some(current), Some(Lyrics::Synced(all))) = (current, lyrics) else {
             s.strip_scroll.borrow_mut().reset();
-            let title = match strip_content(Some(snapshot), lyrics, now) {
-                StripContent::Title(t) | StripContent::Line(t) => t,
-                StripContent::None => String::new(),
-            };
+            // 沒有可顯示的歌詞行：只顯示命中狀態；曲名已經在左翼，不在這裡重複。
             return row_box()
-                .child(marquee(&s.strip_marquee, title, style(STRIP_TITLE_OPACITY)))
+                .whitespace_nowrap()
+                .text_center()
+                .text_size(px(STRIP_FONT_SIZE as f32))
+                .line_height(px(LYRIC_STRIP_ROW_HEIGHT as f32))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(white_a(STRIP_STATUS_OPACITY))
+                .child(lyrics_status_label(lyrics_status(lyrics, state.searching)))
                 .into_any_element();
         };
 
@@ -877,8 +934,8 @@ impl MusicView {
         col.child(self.controls(snapshot, cx)).into_any_element()
     }
 
-    /// 上一首／播放暫停／下一首（置中），右側是歌詞條折疊開關，左側等寬的區域放歌詞來源標籤（沒有網址時空白），
-    /// 讓按鈕維持置中。
+    /// 上一首／播放暫停／下一首（置中），右側是歌詞條折疊開關，兩者之間放時間偏移控制；左側等寬的區域放
+    /// 歌詞命中狀態（有多個版本時點它換版本）與來源標籤（沒有網址時空白）。兩側寬度與內容無關，按鈕維持置中。
     fn controls(&self, snapshot: &TrackSnapshot, cx: &mut Context<Self>) -> AnyElement {
         let s = &self.shared;
         let enabled = s.controller.has_control();
@@ -961,6 +1018,38 @@ impl MusicView {
         // 左側區域取代原本的「24 方塊 + flex_1」：flex_1 但基準寬 24，所以寬度仍等於右側的
         // 「flex_1 + 24 折疊開關」（見 `control_side_widths`），按鈕群位置不變。`min_w_0` + 裁切讓標籤
         // 再長也只會被截斷，不會撐寬這一側去推擠按鈕。
+        // 上行是歌詞命中狀態，下行是來源連結（沒有網址時只剩狀態，垂直置中）。
+        let state = s.state();
+        // `version` 只在顯示時間軸歌詞時是 `Some`：查詢中、沒有歌詞、純文字版都沒有版本切換與偏移控制。
+        let status = match state.version {
+            Some(v) => version_label(v.index, v.count),
+            None => lyrics_status_label(lyrics_status(state.lyrics.as_ref(), state.searching))
+                .to_string(),
+        };
+        let status = div()
+            .max_w_full()
+            .truncate()
+            .text_size(px(SOURCE_LABEL_FONT_SIZE as f32))
+            .line_height(px(SOURCE_LABEL_LINE_HEIGHT as f32))
+            .text_color(white_a(STATUS_LABEL_OPACITY))
+            .child(status);
+        let status = if state.version.is_some_and(|v| v.count >= 2) {
+            status
+                .id("music-version-next")
+                .cursor_pointer()
+                .on_click(cx.listener(|view, _, _, cx| {
+                    let s = &view.shared;
+                    // 換版本是整份歌詞換掉：直接跳到目前行，不從舊版本的位置捲過去。
+                    s.lyric_scroll.borrow_mut().jump = true;
+                    s.controller.next_version();
+                    // 事件工作稍後才把快照標為過期；這裡先標，跳躍才不會被舊歌詞的一格用掉。
+                    s.state_dirty.set(true);
+                    cx.notify();
+                }))
+                .into_any_element()
+        } else {
+            status.into_any_element()
+        };
         let mut source = div()
             .flex_1()
             .flex_basis(px(CONTROL_ROW_HEIGHT as f32))
@@ -968,9 +1057,11 @@ impl MusicView {
             .h(px(CONTROL_ROW_HEIGHT as f32))
             .overflow_hidden()
             .flex()
-            .flex_row()
-            .items_center();
-        if let Some(label) = s.state().lyrics_url.as_deref().and_then(source_label) {
+            .flex_col()
+            .items_start()
+            .justify_center()
+            .child(status);
+        if let Some(label) = state.lyrics_url.as_deref().and_then(source_label) {
             let host = label
                 .strip_suffix(SOURCE_LABEL_SUFFIX)
                 .unwrap_or(&label)
@@ -1013,8 +1104,61 @@ impl MusicView {
             .items_center()
             .child(source)
             .child(buttons)
-            .child(div().flex_1())
+            .child(self.offset_controls(state.version))
             .child(fold)
+            .into_any_element()
+    }
+
+    /// 按鈕群與折疊開關之間的彈性區：顯示時間軸歌詞時放 `−`、目前偏移（點一下歸零）、`＋`，否則空白。
+    /// ＋ 讓歌詞提早出現；按住 Option 點走大步（見 [`offset_step`]）。`min_w_0` 加裁切讓這一區的寬度
+    /// 只由 flex 分配，內容不會推擠按鈕群。
+    fn offset_controls(&self, version: Option<VersionInfo>) -> AnyElement {
+        let area = div()
+            .flex_1()
+            .min_w_0()
+            .h(px(CONTROL_ROW_HEIGHT as f32))
+            .overflow_hidden()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_center();
+        let Some(version) = version else {
+            return area.into_any_element();
+        };
+        let cell = |id: &'static str, width: f64, text: SharedString| {
+            div()
+                .id(id)
+                .w(px(width as f32))
+                .h(px(CONTROL_ROW_HEIGHT as f32))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .text_size(px(SOURCE_LABEL_FONT_SIZE as f32))
+                .line_height(px(SOURCE_LABEL_LINE_HEIGHT as f32))
+                .text_color(white_a(STATUS_LABEL_OPACITY))
+                .child(text)
+        };
+        // 控制器的三個版本動作要在主執行緒呼叫；點擊回呼就在主執行緒。
+        let step = |id: &'static str, glyph: &'static str, sign: f64| {
+            let controller = self.shared.controller.clone();
+            cell(id, OFFSET_BUTTON_WIDTH, glyph.into()).on_click(move |event, _, _| {
+                controller.nudge_offset(sign * offset_step(event.modifiers().alt))
+            })
+        };
+        let controller = self.shared.controller.clone();
+        area.child(step("music-offset-minus", OFFSET_MINUS_GLYPH, -1.0))
+            .child(
+                cell(
+                    "music-offset-reset",
+                    OFFSET_VALUE_WIDTH,
+                    offset_label(version.offset).into(),
+                )
+                .on_click(move |_, _, _| controller.reset_offset()),
+            )
+            .child(step("music-offset-plus", OFFSET_PLUS_GLYPH, 1.0))
             .into_any_element()
     }
 
