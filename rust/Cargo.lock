@@ -3317,7 +3317,7 @@ dependencies = [
 
 [[package]]
 name = "musicat-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures-channel",
  "futures-executor",
@@ -3334,7 +3334,7 @@ dependencies = [
 
 [[package]]
 name = "musicat-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ferrous-opencc",
  "futures-util",
@@ -3346,7 +3346,7 @@ dependencies = [
 
 [[package]]
 name = "musicat-platform-macos"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "block2",
@@ -3363,11 +3363,11 @@ dependencies = [
 
 [[package]]
 name = "musicat-platform-windows"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "musicat-shell"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-task",
  "futures-channel",
